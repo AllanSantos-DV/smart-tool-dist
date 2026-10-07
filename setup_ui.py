@@ -397,9 +397,18 @@ _PAGE_TEMPLATE = """<!doctype html>
   .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
   label { display: block; font-size: .8rem; font-weight: 600; margin-bottom: 4px; }
   .hint { display: block; font-size: .76rem; color: var(--muted); margin-top: 3px; }
-  select, input[type=text], input[type=url], input[type=number], input[type=password] {
+  select, input:not([type]), input[type=text], input[type=url], input[type=number], input[type=password] {
     width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
-    background: var(--bg); color: var(--ink); font: .84rem var(--mono); min-width: 0; max-width: 100%; }
+    background-color: var(--bg); color: var(--ink); font: .84rem var(--mono); min-width: 0; max-width: 100%; }
+  select, input[list] { appearance: none; padding-right: 34px; cursor: pointer;
+    background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+    background-position: calc(100% - 17px) 52%, calc(100% - 12px) 52%; background-size: 5px 5px; background-repeat: no-repeat; }
+  input[list] { cursor: text; }
+  input[list]::-webkit-calendar-picker-indicator { opacity: 0; cursor: pointer; }
+  select:hover, input[list]:hover { border-color: var(--muted); }
+  .code-preview { display: block; margin: 10px 0 0; padding: 12px 14px; max-height: 320px; overflow: auto; white-space: pre;
+    font: .78rem/1.5 var(--mono); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+  .plan { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
   input[type=password] { font-family: var(--body); }
   input::placeholder { color: var(--idle); }
   select:focus-visible, input:focus-visible, button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
@@ -556,10 +565,8 @@ _PAGE_TEMPLATE = """<!doctype html>
           </select>
           <span class="hint" id="hook-mode-hint">Applies to every client on the next tool call; nothing is reinstalled.</span></div>
         <div class="actions"><button type="button" id="btn-save-hook-mode">Save behavior</button></div>
-        <div id="agents-list"></div>
-        <pre class="hint" id="agents-preview" hidden></pre>
-        <div class="actions"><button type="button" id="btn-agents-confirm" hidden>Confirm and write</button></div>
         <div class="msg" id="agents-msg" role="status"></div>
+        <div id="agents-list"></div>
       </section>
 
       <section id="providers-section">
@@ -570,7 +577,10 @@ _PAGE_TEMPLATE = """<!doctype html>
           <span class="hint" id="contact-hint">Wikimedia asks tools to identify a contact in the User-Agent. It stays on this machine and is sent only to the search APIs.</span></div>
         <div class="actions"><button type="button" id="btn-save-contact">Save contact</button></div>
         <div class="msg" id="contact-msg" role="status"></div>
-        <div id="providers-list"></div>
+        <div class="field" style="margin-top:18px"><label for="provider-select">Provider</label>
+          <select id="provider-select"></select>
+          <span class="hint">Pick a provider to see its free tier and set or remove your key for it.</span></div>
+        <div id="provider-panel"></div>
       </section>
     </div>
   </div>
@@ -643,8 +653,10 @@ function renderGatewayFields() {
   for (const field of (adapter || { fields: [] }).fields) {
     const wrap = document.createElement("div");
     wrap.className = "field";
-    wrap.innerHTML = `<label></label><input autocomplete="off" spellcheck="false"><span class="hint"></span>`;
+    wrap.innerHTML = `<label></label><input type="text" autocomplete="off" spellcheck="false"><span class="hint"></span>`;
     const input = wrap.querySelector("input");
+    input.id = "gateway-field-" + field.name;
+    wrap.querySelector("label").htmlFor = input.id;
     wrap.querySelector("label").textContent = field.label + (field.required ? "" : " (optional)");
     input.dataset.field = field.name;
     input.dataset.secret = field.secret ? "1" : "";
@@ -831,7 +843,6 @@ $("btn-save-local-models").addEventListener("click", async () => {
   }
 });
 
-let agentsPlan = null;
 async function loadAgents() {
   try {
     const resp = await fetch("/setup/integration");
@@ -847,7 +858,9 @@ async function loadAgents() {
       const mcp = item.mcp_url ? "MCP registered: " + item.mcp_url : "smart-tool MCP not registered in this client";
       const hook = item.hook_error ? "Hook unreadable: " + item.hook_error : item.hook ? "Hook installed and up to date" : "Hook missing or outdated";
       row.innerHTML = `<div class="provider-head"><strong></strong><span class="state"></span></div><p class="hint mcp"></p><p class="hint mono cmd"></p><p class="hint file"></p>
-        <div class="actions"><button type="button" class="register">Register MCP</button><button type="button" class="hook">Install or update hook</button></div>`;
+        <div class="actions"><button type="button" class="register">Register MCP</button><button type="button" class="hook">Install or update hook</button></div>
+        <div class="plan" hidden><span class="hint plan-file"></span><pre class="code-preview"></pre>
+          <div class="actions"><button type="button" class="confirm">Confirm and write</button><button type="button" class="quiet cancel">Cancel</button></div></div>`;
       row.querySelector("strong").textContent = item.label;
       row.querySelector(".state").textContent = hook;
       row.querySelector(".mcp").textContent = mcp;
@@ -862,34 +875,37 @@ async function loadAgents() {
           const result = await post("/setup/integration", { client: item.client, action: "register_mcp" });
           setMsg("agents-msg", "ok", "MCP registered with: " + result.command + ". Reconnect open sessions (/mcp).");
           await loadAgents();
-$("btn-save-hook-mode").addEventListener("click", async () => {
-  try {
-    await post("/setup/integration", { action: "hook_mode", mode: $("sel-hook-mode").value });
-    setMsg("agents-msg", "ok", "Hook behavior saved; it applies on the next tool call.");
-    await loadAgents();
-  } catch (error) {
-    setMsg("agents-msg", "error", error.message);
-  }
-});
         } catch (error) {
           setMsg("agents-msg", "error", error.message);
           register.disabled = false;
         }
       });
       const button = row.querySelector(".hook");
+      const plan = row.querySelector(".plan");
       button.hidden = Boolean(item.hook);
       button.addEventListener("click", async () => {
         setMsg("agents-msg", "", "Preparing the change…");
         try {
-          agentsPlan = { client: item.client, ...(await post("/setup/integration", { client: item.client, action: "preview" })) };
-          $("agents-preview").textContent = item.file + "\\n" + JSON.stringify(agentsPlan.change, null, 2);
-          $("agents-preview").hidden = false;
-          $("btn-agents-confirm").hidden = false;
-          setMsg("agents-msg", "", "Review the entry above; the file is backed up before writing.");
+          const preview = await post("/setup/integration", { client: item.client, action: "preview" });
+          row.querySelector(".plan-file").textContent = "Entry added to " + preview.file + " (the file is backed up first):";
+          row.querySelector(".code-preview").textContent = JSON.stringify(preview.change, null, 2);
+          plan.hidden = false;
+          button.hidden = true;
+          setMsg("agents-msg", "", "");
+          row.querySelector(".confirm").onclick = async () => {
+            try {
+              const result = await post("/setup/integration", { client: item.client, action: "install", token: preview.token });
+              setMsg("agents-msg", "ok", item.label + ": hook written. Backup: " + (result.backup || "new file") + (result.after_install ? ". " + result.after_install : ""));
+              await loadAgents();
+            } catch (error) {
+              setMsg("agents-msg", "error", error.message);
+            }
+          };
         } catch (error) {
           setMsg("agents-msg", "error", error.message);
         }
       });
+      row.querySelector(".cancel").addEventListener("click", () => { plan.hidden = true; button.hidden = false; });
       list.appendChild(row);
     }
   } catch (error) {
@@ -897,14 +913,10 @@ $("btn-save-hook-mode").addEventListener("click", async () => {
   }
 }
 loadAgents();
-$("btn-agents-confirm").addEventListener("click", async () => {
-  if (!agentsPlan) return;
+$("btn-save-hook-mode").addEventListener("click", async () => {
   try {
-    const result = await post("/setup/integration", { client: agentsPlan.client, action: "install", token: agentsPlan.token });
-    setMsg("agents-msg", "ok", "Hook written. Backup: " + (result.backup || "new file") + (result.after_install ? ". " + result.after_install : ""));
-    agentsPlan = null;
-    $("agents-preview").hidden = true;
-    $("btn-agents-confirm").hidden = true;
+    await post("/setup/integration", { action: "hook_mode", mode: $("sel-hook-mode").value });
+    setMsg("agents-msg", "ok", "Hook behavior saved; it applies on the next tool call.");
     await loadAgents();
   } catch (error) {
     setMsg("agents-msg", "error", error.message);
@@ -946,8 +958,7 @@ function providerCard(name, info) {
       try {
         const data = await post("/setup/providers", { provider: name, action, ...(action === "save" ? { api_key: input.value.trim() } : {}) });
         input.value = "";
-        await loadProviders();
-        setMsg(name + "-msg", "ok", action === "save" ? `Key accepted by the provider (${data.validated_results} result(s) in the test) and protected on this Windows machine.` : "Key removed; free tier active.");
+        await loadProviders(action === "save" ? `Key accepted by the provider (${data.validated_results} result(s) in the test) and protected on this Windows machine.` : "Key removed; free tier active.");
       } catch (error) {
         setMsg(msg.id, "error", error.message);
         button.disabled = false;
@@ -966,13 +977,27 @@ $("btn-save-contact").addEventListener("click", async () => {
   }
 });
 
-async function loadProviders() {
-  const list = $("providers-list");
+let providers = {};
+function showProvider(message) {
+  const name = $("provider-select").value;
+  $("provider-panel").replaceChildren(...(providers[name] ? [providerCard(name, providers[name])] : []));
+  if (message) setMsg(name + "-msg", "ok", message);
+}
+$("provider-select").addEventListener("change", () => showProvider());
+
+async function loadProviders(message) {
+  const list = $("provider-panel");
   try {
     const resp = await fetch("/setup/providers");
     const data = await resp.json();
     if (!resp.ok || data.error) throw new Error(data.error);
-    list.replaceChildren(...Object.entries(data.providers).map(([name, info]) => providerCard(name, info)));
+    providers = data.providers;
+    const select = $("provider-select");
+    const chosen = select.value;
+    select.replaceChildren(...Object.entries(providers).map(([name, info]) =>
+      new Option(info.label + " · " + ((providerLabels[info.status] || [null, info.status])[1]), name)));
+    if (chosen && providers[chosen]) select.value = chosen;
+    showProvider(message);
     if (document.activeElement !== $("contact-input")) $("contact-input").value = data.contact;
     $("contact-hint").textContent = "Sent as: " + data.user_agent;
   } catch (error) {

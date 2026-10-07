@@ -1,6 +1,6 @@
 {
   "name": "@allansantos-dev/smart-tool",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharper tools than their built-in search. Windows.",
   "license": "Apache-2.0",
   "author": "Allan Santos",

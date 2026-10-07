@@ -133,7 +133,7 @@ def _run(args, *, cwd=None, label="Web dependency", idle_s=600, stream=False, at
         except RuntimeError as exc:
             if attempt == attempts:
                 raise
-            print(f"{label}: {exc}; trying again.", flush=True)
+            print(f"{exc}; trying again.", flush=True)
 
 
 def _run_once(args, cwd, env, flags, label, idle_s, stream):
@@ -179,8 +179,10 @@ def _run_once(args, cwd, env, flags, label, idle_s, stream):
             time.sleep(0.5)
         reader.join(timeout=10)
         if process.returncode:
-            raise RuntimeError(f"{' '.join(map(str, args[:3]))} failed (exit {process.returncode}): "
-                               + "\n".join(tail)[-1500:])
+            if not stream:
+                for line in list(tail)[-15:]:
+                    print(f"{label}: {line}", flush=True)
+            raise RuntimeError(f"{label} failed (exit {process.returncode}): {tail[-1] if tail else 'no output'}")
 
 
 def _check():
@@ -193,6 +195,8 @@ def _check():
         "angular_parser":bool(node and ANGULAR_PARSER.is_file()),
         "browser_python": BROWSER_PYTHON.is_file(),
         "browser_packages": False,
+        "camoufox_browser": False,
+        "chromium_browser": False,
     }
     if status["browser_python"]:
         try:
@@ -203,7 +207,34 @@ def _check():
             status["browser_packages"] = result.returncode == 0
         except subprocess.TimeoutExpired:
             status["browser_packages"] = False
+    if status["browser_packages"]:
+        status.update(_browser_executables())
     return status
+
+
+_BROWSERS_PROBE = """
+import json, os
+from camoufox.pkgman import LAUNCH_FILE, OS_NAME, camoufox_path
+from playwright.sync_api import sync_playwright
+found = {}
+try:
+    found["camoufox_browser"] = os.path.isfile(os.path.join(camoufox_path(download_if_missing=False), LAUNCH_FILE[OS_NAME]))
+except Exception:
+    found["camoufox_browser"] = False
+with sync_playwright() as playwright:
+    found["chromium_browser"] = os.path.isfile(playwright.chromium.executable_path)
+print(json.dumps(found))
+"""
+
+
+def _browser_executables():
+    """Both browsers must exist on disk: a download tool reporting success is not enough."""
+    try:
+        result = subprocess.run([str(BROWSER_PYTHON), "-c", _BROWSERS_PROBE], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", check=False, timeout=60)
+        return json.loads(result.stdout.strip().splitlines()[-1])
+    except (subprocess.TimeoutExpired, ValueError, IndexError):
+        return {"camoufox_browser": False, "chromium_browser": False}
 
 
 def _link_existing_browser(existing, link):
@@ -268,9 +299,10 @@ def main():
                         help="Reuse an existing venv without duplicating files (useful when disk is low)")
     args = parser.parse_args()
     if args.check:
-        for name, ready in _check().items():
+        status = _check()
+        for name, ready in status.items():
             print(f"{name}: {'ok' if ready else 'missing'}")
-        return 0 if all(_check().values()) else 1
+        return 0 if all(status.values()) else 1
     try:
         install(args.reuse_browser_runtime)
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
