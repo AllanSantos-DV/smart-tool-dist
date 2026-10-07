@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "name": "smart-tool-web-adapters",
+  "version": "0.9.0",
+  "description": "Adaptadores Node empacotados com a Smart Tool",
+  "dependencies": {
+    "@angular/compiler": "20.3.0",
+    "java-parser": "3.0.1",
+    "open-websearch": "2.1.11",
+    "typescript": "5.9.3"
+  }
+}

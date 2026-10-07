@@ -1,0 +1,32 @@
+Smart Tool
+Copyright 2026 Allan Santos
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Smart Tool does not bundle third-party code. The installer downloads the components below from their official
+sources into the installation folder or the user's profile; each keeps its own license.
+
+Python packages (installation venv, from PyPI)
+- ddgs (MIT)
+- trafilatura (Apache-2.0)
+- pystray (LGPL-3.0; used unmodified as a library)
+- Pillow (MIT-CMU)
+- PyYAML (MIT)
+
+Browser runtime (web_adapters/browser/.venv, from PyPI and the projects' download servers)
+- camoufox Python package (MIT) and the Camoufox browser, a Firefox fork (MPL-2.0), fetched by `camoufox fetch`
+- crawl4ai (Apache-2.0), https://github.com/unclecode/crawl4ai: page rendering is powered by Crawl4AI
+- Playwright (Apache-2.0) and the Chromium build it installs (BSD-style, see https://www.chromium.org)
+
+Node runtime and packages (web_adapters/node, from nodejs.org and npm)
+- Node.js, downloaded only when no supported Node is installed (MIT and bundled licenses)
+- open-websearch (Apache-2.0)
+- typescript (Apache-2.0)
+- java-parser (Apache-2.0)
+- @angular/compiler (MIT)
+- their dependencies as pinned in web_adapters/node/package-lock.json (MIT, ISC, BSD and Apache-2.0)
+
+Web search sources
+Smart Tool queries public search engines and APIs (DuckDuckGo, Yahoo, Wikipedia, Exa, Parallel, Keenable, Google and
+Startpage through a local browser, and optionally Tavily and Firecrawl with your own key). Using them is subject to
+each service's terms of use; free tiers are rate limited per IP address.

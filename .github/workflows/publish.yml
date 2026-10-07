@@ -1,0 +1,35 @@
+# Built by the private repository's release.yml; publishes the tagged package to npm with provenance (trusted publishing).
+
+name: Publish to npm
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Node 24 ships npm 11.5+, required for trusted publishing; no registry-url so OIDC is used.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Tag matches package.json
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
+
+      - name: Publish
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if npm view "@allansantos-dev/smart-tool@$version" version >/dev/null 2>&1; then
+            echo "::notice::@allansantos-dev/smart-tool@$version is already on npm; nothing to publish."
+          else
+            npm publish --provenance
+          fi

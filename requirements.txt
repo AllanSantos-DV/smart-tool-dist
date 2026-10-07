@@ -1,0 +1,8 @@
+pystray
+Pillow
+PyYAML
+ddgs==9.16.0
+trafilatura==2.3.0
+# Mapas JS/TS: TypeScript 5.9.3 no runtime Node (web_adapters/node/package-lock.json).
+# Mapas Java/Angular: java-parser 3.0.1 e @angular/compiler 20.3.0 no mesmo runtime Node.
+# DOCX: extração com zipfile + ElementTree (stdlib; sem Office/macros/rede).

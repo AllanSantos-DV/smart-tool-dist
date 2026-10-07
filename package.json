@@ -1,0 +1,35 @@
+{
+  "name": "@allansantos-dev/smart-tool",
+  "version": "0.9.0",
+  "description": "Local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharper tools than their built-in search. Windows.",
+  "license": "Apache-2.0",
+  "author": "Allan Santos",
+  "homepage": "https://allansantos-dv.github.io/smart-tool/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AllanSantos-DV/smart-tool-dist.git"
+  },
+  "keywords": [
+    "mcp",
+    "claude-code",
+    "codex",
+    "semantic-search",
+    "web-search",
+    "coding-agent"
+  ],
+  "bin": {
+    "smart-tool": "bin/smart-tool.mjs"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
