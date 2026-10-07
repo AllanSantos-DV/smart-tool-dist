@@ -3,6 +3,7 @@ import argparse
 import filecmp
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,10 @@ import paths
 
 SOURCE = Path(__file__).resolve().parent
 DEFAULT_TARGET = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "Programs" / "SmartTool"
+TASK_NAME = "SmartTool-Tray"
+ENTRY_SCRIPTS = ("tray.py", "smart_tool_daemon.py", "pretool_router.py")
+STARTUP_SCRIPT = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "Microsoft" / "Windows" / \
+    "Start Menu" / "Programs" / "Startup" / "SmartTool-Tray.vbs"
 MANIFEST = ".install-manifest.json"
 REGISTRY = Path(paths.DATA_DIR) / "daemon.json"
 BLOCKED = {"__pycache__", ".token-guard", ".git", ".pytest_cache", ".data", ".artifacts", ".claude", ".vscode",
@@ -23,12 +28,6 @@ BLOCKED = {"__pycache__", ".token-guard", ".git", ".pytest_cache", ".data", ".ar
 PACKAGE_ONLY = {"bin", "package.json", ".npmignore"}
 REQUIRED_TOOLS = {"smart_search", "smart_search_result", "web_search", "project_manage"}
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-_FIND = ("$tray = $env:SMART_TRAY.ToLowerInvariant(); $daemon = $env:SMART_DAEMON.ToLowerInvariant(); "
-         "Get-CimInstance Win32_Process -Filter \"Name = 'pythonw.exe' OR Name = 'python.exe'\" | "
-         "Where-Object { $_.CommandLine -and ($_.CommandLine.ToLowerInvariant().Contains($tray) -or "
-         "$_.CommandLine.ToLowerInvariant().Contains($daemon)) }")
-
-
 def ships(rel):
     parts = Path(rel).parts
     *folders, name = parts
@@ -56,16 +55,41 @@ def powershell(script, env=None, timeout=30):
                           capture_output=True, text=True, timeout=timeout)
 
 
+def _processes():
+    """(pid, command line) of every python/pythonw process."""
+    listed = powershell("Get-CimInstance Win32_Process -Filter \"Name = 'pythonw.exe' OR Name = 'python.exe'\" | "
+                        "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }").stdout
+    rows = (row.partition("\t") for row in listed.splitlines())
+    return [(int(pid), line) for pid, _tab, line in rows if pid.strip().isdigit()]
+
+
+def _script_folder(script):
+    path = Path(script)
+    return path.parent.parent if path.name == "pretool_router.py" else path.parent
+
+
+def _same_folder(path, folder):
+    """Compares through resolve(), which turns 8.3 short and mixed spellings into the long name."""
+    try:
+        return path.resolve() == folder.resolve()
+    except OSError:
+        return False
+
+
 def stop_processes(target):
-    env = {"SMART_TRAY": str(target / "tray.py"), "SMART_DAEMON": str(target / "smart_tool_daemon.py")}
-    powershell(_FIND + " | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }", env=env)
+    def running():
+        return [pid for pid, line in _processes() for script in _script_paths(line)
+                if Path(script).name != "pretool_router.py" and _same_folder(_script_folder(script), target)]
+
+    for pid in running():
+        powershell(f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue")
     deadline = time.monotonic() + 10
     while True:
-        left = powershell("@(" + _FIND + ").Count", env=env).stdout.strip()
-        if left == "0":
+        left = running()
+        if not left:
             return
         if time.monotonic() > deadline:
-            raise RuntimeError(f"Could not close the running Smart Tool ({left or '?'} process(es) still active).")
+            raise RuntimeError(f"Could not close the running Smart Tool ({len(left)} process(es) still active).")
         time.sleep(0.5)
 
 
@@ -84,6 +108,79 @@ def _daemon_up():
             return response.status == 200
     except (OSError, ValueError, KeyError):
         return False
+
+
+def hook_files():
+    claude = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    return claude / "settings.json", Path.home() / ".codex" / "hooks.json"
+
+
+def _script_paths(text):
+    """Absolute paths ending in an entry script, as written in text, tried from every drive letter (paths may hold
+    spaces)."""
+    script = re.compile(r'[^"\r\n]*?(?:' + "|".join(map(re.escape, ENTRY_SCRIPTS)) + ")")
+    for drive in re.finditer(r"[A-Za-z]:[\\/]", text):
+        found = script.match(text, drive.start())
+        if found:
+            yield found.group(0)
+
+
+def _install_folder(script):
+    folder = _script_folder(script)
+    try:
+        return folder.resolve() if (folder / MANIFEST).is_file() and (folder / "smart_tool_daemon.py").is_file() else None
+    except OSError:
+        return None
+
+
+def _task_definition():
+    result = subprocess.run(["schtasks", "/Query", "/TN", TASK_NAME, "/XML"], capture_output=True, text=True,
+                            timeout=20)
+    return result.stdout if result.returncode == 0 else ""
+
+
+def other_installs(target):
+    """Installer-made Smart Tool folders other than target, found through what still runs or points at them: tray and
+    daemon processes, the logon task or Startup script, and agent hook commands."""
+    texts = [line for _pid, line in _processes()] + [_task_definition()]
+    texts += [path.read_text(encoding="utf-8", errors="replace") for path in (STARTUP_SCRIPT, *hook_files())
+              if path.is_file()]
+    folders = {_install_folder(script) for text in texts for script in _script_paths(text)}
+    return sorted(folder for folder in folders
+                  if folder and not _same_folder(folder, target) and not _same_folder(folder, SOURCE))
+
+
+def _repointed(text, folder, target):
+    """text with each spelling of folder found in front of an entry script (long, 8.3 or mixed) replaced by target."""
+    for script in set(_script_paths(text)):
+        cut = len(Path(script).name) + 1 + (len("hooks") + 1 if Path(script).name == "pretool_router.py" else 0)
+        spelled = script[:-cut]
+        if _same_folder(Path(spelled), folder):
+            text = text.replace(spelled, target.as_posix() if "/" in spelled else str(target))
+    return text
+
+
+def remove_other_installs(target):
+    """An older installation in another folder keeps the port and the hooks: stop it, point the hooks at target and
+    delete its program folder. Its state folders are left alone."""
+    removed = []
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for folder in other_installs(target):
+        print(f"Older Smart Tool installation found at {folder}; removing it.")
+        stop_processes(folder)
+        for path in hook_files():
+            original = path.read_text(encoding="utf-8") if path.is_file() else ""
+            text = _repointed(original, folder, target)
+            if text != original:
+                shutil.copy2(path, path.with_name(f"{path.name}.smart-tool-backup-{stamp}"))
+                path.write_text(text, encoding="utf-8")
+                print(f"Hooks in {path} now point to {target}.")
+        startup = STARTUP_SCRIPT.read_text(encoding="utf-8", errors="replace") if STARTUP_SCRIPT.is_file() else ""
+        if any(_same_folder(_script_folder(script), folder) for script in _script_paths(startup)):
+            STARTUP_SCRIPT.unlink()
+        shutil.rmtree(folder)
+        removed.append(folder)
+    return removed
 
 
 def copy_files(target, files, backup, changed, removed):
@@ -105,6 +202,10 @@ def copy_files(target, files, backup, changed, removed):
             (backup / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.move(target / rel, backup / rel)
             removed.append(rel)
+            folder = (target / rel).parent
+            while folder != target and not any(folder.iterdir()):
+                folder.rmdir()
+                folder = folder.parent
     (target / MANIFEST).write_text(json.dumps({"installed_at": time.time(), "source": str(SOURCE), "files": files},
                                               indent=1), encoding="utf-8")
 
@@ -209,6 +310,7 @@ def main():
     existed = (target / "smart_tool_daemon.py").is_file()
     print(("Updating" if existed else "Installing") + f" Smart Tool at {target} ({len(files)} files from {SOURCE})")
     target.mkdir(parents=True, exist_ok=True)
+    remove_other_installs(target)
     stop_processes(target)
     if not args.no_start:
         wait_port_free()

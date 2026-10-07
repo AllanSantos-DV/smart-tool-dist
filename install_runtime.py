@@ -5,6 +5,7 @@ Uso: python install_runtime.py [--check]
 Não altera ~/.claude nem instala pacotes npm globalmente.
 """
 import argparse
+import collections
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import venv
@@ -114,39 +116,71 @@ def _install_node():
     print(f"Node {version} installed inside Smart Tool.")
 
 
-def _run(args, *, cwd=None, label="Web dependency", timeout_s=600):
+def _run(args, *, cwd=None, label="Web dependency", idle_s=600, stream=False, attempts=1):
+    """Runs a step with UTF-8 output and closed stdin (a prompt fails at once instead of hanging); it is stopped only
+    after idle_s without any output, and stream shows the output live."""
     env = os.environ.copy()
+    env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     if NODE_RUNTIME.is_dir():
         env["PATH"] = str(NODE_RUNTIME) + os.pathsep + env.get("PATH", "")
     flags = (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
-    print(f"{label}: starting...", flush=True)
-    started = time.monotonic()
-    process = subprocess.Popen(args, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True, encoding="utf-8",
-                               errors="replace", creationflags=flags)
-    while True:
-        remaining = timeout_s - (time.monotonic() - started)
-        if remaining <= 0:
-            if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                               capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            else:
-                process.kill()
-            try:
-                process.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.communicate(timeout=5)
-            raise RuntimeError(f"{label} exceeded {timeout_s}s; check network, proxy and access to the package registry.")
+    for attempt in range(1, attempts + 1):
+        print(f"{label}: starting{f' (attempt {attempt} of {attempts})' if attempt > 1 else ''}...", flush=True)
         try:
-            stdout, stderr = process.communicate(timeout=min(30, remaining))
-            break
-        except subprocess.TimeoutExpired:
-            print(f"{label}: waiting for {int(time.monotonic() - started)}s...", flush=True)
-    if process.returncode:
-        detail = (stderr or stdout).strip()[-1500:]
-        raise RuntimeError(f"{' '.join(map(str, args[:3]))} failed: {detail}")
-    print(f"{label}: done.", flush=True)
+            _run_once(args, cwd, env, flags, label, idle_s, stream)
+            print(f"{label}: done.", flush=True)
+            return
+        except RuntimeError as exc:
+            if attempt == attempts:
+                raise
+            print(f"{label}: {exc}; trying again.", flush=True)
+
+
+def _run_once(args, cwd, env, flags, label, idle_s, stream):
+    with subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                          errors="replace", creationflags=flags) as process:
+        tail = collections.deque(maxlen=40)
+        last_output = [time.monotonic()]
+        shown = {"stage": None, "tens": -1}
+
+        def pump():
+            for line in process.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                tail.append(line)
+                last_output[0] = time.monotonic()
+                percent = re.match(r"(.*?)(\d{1,3})%$", line)
+                if percent:
+                    stage, tens = percent.group(1), int(percent.group(2)) // 10
+                    if stage == shown["stage"] and tens <= shown["tens"]:
+                        continue
+                    shown.update(stage=stage, tens=tens)
+                if stream:
+                    print(f"{label}: {line}", flush=True)
+
+        reader = threading.Thread(target=pump, daemon=True)
+        reader.start()
+        started = noted = time.monotonic()
+        while process.poll() is None:
+            now = time.monotonic()
+            if now - last_output[0] > idle_s:
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                   capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                else:
+                    process.kill()
+                process.wait(timeout=10)
+                raise RuntimeError(f"{label} stopped: no output for {idle_s}s; last output: {tail[-1] if tail else 'none'}")
+            if not stream and now - noted >= 30:
+                noted = now
+                print(f"{label}: waiting for {int(now - started)}s...", flush=True)
+            time.sleep(0.5)
+        reader.join(timeout=10)
+        if process.returncode:
+            raise RuntimeError(f"{' '.join(map(str, args[:3]))} failed (exit {process.returncode}): "
+                               + "\n".join(tail)[-1500:])
 
 
 def _check():
@@ -199,7 +233,7 @@ def install(reuse_browser_runtime=None):
         node, npm = _node_commands()
     if not all(path.is_file() for path in (OPEN_WEBSEARCH_CLI,TYPESCRIPT_PARSER,JAVA_PARSER,ANGULAR_PARSER)):
         _run([npm, "ci", "--omit=dev", "--no-audit", "--no-fund"], cwd=NODE_DIR,
-             label="Web adapters and code parser via npm", timeout_s=300)
+             label="Web adapters and code parser via npm", idle_s=300)
     if reuse_browser_runtime:
         existing = Path(reuse_browser_runtime).expanduser().resolve()
         if not (existing / "Scripts" / "python.exe").is_file():
@@ -214,13 +248,13 @@ def install(reuse_browser_runtime=None):
     if not _check()["browser_packages"]:
         _run([str(BROWSER_PYTHON), "-m", "pip", "install", "--disable-pip-version-check",
               "--no-input", "-r", str(BROWSER_DIR / "requirements.txt")],
-             label="Camoufox and Crawl4AI via pip", timeout_s=600)
+             label="Camoufox and Crawl4AI via pip", idle_s=600)
     # Camoufox usa Firefox modificado; Crawl4AI usa Chromium via Playwright.
     if not reuse_browser_runtime:
-        _run([str(BROWSER_PYTHON), "-m", "camoufox", "fetch"],
-             label="Camoufox browser", timeout_s=600)
+        _run([str(BROWSER_PYTHON), str(BROWSER_DIR / "fetch_camoufox.py")], label="Camoufox browser (1.3 GB)",
+             idle_s=180, stream=True, attempts=3)
         _run([str(BROWSER_PYTHON), "-m", "playwright", "install", "chromium"],
-             label="Chromium browser", timeout_s=600)
+             label="Chromium browser", idle_s=180, stream=True, attempts=3)
     status = _check()
     if not all(status.values()):
         raise RuntimeError(f"Incomplete web runtime: {status}")

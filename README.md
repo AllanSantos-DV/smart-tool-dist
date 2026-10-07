@@ -17,8 +17,9 @@ are cheaper, or just tells the agent what Smart Tool would do.
 ## Requirements
 
 - Windows 10 or 11 (x64) and Node.js 18 or newer for `npx`. Python is not needed: the installer brings its own.
-- About 1 GB of downloads on first install (Python 3.12 and its packages, Node.js when no supported version is
-  installed, the Camoufox and Chromium browsers used for pages that need JavaScript).
+- About 2 GB of downloads and 4 GB of disk on first install: Python 3.12 and its packages, Node.js when no
+  supported version is installed, and the browsers for pages that need JavaScript (Camoufox alone is a 1.3 GB
+  download; the installer shows its progress).
 - An OpenAI-compatible model API for embeddings and small chat calls (OpenAI, OpenRouter, a LiteLLM proxy, Ollama...).
   Web search works without it; smart_search falls back to lexical search.
 

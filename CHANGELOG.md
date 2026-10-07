@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.1 - beta
+
+- Installer on a regular Windows code page (cp1252): the steps' output was garbled or crashed the step; every child
+  process now writes UTF-8.
+- Camoufox download (1.3 GB) looked stuck: its progress is shown every 50 MB, a stalled connection fails after 60 s and
+  is retried (3 attempts), and a step is stopped only after a stretch without any output instead of a fixed 10 minutes.
+  Steps run with closed stdin, so an unexpected prompt fails at once instead of waiting unseen.
+- An older installation in another folder (found through its running tray or daemon, logon task, Startup script or
+  agent hooks; only folders made by the installer) is stopped, its hooks are pointed at the new installation and its
+  program folder is removed. Its state folders are left in place.
+- Requirements now state about 2 GB of downloads and 4 GB of disk.
+
 ## 0.9.0 - beta
 
 First release for beta testers. Windows only.

@@ -74,7 +74,11 @@ async function main() {
   if (process.platform !== "win32" || process.arch !== "x64") fail(`Smart Tool runs on Windows x64 only (this is ${process.platform}-${process.arch}).`);
   await ensureUv();
   const python = ensurePython();
-  const installer = spawnSync(python, [join(PACKAGE_DIR, "install.py"), "--skip-tests", ...rest], { stdio: "inherit", cwd: PACKAGE_DIR });
+  const installer = spawnSync(python, [join(PACKAGE_DIR, "install.py"), "--skip-tests", ...rest], {
+    stdio: "inherit",
+    cwd: PACKAGE_DIR,
+    env: { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" },
+  });
   if (installer.error) fail(`the installer did not start: ${installer.error.message}`);
   process.exit(installer.status ?? 1);
 }
