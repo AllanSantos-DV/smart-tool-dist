@@ -48,6 +48,7 @@ import index_views
 import index_inventory
 import usage_meter
 import document_text
+import embedding_cache
 import model_defaults
 import project_identity
 import project_store
@@ -291,7 +292,7 @@ def _smart_search_job_payload(job_id):
     else:
         payload["error"] = job.get("error") or "Search did not complete."
         payload["resumable"] = bool(job.get("arguments"))
-    if job.get("stats"):
+    if job.get("stats") and job["stats"] != payload.get("result"):
         payload["stats"] = job["stats"]
     if job.get("failure_phase"):
         payload["failure_phase"] = job["failure_phase"]
@@ -302,10 +303,10 @@ def _smart_search_job_payload(job_id):
 TOOLS = [
     {
         "name": "project_manage",
-        "description": "Manages folders and indexing. list/status show project_id, storage, scope and jobs. graph reads the indexed view: coverage, references and static calls in Java, Angular, Python and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls. inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. Jobs via smart_search_result.",
+        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project; status shows storage, scope and jobs. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. Jobs via smart_search_result.",
         "inputSchema": {
             "type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore"]},
+                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "affected_tests"]},
                 "finding_id": {"type": "string"},
                 "reason": {"type": "string", "enum": ["false_positive", "intentional"]},
                 "note": {"type": "string"},
@@ -324,6 +325,9 @@ TOOLS = [
                 "left_view":{"type":"string"},"right_view":{"type":"string"},"relations":{"type":"boolean"},
                 "update_mode": {"type": "string", "enum": ["on_search", "eager"]},
                 "view_id": {"type": "string"}, "file_path": {"type": "string"},
+                "base": {"type": "string", "default": "HEAD", "description": "affected_tests: git revision the changes are compared with (HEAD = uncommitted work; main or origin/main for a branch)"},
+                "symbol": {"type": "string", "description": "graph: function, Class.method, class name or path::name to get its callers, calls, tests and importers"},
+                "depth": {"type": "integer", "minimum": 1, "maximum": 4, "default": 3, "description": "graph with symbol: call hops searched for tests"},
                 "project_root": {"type": "string"}, "project_id": {"type": "string"},
                 "job_id": {"type": "string"}, "watch": {"type": "boolean"},
                 "manual": {"type": "boolean"}, "force_scope": {"type": "boolean"},
@@ -1414,27 +1418,69 @@ def _find_duplicates(root, arguments, dismissed):
     return duplicates.find(root, embed, configured_model, float(similarity), include_tests, limit, dismissed, include_dismissed)
 
 
+def _with_project_id(arguments):
+    """Agents know the folder, not the id: project_root resolves to the registered project's project_id."""
+    root = arguments.get("project_root")
+    if arguments.get("project_id") or not isinstance(root, str) or arguments.get("action") in ("register", "relocate"):
+        return arguments
+    wanted = project_identity.canonical_root(root)
+    match = next((p for p in project_store.all_projects() if project_identity.canonical_root(p["root"]) == wanted), None)
+    if not match:
+        raise ValueError(f"No registered project at {root}; register it first (action=register).")
+    return {**arguments, "project_id": match["id"]}
+
+
+def _project_summary(project):
+    data = _project_payload(project)
+    index = data.get("index") or {}
+    jobs = data.get("jobs") or []
+    return {"project_id": data["id"], "name": data.get("name"), "root": data["root"], "status": data.get("status"),
+            "enabled": data.get("enabled"), "paused": data.get("paused"), "update_mode": data.get("update_mode"),
+            "files": index.get("files"), "chunks": index.get("chunks"), "last_indexed": data.get("last_indexed"),
+            "view": (data.get("view") or {}).get("label"), "active_jobs": len(data.get("active_jobs") or []),
+            "last_job": {k: jobs[0].get(k) for k in ("job_id", "status", "kind")} if jobs else None,
+            "last_error": (data.get("last_error") or None) and str(data["last_error"])[:200]}
+
+
 def _project_action(arguments):
     if not isinstance(arguments, dict):
         raise ValueError("Pass the action in a JSON object.")
+    arguments = _with_project_id(arguments)
     action = arguments.get("action", "list")
     if action == "probe":
         return _probe_index_models()
-    if action in ('graph','compare','duplicates','duplicates_dismiss','duplicates_restore'):
+    if action in ('graph','compare','duplicates','duplicates_dismiss','duplicates_restore','docs','affected_tests'):
         # Análise somente leitura pode demorar; não prende o lock global de ações.
         key=arguments.get('project_id')
         if not isinstance(key,str) or not re.fullmatch(r'[a-f0-9]{16}',key):
-            raise ValueError('Pass a valid project_id.')
+            raise ValueError('Pass project_root (the folder) or a valid project_id.')
         project=project_store.get(key)
         if not project:
             raise ValueError('Project not registered.')
         if action=='duplicates':
             return _find_duplicates(project['root'], arguments, project.get('dismissed_duplicates') or {})
+        if action=='docs':
+            import doc_check
+            include_tests=arguments.get('include_tests',False)
+            if type(include_tests) is not bool:
+                raise ValueError('include_tests must be true or false.')
+            limit=_parse_bounded_int(arguments.get('limit'),default=30,min_v=1,max_v=200,field_name='limit')
+            return doc_check.coverage(project['root'],include_tests,limit,arguments.get('view_id'))
+        if action=='affected_tests':
+            import affected_tests
+            limit=_parse_bounded_int(arguments.get('limit'),default=30,min_v=1,max_v=200,field_name='limit')
+            return affected_tests.affected(project['root'],arguments.get('base','HEAD'),limit,arguments.get('view_id'))
         if action in ('duplicates_dismiss','duplicates_restore'):
             return _change_dismissal(key, project, arguments, action == 'duplicates_dismiss')
         if action=='graph':
             import code_graph
-            return code_graph.build(project['root'],arguments.get('view_id'),file_path=arguments.get('file_path'))
+            import code_impact
+            limit=_parse_bounded_int(arguments.get('limit'),default=30,min_v=1,max_v=200,field_name='limit')
+            if arguments.get('symbol') is not None:
+                return code_impact.impact(project['root'],arguments['symbol'],arguments.get('view_id'),
+                                          arguments.get('depth',3),limit)
+            graph=code_graph.build(project['root'],arguments.get('view_id'),file_path=arguments.get('file_path'))
+            return code_impact.for_agent(graph,limit) if arguments.get('file_path') else graph
         import view_compare
         return view_compare.compare(project['root'],arguments.get('left_view'),arguments.get('right_view'),
                                     arguments.get('file_path'),arguments.get('relations',True))
@@ -1513,6 +1559,9 @@ def _project_action_locked(arguments):
         _metric("install_hook", target=result["client"], changed=result["changed"])
         return result
     if action == "list":
+        if not arguments.get("full"):
+            return {"projects": [_project_summary(p) for p in project_store.all_projects()],
+                    "detail": "Use action=status with project_id or project_root for scope, jobs and index details."}
         return {"projects": [_project_payload(p) for p in project_store.all_projects()],
                 "storage_dir": indexer.INDEX_DIR,
                 "gateway": dict(_GATEWAY_STATUS),
@@ -1526,7 +1575,7 @@ def _project_action_locked(arguments):
         return {"project": _project_payload(project)}
     key = arguments.get("project_id")
     if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{16}", key):
-        raise ValueError("Pass a valid project_id; use the list action to look it up.")
+        raise ValueError("Pass project_root (the folder) or a valid project_id.")
     project = project_store.get(key)
     if not project:
         raise ValueError("Project not registered.")
@@ -1995,10 +2044,8 @@ def _fan_out_web_search(query, num, budget_s=None, site_domains=()):
             try:
                 fut.result()
                 _record_tier_health(tier_name, success=True)
-            except (TierSkipped, browser_service_client.BrowserSkipped):
-                pass
-            except Exception:
-                _record_tier_health(tier_name, success=False)
+            except Exception as exc:
+                _record_tier_failure(tier_name, exc)
         return _cb
 
     for fut, tier_name in futures.items():
@@ -2243,8 +2290,7 @@ def _search_web_once(query, num, scope, deadline=None, assess_semantic=False,
             if not raw_results:
                 raise RuntimeError("zero results in the requested domain")
         except Exception as exc:
-            if not isinstance(exc, TierSkipped):
-                _record_tier_health(tier_name, success=False)
+            _record_tier_failure(tier_name, exc)
             errors.append(_sanitize_text(f"{tier_name}: {type(exc).__name__}: {exc}"))
             continue
         _record_tier_health(tier_name, success=True)
@@ -2278,8 +2324,7 @@ def _search_web_once(query, num, scope, deadline=None, assess_semantic=False,
             if not raw_results:
                 raise RuntimeError("zero results in the requested domain")
         except Exception as exc:
-            if not isinstance(exc, (TierSkipped, browser_service_client.BrowserSkipped)):
-                _record_tier_health(tier_name, success=False)
+            _record_tier_failure(tier_name, exc)
             errors.append(_sanitize_text(f"{tier_name}: {type(exc).__name__}: {exc}"))
             continue
         _record_tier_health(tier_name, success=True)
@@ -2588,11 +2633,24 @@ def _annotate_quick_results(rows, classification, cache=None):
     return result
 
 
-def _record_tier_health(tier_name, success):
+def _record_tier_health(tier_name, success, outcome=None):
     try:
-        web_search_health.record(tier_name, success)
+        web_search_health.record(tier_name, success, outcome)
     except Exception:
         pass  # telemetria é best-effort — nunca pode derrubar uma busca já resolvida
+
+
+def _record_tier_failure(tier_name, exc):
+    """Health entry for a failed tier call, keeping a 429, a captcha and a quota pause apart from other errors."""
+    if isinstance(exc, (TierSkipped, browser_service_client.BrowserSkipped)):
+        outcome = "paused"
+    elif isinstance(exc, WebProviderRateLimited):
+        outcome = "rate_limited"
+    elif isinstance(exc, browser_service_client.BrowserCaptcha):
+        outcome = "captcha"
+    else:
+        outcome = "failed"
+    _record_tier_health(tier_name, False, outcome)
 
 
 _is_safe_crawl_target = web_fetch.is_safe_target
@@ -3073,6 +3131,7 @@ def _tool_result(text, is_error=False):
 
 WEB_FETCH_TIMEOUT_S = 90
 WEB_FETCH_RENDER_TIMEOUT_S = 60
+WEB_FETCH_VECTOR_ROOT = os.path.join(paths.DATA_DIR, "web-fetch")
 
 
 def _render_page(url, deadline):
@@ -3083,6 +3142,30 @@ def _render_page(url, deadline):
                              min(WEB_FETCH_RENDER_TIMEOUT_S, left))
     pages = raw.get("pages") if isinstance(raw, dict) else None
     return (pages[0].get("markdown") or "") if pages else ""
+
+
+def _web_fetch_embed(texts, deadline):
+    """Vectors for the pieces of a long page and the prompt, with the pieces cached per embedding model. Fails loudly
+    without an embedding model: a long page is never cut back to its start in silence."""
+    model = local_embedder.resolve(config.load_config().get("embedding_model"), None)
+    if not model or model == indexer.LEXICAL_MODEL:
+        raise RuntimeError("This page is longer than 60,000 characters and choosing its relevant parts needs an "
+                           "embedding_model, which is not configured")
+    try:
+        token = model_client.get_token()
+        probe = _embed(model, texts[-1:], token, deadline=deadline)
+        cache = embedding_cache.VectorCache(WEB_FETCH_VECTOR_ROOT, indexer.INDEX_DIR, {
+            "purpose": "web_fetch_pieces", "model": model, "dimensions": len(probe[0])})
+        try:
+            pieces = cache.embed(texts[:-1], lambda batch: _embed(model, batch, token, deadline=deadline),
+                                 indexer.validate_vector, split=lambda unique: list(_embed_batches(unique)),
+                                 workers=indexer.EMBED_WORKERS)
+        finally:
+            cache.db.close()
+    except Exception as exc:
+        raise RuntimeError(f"This page is longer than 60,000 characters and the embedding model ({model}) that picks "
+                           f"its relevant parts failed: {type(exc).__name__}: {exc}"[:400]) from None
+    return pieces + probe
 
 
 def _web_fetch_unavailable():
@@ -3105,18 +3188,22 @@ def _handle_web_fetch(arguments):
             raise RuntimeError(f"Gateway model unavailable ({problem}).")
         deadline = started + WEB_FETCH_TIMEOUT_S
         page = web_fetch.read_page(url, deadline, _render_page)
-        text = web_fetch.answer(config.load_config()["router_model"], prompt, page, deadline)
+        selected, pieces = web_fetch.select(page["text"], prompt, lambda texts: _web_fetch_embed(texts, deadline))
+        text = web_fetch.answer(config.load_config()["router_model"], prompt, {**page, "text": selected}, deadline)
     except Exception as exc:
         web_fetch.mark_failed(str(url))
         _metric("web_fetch", error=type(exc).__name__, elapsed_s=round(time.monotonic() - started, 2))
         raise RuntimeError(f"web_fetch failed: {str(exc).rstrip('.')}. The native WebFetch is allowed for this URL for "
                            f"{web_fetch.FAILED_TTL_S // 60} min.") from None
     _metric("web_fetch", cached=page["cached"], rendered=page["rendered"], render_error=page.get("render_error"),
-            page_chars=len(page["text"]),
+            page_chars=page["chars"], read_chars=len(selected), pieces=pieces,
             answer_chars=len(text), elapsed_s=round(time.monotonic() - started, 2))
     origin = "from cache" if page["cached"] else "rendered in the browser" if page["rendered"] else "downloaded now"
     read_at = datetime.datetime.fromtimestamp(page["fetched_at"]).strftime("%Y-%m-%d %H:%M")
-    cut = "; page cut to the first 60,000 characters" if page["truncated"] else ""
+    cut = (f"; page of {page['chars']:,} characters: the {pieces} parts most related to the request were read"
+           if pieces else "")
+    if page["truncated"]:
+        cut += f"; only the first {web_fetch.PAGE_STORE_MAX_CHARS:,} characters were kept"
     return _sanitize_text(f"Source: {page['final_url']} (read at {read_at}, {origin}{cut})\n\n{text}")
 
 
@@ -3395,7 +3482,7 @@ class MCPHandler(BaseHTTPRequestHandler):
         if self.path == "/setup/projects":
             try:
                 setup_ui.require_token(self.headers)
-                self._write_json(200, _project_action({"action": "list"}))
+                self._write_json(200, _project_action({"action": "list", "full": True}))
             except setup_ui.SetupError as exc:
                 self._write_json(403, {"error": str(exc)})
             except Exception as exc:

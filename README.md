@@ -6,8 +6,8 @@ A local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharpe
 |---|---|
 | `smart_search` / `smart_search_result` | Semantic + lexical search over an indexed project, results split into code, tests and docs, with the likeliest functions per chunk |
 | `web_search` / `web_search_result` | Web search across several sources in parallel, in the query language and in English, with a cache shared across sessions; `depth="research"` runs a multi-round research loop |
-| `web_fetch` | Reads a known URL and returns only the answer to your prompt, written by a small model; pages are cached for 24 h |
-| `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage |
+| `web_fetch` | Reads a known URL and returns only the answer to your prompt, written by a small model; pages are cached for 24 h. Pages over 60,000 characters are not cut: the model reads the parts closest to the prompt (needs an `embedding_model`) |
+| `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage; `graph` with `symbol` tells what changing a function touches: callers, calls, the tests that reach it and the files that import it |
 
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
@@ -53,6 +53,31 @@ Open the setup screen from the tray icon ("Open settings") or at `http://127.0.0
    - **Redirect** (default): the native tool is denied with the reason and the Smart Tool tool to use.
    - **Advise only**: the native tool runs; the agent receives the same advice next to the result and decides.
    - **Off**: no routing.
+
+   **Documentation on edit** checks the public functions an edit touches (Python docstrings, JSDoc, Javadoc), in
+   Claude Code edits and Codex patches. Private (`_name`, `#name`, `private`), nested and override (`@Override`,
+   `@override`) functions are exempt, as in pydocstyle, eslint-plugin-jsdoc and Checkstyle, and a JSDoc above a set of
+   TypeScript overloads documents the implementation:
+   - **Remind** (default): the edit runs and the agent is told which touched functions have no docstring, and which
+     documented ones changed their signature, with their callers.
+   - **Require**: an edit that leaves a touched function without a docstring is blocked until it adds one.
+   - **Off**: no checks.
+
+   A documented function edited only in its body is not mentioned. `project_manage` with `action=docs` lists the
+   public functions still without a docstring, for documenting a project that started without them.
+
+   **Duplicate functions on edit** compares the functions an edit writes with the indexed code. **Warn** (default)
+   tells the agent when a written function has the same body as an existing one (comments, spacing and docstrings
+   ignored) or a near-identical one (only local names, strings and numbers changed), with the path and lines of the
+   original to reuse; it never blocks. Editing a function in place, overloads, tests, generated files and small
+   functions (under 5 lines or 50 tokens) are not checked. **Off** disables it.
+
+   After editing, `project_manage` with `action=affected_tests` lists the tests to run: every test file that imports a
+   changed file, directly or through other files (git diff against `base`, default `HEAD`, untracked files included),
+   plus changed tests and tests using a pytest fixture whose `conftest.py` imports the changed code, ordered with the
+   likeliest failures first, and the command to run them. Changed files are read from disk, so new files and imports
+   count before the project is reindexed. `run_all` is true, with
+   the reason, when a configuration or lockfile changed or a changed code file is outside the import graph.
 4. **Local models** (optional): if the mcp-memory embedding sidecar is installed on the machine, its local embedder
    can serve as a fallback (or preferred) embedding model.
 5. **Web search providers** work without keys on their free public tiers; add your own key for more volume. Set your

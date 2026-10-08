@@ -1,24 +1,26 @@
 """`camoufox fetch` for the installer. camoufox 0.5.6 prints a failed download and still exits 0, so the error is
-caught here and turned into a failing exit, and the browser executable must exist afterwards. Its downloads have no
-timeout (requests passes None, which also overrides socket.setdefaulttimeout), so every request gets one here: a
-stalled download fails after 60 s instead of hanging. Progress is printed as plain lines (the rich bar stays
-invisible in a pipe)."""
+caught here and turned into a failing exit, and the browser executable must exist afterwards. The 1.3 GB download
+goes through ranged_download (Range requests that resume after a dropped or stalled connection; camoufox still checks
+the sha256), its other requests get a timeout (requests passes None, which also overrides socket.setdefaulttimeout),
+and progress is printed as plain lines (the rich bar stays invisible in a pipe)."""
 import sys
+from io import BytesIO
 from pathlib import Path
 
 import camoufox.__main__ as camoufox_cli
 import requests
 from camoufox import pkgman
 
+import ranged_download
+
 TIMEOUT_S = (30, 60)
 REPORT_EVERY_MB = 50
-_webdl = pkgman.webdl
 _update = camoufox_cli.CamoufoxUpdate.update
 _get = requests.get
 failures = []
 
 
-def _reporting_webdl(url, desc=None, buffer=None, bar=True, progress_callback=None):
+def _reporter():
     reported = {"mb": -REPORT_EVERY_MB}
 
     def report(done, total):
@@ -27,7 +29,13 @@ def _reporting_webdl(url, desc=None, buffer=None, bar=True, progress_callback=No
             reported["mb"] = mb
             print(f"downloaded {mb} of {total // 1048576} MB", flush=True)
 
-    return _webdl(url, desc=desc, buffer=buffer, bar=False, progress_callback=progress_callback or report)
+    return report
+
+
+def _ranged_webdl(url, desc=None, buffer=None, bar=True, progress_callback=None):
+    buffer = BytesIO() if buffer is None else buffer
+    ranged_download.download(url, buffer, progress=progress_callback or _reporter())
+    return buffer
 
 
 def _get_with_timeout(*args, **kwargs):
@@ -53,7 +61,7 @@ def installed_executable():
 
 def main():
     requests.get = _get_with_timeout
-    pkgman.webdl = _reporting_webdl
+    pkgman.webdl = _ranged_webdl
     camoufox_cli.CamoufoxUpdate.update = _recording_update
     camoufox_cli.cli.main(["fetch"], standalone_mode=False)
     if failures:

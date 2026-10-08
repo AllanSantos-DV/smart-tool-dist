@@ -20,6 +20,8 @@ import web_document_graph
 import document_text
 
 VERSION = 2
+SOURCE_EXTENSIONS = ('.py','.java','.js','.jsx','.ts','.tsx','.mjs','.cjs','.mts','.cts','.json','.html','.htm','.css','.scss','.sass','.less','.md','.markdown')
+MAX_OVERLAY_BYTES = 1024 * 1024
 MAX_FILES = 3000
 MAX_TEXT = 24 * 1024 * 1024
 MAX_SYMBOLS = 8000
@@ -72,7 +74,7 @@ def _snapshot(path):
                       'chunks':chunks,'lines':line_count or 0,'group':posixpath.dirname(file_path) or '(root)',
                       'location_kind':document_text.location_kind(file_path),'format':posixpath.splitext(file_path)[1].lower().lstrip('.') or 'text'}
             files.append(record)
-            if not file_path.lower().endswith(('.py','.java','.js','.jsx','.ts','.tsx','.mjs','.cjs','.mts','.cts','.json','.html','.htm','.css','.scss','.sass','.less','.md','.markdown')):
+            if not file_path.lower().endswith(SOURCE_EXTENSIONS):
                 continue
             rows = conn.execute('SELECT start_line,end_line,text FROM chunks WHERE path=? ORDER BY start_line,id', (original,)).fetchall()
             text, error = reconstruct(rows)
@@ -228,19 +230,34 @@ def _python_graph(sources):
             'diagnostics':diagnostics,'parsed':list(trees),'truncated':len(symbols)>=MAX_SYMBOLS or len(dependencies)>MAX_EDGES}
 
 
+NODE_HEAP_MB = (1024, 4096)
+
+
+def _run_analyzer(script, payload, failure):
+    """Runs a Node analyzer, retrying once with a larger heap when it runs out of memory (634 TypeScript files, 2.9 MB,
+    needed more than the former fixed 512 MB)."""
+    for heap in NODE_HEAP_MB:
+        process=subprocess.run([web_search_adapters.NODE_EXECUTABLE,f'--max-old-space-size={heap}',str(Path(__file__).with_name(script))],
+            input=payload,capture_output=True,text=True,encoding='utf-8',timeout=120,
+            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        if process.returncode==0:
+            return json.loads(process.stdout)
+        if 'heap out of memory' not in (process.stderr or '') or heap==NODE_HEAP_MB[-1]:
+            break
+    detail=' (out of memory)' if 'heap out of memory' in (process.stderr or '') else ''
+    raise RuntimeError(failure+detail)
+
+
 def _javascript_graph(sources, all_paths=None):
     extensions=('.js','.jsx','.ts','.tsx','.mjs','.cjs','.mts','.cts')
     relevant={path:text for path,text in sources.items() if path.endswith(extensions+('.json','.html','.htm'))}
     if not any(path.endswith(extensions) for path in relevant):
         return {}
     try:
-        process=subprocess.run([web_search_adapters.NODE_EXECUTABLE,'--max-old-space-size=512',str(Path(__file__).with_name('code_graph_js.cjs'))],
-            input=json.dumps({'files':[{'path':path,'text':text} for path,text in relevant.items()],'paths':list(all_paths or sources)},ensure_ascii=False),
-            capture_output=True,text=True,encoding='utf-8',timeout=40,
-            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-        if process.returncode:
-            raise RuntimeError('The TypeScript analyzer did not finish. Check the local code-analysis runtime.')
-        return json.loads(process.stdout)
+        return _run_analyzer('code_graph_js.cjs',
+                             json.dumps({'files':[{'path':path,'text':text} for path,text in relevant.items()],
+                                         'paths':list(all_paths or sources)},ensure_ascii=False),
+                             'The TypeScript analyzer did not finish. Check the local code-analysis runtime.')
     except (OSError,subprocess.TimeoutExpired,ValueError,RuntimeError) as exc:
         return {'diagnostics':[{'path':'JavaScript/TypeScript','reason':str(exc)[:250]}],'parsed':[],'retryable':True}
 
@@ -249,17 +266,17 @@ def _java_graph(sources):
     files=[{'path':path,'text':text} for path,text in sources.items() if path.lower().endswith('.java')]
     if not files:return {}
     try:
-        result=subprocess.run([web_search_adapters.NODE_EXECUTABLE,'--max-old-space-size=512',str(Path(__file__).with_name('code_graph_java.mjs'))],
-            input=json.dumps({'files':files},ensure_ascii=False),capture_output=True,text=True,encoding='utf-8',timeout=40,
-            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-        if result.returncode:raise RuntimeError('The Java analyzer did not finish. Check the local runtime.')
-        return json.loads(result.stdout)
+        return _run_analyzer('code_graph_java.mjs',json.dumps({'files':files},ensure_ascii=False),
+                             'The Java analyzer did not finish. Check the local runtime.')
     except (OSError,ValueError,RuntimeError,subprocess.TimeoutExpired) as exc:
         return {'diagnostics':[{'path':'Java','reason':str(exc)[:250]}],'parsed':[],'retryable':True}
 
 
 def _analyze(path):
-    files,sources,diagnostics,truncated=_snapshot(path)
+    return _analyze_sources(*_snapshot(path))
+
+
+def _analyze_sources(files,sources,diagnostics,truncated):
     merged={'symbols':[],'dependencies':[],'calls':[],'unresolved':[],'diagnostics':diagnostics,'parsed':[]}
     retryable=False
     for output in (_python_graph(sources),_javascript_graph(sources,[f['path'] for f in files]),_java_graph(sources),web_document_graph.analyze(sources,[f['path'] for f in files])):
@@ -401,3 +418,47 @@ def build(root,view_id=None,storage_id=None,file_path=None,background=False):
                 limits={'files':MAX_FILES,'symbols':MAX_SYMBOLS,'edges':MAX_EDGES,'display_nodes_default':120},
                 languages=['Java','Angular','Python','JavaScript','TypeScript','JSX','TSX','HTML','CSS','Markdown'],cache_hit=was_cached)
     return _focus(data,file_path) if file_path else data
+
+
+def build_overlay(root,changes,view_id=None):
+    """Graph of the indexed view with the given changed files read from the working tree instead of the snapshot
+    (changes: project-relative path -> 'deleted' or any other status), so a caller right after an edit sees new files,
+    new imports and current line numbers without reindexing or embeddings. A deleted file keeps its indexed copy so
+    the files that imported it stay linked to it. Cached per snapshot and file contents."""
+    inventory=index_inventory.inspect(root,view_id)
+    if not inventory['selected']:
+        return {**inventory,'symbols':[],'dependencies':[],'calls':[],'diagnostics':[],'counts':{},'files':[]}
+    path=inventory['selected']['path'];stat=os.stat(path)
+    files,sources,diagnostics,truncated=_snapshot(path)
+    by_path={f['path']:f for f in files};overlaid=[]
+    for rel,status in sorted(changes.items()):
+        full=os.path.join(root,rel)
+        if status=='deleted' or not project_identity.within_root(root,full):
+            continue
+        try:
+            if os.path.getsize(full)>MAX_OVERLAY_BYTES:continue
+            with open(full,encoding='utf-8') as stream:text=stream.read()
+        except (OSError,UnicodeDecodeError):continue
+        by_path.setdefault(rel,{'id':rel,'path':rel,'hash':None,'size':len(text),'mtime_ns':None,'chunks':0,
+                                'lines':text.count('\n')+1,'group':posixpath.dirname(rel) or '(root)',
+                                'location_kind':document_text.location_kind(rel),
+                                'format':posixpath.splitext(rel)[1].lower().lstrip('.') or 'text'})
+        if rel.lower().endswith(SOURCE_EXTENSIONS):
+            sources[rel]=text;overlaid.append((rel,hashlib.sha1(text.encode('utf-8')).hexdigest()))
+    key=(path,stat.st_mtime_ns,stat.st_size,VERSION,'overlay',tuple(overlaid))
+    with _LOCK:
+        cached=_CACHE.get(key)
+    if cached is None:
+        if not _ANALYSIS_SLOTS.acquire(timeout=3):
+            raise RuntimeError('Two map analyses are in progress. Wait for them to finish and retry.')
+        try:
+            cached=_analyze_sources(list(by_path.values()),sources,diagnostics,truncated)
+        finally:
+            _ANALYSIS_SLOTS.release()
+        if not cached['retryable']:
+            with _LOCK:
+                _CACHE[key]=cached
+                while len(_CACHE)>3:_CACHE.popitem(last=False)
+    data=copy.deepcopy(cached)
+    data.update(selected=inventory['selected'],source='indexed_snapshot_with_working_tree',overlaid=[r for r,_h in overlaid])
+    return data

@@ -21,9 +21,17 @@ _MAX_LINES_BEFORE_ROTATE = 5000
 _LOCK = threading.Lock()
 
 
-def record(tier_name, success):
+OUTCOMES = ("ok", "failed", "rate_limited", "captcha", "paused")
+
+
+def record(tier_name, success, outcome=None):
+    """One tier call: outcome tells a provider 429 (rate_limited), a captcha and a self-imposed quota pause (paused,
+    left out of success rates) apart from an ordinary failure, so quota pressure can be read from the log."""
+    outcome = outcome or ("ok" if success else "failed")
+    if outcome not in OUTCOMES:
+        raise ValueError(f"Unknown web search outcome: {outcome}")
     os.makedirs(os.path.dirname(HEALTH_PATH), exist_ok=True)
-    entry = {"ts": time.time(), "tier": tier_name, "success": bool(success)}
+    entry = {"ts": time.time(), "tier": tier_name, "success": bool(success), "outcome": outcome}
     with _LOCK:
         with open(HEALTH_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -67,7 +75,7 @@ def _read_recent_records():
 
 
 def recent_success_rate(tier_name, window=DEFAULT_WINDOW):
-    records = [r for r in _read_recent_records() if r.get("tier") == tier_name]
+    records = [r for r in _read_recent_records() if r.get("tier") == tier_name and r.get("outcome") != "paused"]
     if not records:
         return None
     records = records[-window:]
@@ -79,7 +87,7 @@ def summary_for_tiers(tier_names, window=DEFAULT_WINDOW):
     all_records = _read_recent_records()
     summary = {}
     for name in tier_names:
-        records = [r for r in all_records if r.get("tier") == name][-window:]
+        records = [r for r in all_records if r.get("tier") == name and r.get("outcome") != "paused"][-window:]
         if not records:
             summary[name] = None
         else:

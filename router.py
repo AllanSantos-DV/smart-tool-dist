@@ -5,6 +5,7 @@ modelo pequeno se deve deixar passar ou redirecionar pra `smart_search`. Cada de
 logada em `router-metrics.jsonl` pra orientar um classificador mais fino depois, com
 base em uso real — não numa suposição a priori.
 """
+import contextvars
 import json
 import os
 import paths
@@ -17,7 +18,8 @@ import index_scope
 import indexer
 import web_search_adapters
 
-CLIENT = None
+# Per request: the daemon serves each hook call on its own thread, so a module global mixed up clients.
+CLIENT = contextvars.ContextVar("router_client", default=None)
 METRICS_PATH = os.path.join(paths.DATA_DIR, "router-metrics.jsonl")
 
 _SYSTEM_PROMPT = (
@@ -266,7 +268,7 @@ def _log_decision(tool_name, tool_input, decision, reason, extra=None):
         "tool_input": _redacted_input(tool_input),
         "decision": decision,
         "reason": reason,
-        **({"client": CLIENT} if CLIENT else {}),
+        **({"client": CLIENT.get()} if CLIENT.get() else {}),
     }
     record.update(extra or {})
     try:

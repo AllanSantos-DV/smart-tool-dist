@@ -25,7 +25,19 @@ function candidate(base) {
   const variants=[base,base.replace(/\.[cm]?jsx?$/,'.ts'),base.replace(/\.jsx?$/,'.tsx'),
     ...['.ts','.tsx','.js','.jsx','.mts','.cts','.mjs','.cjs'].map(e=>base+e),
     ...['.ts','.tsx','.js','.jsx'].map(e=>base+'/index'+e)];
-  return variants.find(name=>knownFiles.has(clean(name)));
+  const found=variants.find(name=>knownFiles.has(clean(name)));
+  return found&&clean(found);
+}
+const workspaces=new Map();
+for(const [name,file] of docs)if(name.endsWith('/package.json')&&!name.includes('/node_modules/')){try{const pkg=JSON.parse(file.text);if(typeof pkg.name==='string'&&pkg.name)workspaces.set(pkg.name,{dir:path.dirname(name),entries:[pkg.source,pkg.main,pkg.module].filter(e=>typeof e==='string')})}catch{}}
+function workspace(spec){
+  for(const [name,pkg] of workspaces){
+    if(spec!==name&&!spec.startsWith(name+'/'))continue;
+    const sub=spec.slice(name.length+1);
+    if(sub)return candidate(path.join(pkg.dir,'src',sub))||candidate(path.join(pkg.dir,sub));
+    return candidate(path.join(pkg.dir,'src/index'))||candidate(path.join(pkg.dir,'index'))||pkg.entries.map(e=>candidate(path.join(pkg.dir,e))).find(Boolean);
+  }
+  return undefined;
 }
 function resolve(spec, from) {
   if (spec.startsWith('.')) return candidate(clean(path.join(path.dirname(from),spec)));
@@ -39,6 +51,8 @@ function resolve(spec, from) {
       }
     }
   }
+  const local=workspace(spec);
+  if(local)return local;
   if(config.baseUrl)return candidate(clean(path.join(baseUrl,spec)));
   return undefined;
 }

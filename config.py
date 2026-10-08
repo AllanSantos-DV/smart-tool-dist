@@ -31,6 +31,8 @@ DEFAULT_CONFIG = {
     "site_memory_similarity_threshold": 0.35,
     "local_models": "fallback",
     "hook_mode": "redirect",
+    "doc_mode": "remind",
+    "duplicate_mode": "warn",
     "contact": "",
     "model_adapter": "",
     "model_adapter_options": {},
@@ -42,6 +44,26 @@ LOCAL_MODEL_MODES = ("fallback", "off", "prefer")
 # PreToolUse hook: redirect = deny the native tool and point to Smart Tool; advise = let it run and add the tip to the
 # agent's context; off = no routing at all.
 HOOK_MODES = ("redirect", "advise", "off")
+# Edit hook on functions without a docstring: require = deny the edit until it adds one; remind = let it run and tell
+# the agent; off = say nothing. Independent of hook_mode, which only routes searches and reads.
+DOC_MODES = ("require", "remind", "off")
+# Edit hook on functions that copy one already indexed (exact or near-identical body): warn = let the edit run and
+# point to the existing function; off = say nothing. Never blocks: near matches are leads, not defects.
+DUPLICATE_MODES = ("warn", "off")
+
+
+def doc_mode(cfg=None):
+    value = (cfg if cfg is not None else load_config()).get("doc_mode") or DEFAULT_CONFIG["doc_mode"]
+    if value not in DOC_MODES:
+        raise ValueError(f"Invalid doc_mode ({value!r}) in {CONFIG_PATH}: use require, remind or off.")
+    return value
+
+
+def duplicate_mode(cfg=None):
+    value = (cfg if cfg is not None else load_config()).get("duplicate_mode") or DEFAULT_CONFIG["duplicate_mode"]
+    if value not in DUPLICATE_MODES:
+        raise ValueError(f"Invalid duplicate_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
+    return value
 
 
 def hook_mode(cfg=None):

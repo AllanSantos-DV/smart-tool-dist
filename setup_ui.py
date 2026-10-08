@@ -177,18 +177,31 @@ def handle_integration_get():
         mode, mode_error = config.hook_mode(), ""
     except ValueError as exc:
         mode, mode_error = "", str(exc)
+    try:
+        doc_mode, doc_error = config.doc_mode(), ""
+    except ValueError as exc:
+        doc_mode, doc_error = "", str(exc)
+    try:
+        duplicate_mode, duplicate_error = config.duplicate_mode(), ""
+    except ValueError as exc:
+        duplicate_mode, duplicate_error = "", str(exc)
     return {"daemon_url": setup_origin(), "clients": clients, "hook_mode": mode, "hook_mode_error": mode_error,
-            "hook_modes": list(config.HOOK_MODES)}
+            "hook_modes": list(config.HOOK_MODES), "doc_mode": doc_mode, "doc_mode_error": doc_error,
+            "doc_modes": list(config.DOC_MODES), "duplicate_mode": duplicate_mode,
+            "duplicate_mode_error": duplicate_error, "duplicate_modes": list(config.DUPLICATE_MODES)}
 
 
 def handle_integration_save(body):
     """`hook_mode` sets redirect/advise/off for every client; `register_mcp` runs the client's CLI; hook in two steps:
     `preview` shows the exact change, `install` writes it (with backup)."""
-    if isinstance(body, dict) and body.get("action") == "hook_mode":
-        if body.get("mode") not in config.HOOK_MODES:
-            raise SetupError("Invalid mode: use redirect, advise or off.")
+    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "duplicate_mode"):
+        action = body["action"]
+        allowed = {"hook_mode": config.HOOK_MODES, "doc_mode": config.DOC_MODES,
+                   "duplicate_mode": config.DUPLICATE_MODES}[action]
+        if body.get("mode") not in allowed:
+            raise SetupError(f"Invalid mode: use {', '.join(allowed)}.")
         try:
-            config.update_config(lambda cfg: cfg.update(hook_mode=body["mode"]))
+            config.update_config(lambda cfg: cfg.update({action: body["mode"]}))
         except (OSError, config.ConfigCorruptedError) as exc:
             raise SetupError(str(exc))
         return handle_integration_get()
@@ -565,6 +578,21 @@ _PAGE_TEMPLATE = """<!doctype html>
           </select>
           <span class="hint" id="hook-mode-hint">Applies to every client on the next tool call; nothing is reinstalled.</span></div>
         <div class="actions"><button type="button" id="btn-save-hook-mode">Save behavior</button></div>
+        <div class="field" style="margin-top:16px"><label for="sel-doc-mode">Documentation on edit</label>
+          <select id="sel-doc-mode">
+            <option value="remind">Remind: the edit runs; the agent is told which touched functions lack a docstring (default)</option>
+            <option value="require">Require: an edit that leaves a touched function without a docstring is blocked until it adds one</option>
+            <option value="off">Off: no documentation checks</option>
+          </select>
+          <span class="hint">Only public functions the edit touches (private, nested and override functions are exempt, as in pydocstyle, eslint-plugin-jsdoc and Checkstyle). A documented function is mentioned again only when its signature changes; body-only edits stay silent.</span></div>
+        <div class="actions"><button type="button" id="btn-save-doc-mode">Save documentation</button></div>
+        <div class="field" style="margin-top:16px"><label for="sel-duplicate-mode">Duplicate functions on edit</label>
+          <select id="sel-duplicate-mode">
+            <option value="warn">Warn: the edit runs; the agent is told when a written function copies one already in the project (default)</option>
+            <option value="off">Off: no duplicate checks on edit</option>
+          </select>
+          <span class="hint">Compares functions the edit writes with the indexed code: identical bodies, and near-identical ones with only local names changed. Never blocks.</span></div>
+        <div class="actions"><button type="button" id="btn-save-duplicate-mode">Save duplicates</button></div>
         <div class="msg" id="agents-msg" role="status"></div>
         <div id="agents-list"></div>
       </section>
@@ -849,7 +877,11 @@ async function loadAgents() {
     const data = await resp.json();
     if (!resp.ok || data.error) throw new Error(data.error);
     if (document.activeElement !== $("sel-hook-mode")) $("sel-hook-mode").value = data.hook_mode;
+    if (document.activeElement !== $("sel-doc-mode")) $("sel-doc-mode").value = data.doc_mode;
+    if (document.activeElement !== $("sel-duplicate-mode")) $("sel-duplicate-mode").value = data.duplicate_mode;
     if (data.hook_mode_error) setMsg("agents-msg", "error", data.hook_mode_error);
+    if (data.doc_mode_error) setMsg("agents-msg", "error", data.doc_mode_error);
+    if (data.duplicate_mode_error) setMsg("agents-msg", "error", data.duplicate_mode_error);
     const list = $("agents-list");
     list.textContent = "";
     for (const item of data.clients) {
@@ -913,6 +945,22 @@ async function loadAgents() {
   }
 }
 loadAgents();
+$("btn-save-doc-mode").addEventListener("click", async () => {
+  try {
+    await post("/setup/integration", { action: "doc_mode", mode: $("sel-doc-mode").value });
+    setMsg("agents-msg", "ok", "Documentation setting saved; it applies on the next edit.");
+  } catch (error) {
+    setMsg("agents-msg", "error", error.message);
+  }
+});
+$("btn-save-duplicate-mode").addEventListener("click", async () => {
+  try {
+    await post("/setup/integration", { action: "duplicate_mode", mode: $("sel-duplicate-mode").value });
+    setMsg("agents-msg", "ok", "Duplicate setting saved; it applies on the next edit.");
+  } catch (error) {
+    setMsg("agents-msg", "error", error.message);
+  }
+});
 $("btn-save-hook-mode").addEventListener("click", async () => {
   try {
     await post("/setup/integration", { action: "hook_mode", mode: $("sel-hook-mode").value });

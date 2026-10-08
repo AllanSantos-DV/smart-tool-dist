@@ -6,7 +6,14 @@ e do OpenCode (`packages/opencode/src/tool/webfetch.ts`: limite de 5 MB, User-Ag
 renderizada: melhor resposta 18 × 18 (1 empate), respondeu certo 22 × 16, caracteres devolvidos 35 mil × 72 mil;
 3,6 s de mediana, navegador em 7 de 37 (páginas montadas por JavaScript). Repetições da mesma URL nos transcripts:
 92 de 124 dentro de 24 h (PAGE_TTL_S).
+
+Páginas acima de PAGE_MAX_CHARS (14,6% do cache, 10,4% das chamadas reais em 2026-10-08) não são mais cortadas no
+começo: o texto inteiro fica no cache e o modelo lê os pedaços mais parecidos com o pedido, até SELECT_BUDGET_CHARS, na
+ordem da página. Medido em 18 páginas reais e 41 perguntas: trechos depois do corte 0/28 → 13/28, cabeça 6/13 → 5/13,
+latência mediana 3,3 s → 3,1 s. Abaixo do limite a página vai inteira (seleção ali empatou em qualidade e piorou a
+cauda de latência; docs/BACKLOG.md).
 """
+import math
 import codecs
 import http.client
 import ipaddress
@@ -25,6 +32,10 @@ import research_cache
 CACHE_NAMESPACE = "web_fetch"
 PAGE_TTL_S = 86400
 PAGE_MAX_CHARS = 60_000
+PAGE_STORE_MAX_CHARS = 1_000_000
+SELECT_BUDGET_CHARS = 15_000
+CHUNK_CHARS = 2_000
+PAGE_FORMAT = 2
 MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024
 MAX_REDIRECTS = 5
 HTTP_TIMEOUT_S = 20
@@ -201,7 +212,8 @@ def read_page(url, deadline, render):
     """Page text (Markdown) from the 24 h cache, HTTP + trafilatura, or `render(url, deadline)` when HTTP comes thin."""
     url = normalize(url)
     for entry in research_cache.candidates(CACHE_NAMESPACE, url, limit=1):
-        if entry.get("query") == url and time.time() - entry["saved_at"] < PAGE_TTL_S:
+        if (entry.get("query") == url and time.time() - entry["saved_at"] < PAGE_TTL_S
+                and entry["result"].get("format") == PAGE_FORMAT):
             return {**entry["result"], "cached": True, "fetched_at": entry["saved_at"]}
     final_url, kind, charset, body = fetch_http(url, deadline)
     rendered, render_error = False, None
@@ -223,10 +235,55 @@ def read_page(url, deadline, render):
     if len(text.strip()) < MIN_CHARS:
         detail = f"; browser failed: {render_error}" if render_error else ", not even when rendered in the browser"
         raise FetchError(f"Page without readable text ({final_url}){detail}.")
-    page = {"url": url, "final_url": final_url, "text": text[:PAGE_MAX_CHARS], "truncated": len(text) > PAGE_MAX_CHARS,
-            "rendered": rendered}
+    page = {"url": url, "final_url": final_url, "text": text[:PAGE_STORE_MAX_CHARS], "chars": len(text),
+            "truncated": len(text) > PAGE_STORE_MAX_CHARS, "rendered": rendered, "format": PAGE_FORMAT}
     saved_at = research_cache.put(CACHE_NAMESPACE, url, page, {})
     return {**page, "cached": False, "fetched_at": saved_at or time.time(), "render_error": render_error}
+
+
+def chunks(text, size=CHUNK_CHARS):
+    """Consecutive pieces of about size characters, cut at a line break in the second half of each piece."""
+    parts, start = [], 0
+    while start < len(text):
+        end = min(len(text), start + size)
+        if end < len(text):
+            cut = text.rfind("\n", start + size // 2, end)
+            end = cut + 1 if cut > start else end
+        parts.append(text[start:end])
+        start = end
+    return parts
+
+
+def _cosine(a, b):
+    norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
+    return sum(x * y for x, y in zip(a, b)) / norm if norm else 0.0
+
+
+def select(text, prompt, embed, budget=SELECT_BUDGET_CHARS):
+    """Text the model reads: the whole page up to PAGE_MAX_CHARS; above it, the pieces most similar to the prompt up
+    to budget characters, in page order, with [...] where pieces were skipped. embed(texts) returns one vector per
+    text and raises when the embedding model is unavailable. Returns (text, number of pieces kept or None)."""
+    if len(text) <= PAGE_MAX_CHARS:
+        return text, None
+    parts = chunks(text)
+    vectors = embed(parts + [prompt])
+    if len(vectors) != len(parts) + 1:
+        raise RuntimeError("The embedding model returned a different number of vectors than page pieces.")
+    query = vectors[-1]
+    ranked = sorted(range(len(parts)), key=lambda i: -_cosine(vectors[i], query))
+    kept, size = [], 0
+    for i in ranked:
+        if size + len(parts[i]) <= budget:
+            kept.append(i)
+            size += len(parts[i])
+    kept.sort()
+    pieces, last = [], None
+    for i in kept:
+        if last is not None and i != last + 1:
+            pieces.append("\n\n[...]\n\n")
+        pieces.append(parts[i])
+        last = i
+    return "".join(pieces), len(kept)
 
 
 def answer(model, prompt, page, deadline):

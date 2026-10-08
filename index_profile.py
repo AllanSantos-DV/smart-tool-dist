@@ -17,7 +17,7 @@ DOC_DATA = {"html", "htm", "json", "csv", "xml", "yaml", "yml", "svg"}
 _NAME_DOC = re.compile(r"(^|/)(readme|changelog|license|licence|contributing|install|history|authors)(\.[^/]*)?$", re.I)
 _DIR_DOC = re.compile(r"(^|/)(docs?|adrs?|documentation)/", re.I)
 _TEST = re.compile(r"(^|/)(tests?|__tests__|spec|specs|e2e|fixtures?|testdata|test-utils?)(/|$)|(^|/)test_[^/]+\.py$|"
-                   r"(^|/)conftest\.py$|_test\.(py|go)$|\.(test|spec)\.[cm]?[jt]sx?$|(^|/)[^/]*[a-z0-9](?-i:Tests?)\.java$|"
+                   r"(^|/)conftest\.py$|_test\.(py|go)$|\.(test|spec)(-d)?\.[cm]?[jt]sx?$|(^|/)[^/]*[a-z0-9](?-i:Tests?)\.java$|"
                    r"(^|/)src/test/|(^|/)test[-_][^/]*\.[cm]?[jt]sx?$|[-_]test\.[cm]?[jt]sx?$", re.I)
 _TEST_PROSE = re.compile(r"(^|/)(tests?|__tests__|e2e|fixtures?|testdata|test-utils?)(/|$)|(^|/)src/test/", re.I)
 _TEXT_LINE = re.compile(r"[A-Za-zÀ-ú]{3,}\s+[A-Za-zÀ-ú]{3,}")

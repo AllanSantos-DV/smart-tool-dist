@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.9.3 - beta
+
+- Camoufox download (1.3 GB) on networks that cut long transfers (seen stopping at 500-530 MB on every attempt): it is
+  now fetched in 32 MB Range requests, each on a new connection, resuming from the last byte received after a dropped
+  or stalled connection, and gives up only after 6 attempts in a row without a new byte. camoufox still verifies the
+  sha256 published for the release before extracting. The downloader uses the standard library, which on Windows
+  trusts the system certificate store (including a corporate TLS inspection CA) and honors HTTPS_PROXY.
+- `project_manage graph` with `symbol` (function, `Class.method`, class, or `path::name` when the name repeats): where
+  it is defined, its callers with line, what it calls, the tests that reach it through static calls (`depth` hops,
+  default 3) and the files importing its module, so an agent knows what to update before an edit. With `file_path`, the graph caps its lists by `limit` and drops display-only data.
+- Documentation on edit (setup, Agents): the hook checks the functions a Claude Code Edit/MultiEdit/Write or a Codex
+  apply_patch touches. Remind (default) tells the agent which ones have no docstring and which documented ones changed
+  their signature, with callers; Require blocks an edit that leaves a touched function without a
+  docstring; Off disables it. Body-only edits of documented functions stay silent. The hook matcher now includes the
+  edit tools: reinstall the hook from the setup screen (it shows as outdated).
+- Documentation on edit asks only for public functions: private (`_name`, `#name`, `private`), nested, callback and
+  override (`@Override`, `@override`) functions are exempt, following pydocstyle, eslint-plugin-jsdoc and Checkstyle
+  defaults, and a JSDoc above TypeScript overload signatures documents the implementation. On remeda, gson, express
+  and click the former rule asked for docstrings on every overload implementation, callback and `@Override` method.
+  TypeScript, JavaScript and Java edits were never checked on Windows (the file was looked up by its absolute path in
+  the analyzer output, which normalizes it); they are now.
+- Duplicate functions on edit (setup, Agents; Warn by default, Off): when an edit writes a function whose body is
+  identical (comments, spacing, docstrings ignored) or near-identical (only local names, strings and numbers changed)
+  to an indexed one, the agent is told where the original is so it can reuse it; the edit is never blocked. Measured
+  on click, express, remeda and gson: every exact and locally renamed copy found, no warning when each real function
+  is written as it is.
+- `project_manage action=affected_tests`: tests to run for the uncommitted changes (or against `base`): every test
+  file importing a changed file, directly or transitively, plus changed tests, likeliest failures first (tests calling
+  a touched function, test files named after the function or module, import distance), with the command per runner
+  (pytest, unittest, vitest, jest, mocha, node --test, Maven, Gradle). `run_all` with the reason when configuration,
+  lockfiles or code outside the import graph changed. In fault-injection runs (30 faults each), selection by imports
+  caught every failing test file in express and all but timing-flaky ones in remeda; static calls alone, as the
+  `graph` impact lists them, found 2 to 37%.
+  Changed files are read from the working tree, so a new file or a new import counts before the project is reindexed (in on_search mode the index only updates on a search), and a test that takes a pytest fixture from a
+  conftest.py depends on what that conftest imports (a change in click's `testing.py` selected 4 of the 20 failing
+  test files; now all 20).
+- Near-duplicate detection (`action=duplicates` and the edit hook) keeps keywords, called names, attributes and types
+  and abstracts only local names, strings and numbers, compares functions of the same language only and skips
+  overloads and language idioms: parallel functions such as `get_text_stdin`/`get_text_stdout` or
+  `rotateLeft`/`rotateRight` are no longer reported (near pairs fell from 5-14% of functions to 0-1.6%).
+- Code graph: `require('../')` resolved to a wrong absolute path, and workspace packages imported by name
+  (`import { x } from "my-lib"` in a monorepo) were treated as external; both now resolve to the package source. Vitest
+  type tests (`*.test-d.ts`, `*.spec-d.ts`) are classified as tests. The TypeScript and Java analyzers retry with a
+  4 GB heap when 1 GB is not enough (larger projects ended with no symbols).
+- `web_fetch` on pages over 60,000 characters (14.6% of cached pages, 10.4% of real calls) no longer keeps only the
+  start: the whole page is cached (up to 1,000,000 characters) and the model reads the 2,000-character pieces most
+  similar to the prompt, up to 15,000 characters, in page order. Measured on 18 real pages and 41 questions: answers
+  about text after the old cut 0/28 → 13/28. Pieces are embedded once per page and embedding model (first read of a
+  75-256k page adds 2.6-6.8 s, later questions about 1 s); without a working `embedding_model` such a page fails
+  with the reason instead of being cut silently. Pages up to 60,000 characters are read whole, as before (selection
+  there tied on quality and added latency).
+- Hook metrics: concurrent hook calls from Claude Code and Codex could be logged with each other's client name.
+- Web search health log tells a provider 429 (`rate_limited`), a captcha and a self-imposed quota pause (`paused`, not
+  counted against the provider) apart from an ordinary failure.
+- `project_manage action=docs`: docstring coverage of the indexed code (public functions without a docstring per file,
+  coverage percent; tests only with `include_tests`), for documenting a project that started without them.
+- Impact results (`graph` with `symbol`) carry the first docstring line of the definition, callers, calls and tests.
+- `project_manage` for agents: every action takes `project_root` instead of `project_id`; `list` returns one short line
+  per project (it returned the full jobs, scope and preview of every project, about 1 MB with 14 projects, more than
+  an agent can read; the projects screen still gets the full list); an index job's result is no longer repeated as
+  `stats`.
+
 ## 0.9.2 - beta
 
 - Installer reported success after a broken Camoufox download: camoufox 0.5.6 prints the error of `fetch` and exits 0.
