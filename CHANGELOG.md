@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.9.5 - beta
+
+Reported by the claude-code-boss session on its first day using 0.9.4.
+
+- `affected_tests` answered "no tests" for a module covered by a 1.4 MB test file (1,427 cases): the file was over the
+  index size limit and the working-tree reading skipped files over 1 MB, so it fell out of the import graph silently.
+  Files up to 5 MB are now analyzed for the graph, and any tracked test file still outside it is selected ("may cover
+  the change") instead of disappearing.
+- Tests that run a script by path (`spawnSync('node', [path.join(SCRIPTS, 'hook.js')])`, `subprocess.run(["python",
+  "tools/x.py"])`) now depend on that script: a file name in a string literal of a test, resolved against the test's
+  folder, the folders above it and the project root, links them.
+- A test is left out of the list only when it has no test cases (`conftest.py`, fixtures, helpers). The former rule
+  ("imported by another test") dropped real Java tests that share test types: on gson it caught 19 of 28 injected
+  faults; now 28 of 28. JUnit 3 suites (`@RunWith(AllTests.class)`, `static Test suite()`) count as tests.
+- Test files named in `package.json` scripts (`"test": "node scripts/test-units.js"`) get a `node <file>` command.
+- An anonymous callback among the touched functions is named after the function that contains it.
+- `project_manage register` and `status` return the project with its last jobs summarized and without the scope's
+  folder structure and profile groups (`scope_summary` keeps include/exclude): they returned the full result of every
+  past search (108-128 thousand characters on one project, now 3.3 thousand). The projects screen keeps the full
+  payload.
+- A project is no longer marked `degraded` because the per-chunk function analysis was still being prepared: that note
+  is shown with the search results but is not a degradation.
+
 ## 0.9.4 - beta
 
 Found by using 0.9.3 on its own repository right after installing it.

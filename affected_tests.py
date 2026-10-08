@@ -1,12 +1,13 @@
 """Tests to run for the current changes: git diff against a base (default HEAD, so staged, unstaged and untracked
 files), then every test file that imports a changed file directly or through other files, plus changed tests, ordered
 so the most likely failures come first (tests calling a touched function, test file named after the function or the
-module, import distance). Test support files (conftest.py, helpers other tests import) carry the selection but are
-not listed to run. Selection by file imports, not by calls: in fault-injection measurements on Python,
+module, import distance). Test support files (conftest.py, fixtures and helpers without test cases) carry the
+selection but are not listed to run. Selection by file imports, not by calls: in fault-injection measurements on Python,
 JavaScript, TypeScript and Java projects static calls alone found 2 to 37% of the failing test files."""
 import ast
 import json
 import os
+import posixpath
 import re
 import subprocess
 from collections import defaultdict, deque
@@ -30,6 +31,8 @@ NOTE = ("Selection from the indexed import graph: tests that load code through s
         "suite before committing; run_all is true when a changed file can change every test (config, lockfile, "
         "unanalyzed code). Changed files and files committed after the last indexing are read from disk, so new "
         "files and imports count before reindexing; pytest fixtures link a test to the conftest.py that defines them.")
+TEST_SOURCES = (".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".java")
+_PATH_LITERAL = re.compile(r"""['"`]((?:\.{0,2}/)?[\w.-]+(?:/[\w.-]+)*\.(?:py|js|mjs|cjs|ts|mts|cts|java))['"`]""")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.M)
 
 
@@ -122,6 +125,10 @@ def _commands(root, tests):
             runner = next((cmd for key, cmd in (("vitest", "npx vitest run"), ("jest", "npx jest"),
                                                 ("mocha", "npx mocha"), ("node --test", "node --test"))
                            if key in tools), None)
+            local = os.path.relpath(path, folder or ".").replace(os.sep, "/")
+            scripts = " ".join(str(v) for v in (package.get("scripts") or {}).values())
+            if runner is None and re.search(rf"\bnode\s+(\./)?{re.escape(local)}\b", scripts):
+                runner = "node-script"
             groups[(folder or "", runner)].append(path)
         elif lower.endswith(".java"):
             folder, name = _nearest(root, path, ("pom.xml", "build.gradle", "build.gradle.kts"))
@@ -138,6 +145,9 @@ def _commands(root, tests):
         if runner == "maven":
             names = ",".join(sorted({os.path.basename(f).rsplit(".", 1)[0] for f in files}))
             line = f"mvn test -Dtest={names} -Dsurefire.failIfNoSpecifiedTests=false"
+        elif runner == "node-script":
+            commands.extend({"cwd": folder or ".", "command": f"node {f}"} for f in sorted(local))
+            continue
         elif runner == "unittest-package":
             line = "python -m unittest " + " ".join(sorted(f[:-3].replace("/", ".") for f in files))
         elif runner == "unittest-folder":
@@ -194,6 +204,75 @@ def _fixture_users(root, test_files):
     return users
 
 
+def _path_literal_users(root, test_files, known):
+    """Code files a test names in a string literal ('graph-guard.js', "scripts/run.py"), resolved against the test's
+    folder, the folders above it and the project root: tests that run scripts as subprocesses or load them by path
+    (spawnSync('node', [path.join(SCRIPTS, 'hook.js')])) depend on them without importing them."""
+    users = defaultdict(set)
+    for test in test_files:
+        if not test.lower().endswith(TEST_SOURCES):
+            continue
+        source = _read(os.path.join(root, test))
+        folders, folder = [], os.path.dirname(test)
+        while True:
+            folders.append(folder)
+            if not folder:
+                break
+            folder = os.path.dirname(folder)
+        for literal in set(_PATH_LITERAL.findall(source)):
+            for base in folders:
+                candidate = posixpath.normpath(posixpath.join(base, literal.removeprefix("./")))
+                if candidate in known and candidate != test:
+                    users[candidate].add(test)
+                    break
+    return users
+
+
+_TEST_CASES = {
+    ".py": re.compile(r"^\s*(async\s+)?def\s+test\w*\s*\(|^\s*class\s+Test\w*|unittest\.TestCase", re.M),
+    ".java": re.compile(r"@(Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate|RunWith|Suite)\b|"
+                        r"\bstatic\s+\w*Test\s+suite\s*\(|\bextends\s+TestCase\b|\bvoid\s+test\w*\s*\("),
+    "script": re.compile(r"\b(it|test|describe|suite)(\.\w+)?\s*\(|\bDeno\.test\b|\bnode:test\b|\bassert\b"),
+}
+
+
+def _support(root, path):
+    """Test-kind file without test cases (conftest.py, fixtures, helpers): it carries the selection but is not run.
+    A test referenced by another test (shared Java test types) is still a test."""
+    if os.path.basename(path) == "conftest.py":
+        return True
+    ext = os.path.splitext(path)[1].lower()
+    pattern = _TEST_CASES.get(ext) or (_TEST_CASES["script"] if ext in TEST_SOURCES else None)
+    source = _read(os.path.join(root, path))
+    return bool(pattern and source and not pattern.search(source))
+
+
+def _tracked_tests_outside_graph(root, parsed, profile):
+    """Code test files git tracks that the graph could not analyze (over the size limits, unreadable): their imports
+    are unknown, so they are selected instead of silently missing (a 1.4 MB test file covering 1,427 cases did)."""
+    listed = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, timeout=30)
+    if listed.returncode:
+        return []
+    tests = []
+    for rel in listed.stdout.decode("utf-8", "replace").split("\0"):
+        if rel and rel not in parsed and rel.lower().endswith(TEST_SOURCES) and os.path.basename(rel) != "conftest.py" \
+                and index_profile.kind(rel, profile) == "test" and os.path.isfile(os.path.join(root, rel)):
+            tests.append(rel)
+    return tests
+
+
+def _label(symbol, by_id):
+    """path::name of a touched function; an anonymous callback is named after the function that contains it."""
+    short = symbol["name"].split("(")[0].split(".")[-1]
+    if short in ("callback", "anonymous"):
+        parent = by_id.get(symbol.get("parent"))
+        while parent and parent["name"].split("(")[0].split(".")[-1] in ("callback", "anonymous"):
+            parent = by_id.get(parent.get("parent"))
+        if parent:
+            return f"{symbol['path']}::{parent['name']} (callback at line {symbol['start_line']})"
+    return f"{symbol['path']}::{symbol['name']}"
+
+
 def affected(root, base="HEAD", limit=30, view_id=None):
     """Test files to run for the changes since base, most likely failures first, with the command to run them."""
     if not isinstance(base, str) or not re.fullmatch(r"[\w./@^~{}-]{1,200}", base) or base.startswith("-"):
@@ -217,6 +296,8 @@ def affected(root, base="HEAD", limit=30, view_id=None):
         callers[call["target"]].add(call["source"])
     for conftest, users in _fixture_users(root, test_files).items():
         importers[conftest] |= users
+    for target, users in _path_literal_users(root, test_files, {f["path"] for f in data.get("files") or []}).items():
+        importers[target] |= users
     by_id = {s["id"]: s for s in data.get("symbols") or []}
     run_all, not_analyzed, changed_code, changed_tests, conftests = [], [], [], [], []
     for path, change in sorted(changes.items()):
@@ -260,9 +341,11 @@ def affected(root, base="HEAD", limit=30, view_id=None):
                 selected.setdefault(test, f"{conftest} changed")
     for test in set(import_depth) | set(call_hops):
         selected.setdefault(test, None)
-    support = {p for p in test_files if os.path.basename(p) == "conftest.py"
-               or any(source in test_files for source in importers.get(p, ()))}
-    selected = {test: reason for test, reason in selected.items() if test not in support}
+    selected = {test: reason for test, reason in selected.items() if not _support(root, test)}
+    if changed_code or conftests:
+        for test in _tracked_tests_outside_graph(root, parsed, profile):
+            selected.setdefault(test, "test file outside the import graph (too large or not analyzed): may cover "
+                                      "the change")
 
     def why(test):
         if selected[test]:
@@ -283,7 +366,7 @@ def affected(root, base="HEAD", limit=30, view_id=None):
         "base": base,
         "changed": {"code": changed_code[:limit], "tests": changed_tests[:limit],
                     "other": sorted(p for p in changes if p not in changed_code and p not in changed_tests)[:limit]},
-        "touched_functions": [f"{s['path']}::{s['name']}" for s in touched][:limit],
+        "touched_functions": [_label(s, by_id) for s in touched][:limit],
         "tests": [{"path": t, "why": why(t)} for t in ordered[:limit]],
         "counts": {"changed_files": len(changes), "tests": len(ordered), "test_files": len(test_files)},
         "run_all": bool(run_all),

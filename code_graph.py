@@ -23,7 +23,7 @@ import document_text
 
 VERSION = 2
 SOURCE_EXTENSIONS = ('.py','.java','.js','.jsx','.ts','.tsx','.mjs','.cjs','.mts','.cts','.json','.html','.htm','.css','.scss','.sass','.less','.md','.markdown')
-MAX_OVERLAY_BYTES = 1024 * 1024
+MAX_OVERLAY_BYTES = 5 * 1024 * 1024
 MAX_FILES = 3000
 MAX_TEXT = 24 * 1024 * 1024
 MAX_SYMBOLS = 8000

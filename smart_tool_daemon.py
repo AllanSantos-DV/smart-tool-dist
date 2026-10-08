@@ -968,8 +968,10 @@ def _perform_smart_search_isolated(arguments, job_id):
                                      else ({}, None))
     except Exception as exc:
         symbol_index, symbol_note = None, f"Function analysis failed: {_project_error(exc)}"
+    notes = []
     if symbol_index is None and any(group != "doc" for group in groups):
-        warnings.append(symbol_note or "Per-chunk functions are being prepared; they will show on the next search.")
+        (warnings if symbol_note else notes).append(
+            symbol_note or "Per-chunk functions are being prepared; they will show on the next search.")
     elif symbol_note or (symbol_index or {}).get("note"):
         warnings.append(symbol_note or symbol_index["note"])
     query_terms = _symbol_terms(" ".join(queries[group] for group in groups if group != "doc"))
@@ -1013,7 +1015,7 @@ def _perform_smart_search_isolated(arguments, job_id):
     warning = " ".join(warnings)
     if warning:
         _update_job(job_id, warning=warning)
-    return _grouped_yaml(index_profile.public(profile), blocks, warning)
+    return _grouped_yaml(index_profile.public(profile), blocks, " ".join(warnings + notes))
 
 
 def _perform_project_index(arguments, job_id, preview=False):
@@ -1717,11 +1719,31 @@ def _project_action_locked(arguments):
     return {"project": _project_payload(project_store.get(key))}
 
 
+def _for_agent(result):
+    """register/status for an agent: the project without the full result of every past job, the folder structure of
+    the scope and the profile groups (one project returned 128 thousand characters, more than an MCP client shows);
+    scope_summary keeps include/exclude. The projects screen keeps the full payload."""
+    project = result.get("project") if isinstance(result, dict) else None
+    if isinstance(project, dict) and isinstance(project.get("jobs"), list):
+        project["jobs"] = [{key: job.get(key) for key in ("job_id", "status", "kind", "phase", "updated_at", "warning",
+                                                          "error") if job.get(key) not in (None, "")}
+                           for job in project["jobs"][:5]]
+    if isinstance(project, dict):
+        if isinstance(project.get("preview"), dict):
+            project["preview"] = {key: project["preview"].get(key)
+                                  for key in ("included_files", "eligible_files", "bytes", "skipped")}
+        project.pop("scope", None)
+    return result
+
+
 def _handle_project_manage(arguments):
     # MCP não abre janelas; o seletor nativo pertence apenas à interface local.
     if isinstance(arguments, dict) and arguments.get("action") == "pick":
         raise ValueError("Use register with project_root or pick the folder from the tray.")
-    return _to_json_sanitized(_project_action(arguments))
+    result = _project_action(arguments)
+    if isinstance(arguments, dict) and arguments.get("action") in ("register", "status"):
+        result = _for_agent(result)
+    return _to_json_sanitized(result)
 
 
 def _enqueue_monitored_project(project_id, **options):
