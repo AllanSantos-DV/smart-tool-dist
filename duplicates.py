@@ -9,6 +9,7 @@ import threading
 import time
 
 import code_graph
+import doc_check
 import embedding_cache
 import index_inventory
 import index_profile
@@ -169,15 +170,10 @@ def _functions(root, include_tests):
             if any(o is not s and o["start_line"] <= s["start_line"] and s["end_line"] <= o["end_line"]
                    and (o["start_line"], o["end_line"]) != (s["start_line"], s["end_line"]) for o in symbols):
                 continue
-            text = "\n".join(file_lines[s["start_line"] - 1:s["end_line"]])
-            if not text.strip():
+            entry = _entry(path, s["name"], s["start_line"], s["end_line"], file_lines, ext)
+            if entry is None:
                 continue
-            body = _strip_comments(_body(text, ext), ext)
-            normalized = re.sub(r"\s+", " ", body).strip()
-            name = s["name"].split("(")[0].split(".")[-1]
-            functions.append({"name": name, "path": path, "line": s["start_line"],
-                              "end": s["end_line"], "lines": s["end_line"] - s["start_line"] + 1, "text": text[:MAX_TEXT],
-                              "hash": hashlib.sha1(normalized.encode("utf-8")).hexdigest(), **_features(body, ext, name)})
+            functions.append(entry)
             occurrence = occurrences[functions[-1]["hash"]] = occurrences.get(functions[-1]["hash"], 0) + 1
             functions[-1]["kind"] = kind
             functions[-1]["fp"] = hashlib.sha1(f"{path}\0{functions[-1]['hash']}\0{occurrence}".encode("utf-8")).hexdigest()
@@ -189,6 +185,43 @@ def _functions(root, include_tests):
     if graph.get("retryable"):
         notes.append("Partial analysis: " + "; ".join(d.get("reason", "") for d in graph.get("diagnostics", [])[:2]))
     return functions, notes, view
+
+
+def _entry(path, name, start, end, file_lines, ext):
+    """One function as the duplicate checks compare it: normalized body hash and near-duplicate features."""
+    text = "\n".join(file_lines[start - 1:end])
+    if not text.strip():
+        return None
+    body = _strip_comments(_body(text, ext), ext)
+    normalized = re.sub(r"\s+", " ", body).strip()
+    short = name.split("(")[0].split(".")[-1]
+    return {"name": short, "path": path, "line": start, "end": end, "lines": end - start + 1, "text": text[:MAX_TEXT],
+            "hash": hashlib.sha1(normalized.encode("utf-8")).hexdigest(), **_features(body, ext, short)}
+
+
+def _working_tree_functions(root, changes, profile):
+    """Production functions of the files changed in the working tree, read from disk, so a copy of a function written
+    earlier in the same session is caught before the index catches up."""
+    found = []
+    for rel, status in changes.items():
+        ext = rel.rsplit(".", 1)[-1].lower() if "." in rel else ""
+        if status == "deleted" or ext not in _LANG or index_profile.kind(rel, profile) != "code":
+            continue
+        try:
+            with open(os.path.join(root, rel), encoding="utf-8") as stream:
+                source = stream.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if _GENERATED.search(source[:4000]):
+            continue
+        lines = source.splitlines()
+        for function in doc_check.functions(rel, source):
+            if function["end"] - function["start"] + 1 < MIN_LINES:
+                continue
+            entry = _entry(rel, function["name"], function["start"], function["end"], lines, ext)
+            if entry:
+                found.append({**entry, "kind": "code"})
+    return found
 
 
 def _ref(f):
@@ -381,8 +414,9 @@ def find(root, embed, configured_model, min_similarity=DEFAULT_MIN_SIMILARITY, i
 
 
 def _write_pool(root):
-    """Indexed production functions with their idiom shingles, rebuilt only when the index changes; None while the
-    code graph is not cached yet, so an edit hook never waits for an analysis."""
+    """Indexed production functions with their idiom shingles, with the files changed in the working tree read from
+    disk (see code_graph.pending_changes). The indexed part is rebuilt only when the index changes and the changed
+    files on every call (an edit hook sees what earlier edits and commits wrote). None while the code graph is not cached yet, so a hook never waits for it."""
     view_path = indexer.existing_db_path(root)
     if not view_path or code_graph.cached_symbols(root)[0] is None:
         return None
@@ -390,13 +424,16 @@ def _write_pool(root):
     with _LOCK:
         cached = _WRITE_POOLS.get(root)
     if cached and cached[0] == state:
-        return cached[1]
-    functions, _notes, _view = _functions(root, False)
-    production = [f for f in functions if f["kind"] == "code"]
-    pool = (production, _idioms(production))
-    with _LOCK:
-        _WRITE_POOLS[root] = (state, pool)
-    return pool
+        indexed = cached[1]
+    else:
+        functions, _notes, _view = _functions(root, False)
+        indexed = [f for f in functions if f["kind"] == "code"]
+        with _LOCK:
+            _WRITE_POOLS[root] = (state, indexed)
+    changes = code_graph.pending_changes(root, view_path)
+    profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile"))
+    production = [f for f in indexed if f["path"] not in changes] + _working_tree_functions(root, changes, profile)
+    return production, _idioms(production)
 
 
 def on_write(root, path, before, after, written):

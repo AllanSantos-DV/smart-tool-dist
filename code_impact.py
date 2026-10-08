@@ -10,7 +10,7 @@ import index_profile
 import index_scope
 
 MAX_DEPTH = 4
-NOTE = ("Static analysis of the indexed snapshot: calls made through callbacks, dynamic dispatch or names built at "
+NOTE = ("Static analysis of the indexed snapshot plus the files changed in the working tree: calls made through callbacks, dynamic dispatch or names built at "
         "runtime are not seen, so treat an empty list as 'none found', not as 'none exist'.")
 
 
@@ -54,7 +54,7 @@ def impact(root, symbol, view_id=None, depth=3, limit=30):
         raise ValueError("Pass symbol: a function, method (Class.method) or class name.")
     if type(depth) is not int or not 1 <= depth <= MAX_DEPTH:
         raise ValueError(f"depth must be an integer from 1 to {MAX_DEPTH}.")
-    data = code_graph.build(root, view_id)
+    data = code_graph.build_current(root, view_id)
     found = _matches(data.get("symbols") or [], symbol)
     diagnostics = [d.get("reason") for d in data.get("diagnostics") or [] if d.get("reason")]
     if not found:

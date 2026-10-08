@@ -2,6 +2,7 @@
 import ast
 import collections
 import copy
+import gzip
 import contextvars
 import hashlib
 import json
@@ -14,6 +15,7 @@ from pathlib import Path
 
 import indexer
 import index_inventory
+import index_scope
 import project_identity
 import web_search_adapters
 import web_document_graph
@@ -339,6 +341,41 @@ def _by_file(data):
     return {'symbols':by_file,'parsed':parsed,'note':note}
 
 
+def _disk_path(view_path):
+    path=indexer.graph_cache_path(view_path)
+    return os.path.dirname(path),path
+
+
+def _disk_load(key):
+    """Analysis saved for exactly this index state and analyzer version, or None. A damaged file is a miss: the
+    caller analyzes again and overwrites it."""
+    _folder,path=_disk_path(key[0])
+    try:
+        with gzip.open(path,'rt',encoding='utf-8') as stream:
+            saved=json.load(stream)
+    except (OSError,EOFError,ValueError):
+        return None
+    return saved.get('graph') if saved.get('key')==[key[1],key[2],key[3]] else None
+
+
+def _disk_save(key,data):
+    """Writes the analysis next to the index (atomic replace) and removes caches of views that no longer exist.
+    Returns the error text when it could not be written, so the caller can report it."""
+    folder,path=_disk_path(key[0])
+    try:
+        os.makedirs(folder,exist_ok=True)
+        temporary=f'{path}.{os.getpid()}.{threading.get_ident()}.tmp'
+        with gzip.open(temporary,'wt',encoding='utf-8',compresslevel=5) as stream:
+            json.dump({'key':[key[1],key[2],key[3]],'graph':data},stream,ensure_ascii=False)
+        os.replace(temporary,path)
+        for name in os.listdir(folder):
+            if name.endswith('.json.gz') and not os.path.isfile(os.path.join(os.path.dirname(folder),name[:-8]+'.sqlite3')):
+                os.remove(os.path.join(folder,name))
+    except OSError as exc:
+        return f'Graph cache not saved ({type(exc).__name__}: {exc}); the next restart analyzes again.'[:300]
+    return None
+
+
 def cached_symbols(root):
     path=indexer.existing_db_path(root)
     if not path:
@@ -348,6 +385,13 @@ def cached_symbols(root):
         data=_CACHE.get(key)
         if data is not None:
             _CACHE.move_to_end(key)
+    if data is None:
+        data=_disk_load(key)
+        if data is not None:
+            with _LOCK:
+                _CACHE[key]=data
+                while len(_CACHE)>3:_CACHE.popitem(last=False)
+    with _LOCK:
         state=_WARM_STATE.get(root)
         if data is None and state and state['key']==key and (state['result'] or time.time()-state['at']<WARM_RETRY_S):
             return state['result'],state['note']
@@ -359,6 +403,12 @@ def cached_symbols(root):
         context=contextvars.copy_context()
         threading.Thread(target=context.run,args=(_warm,root,key),daemon=True).start()
     return None,None
+
+
+def warm(root):
+    """Starts the analysis of the project's current index in the background unless memory or disk already has it, so
+    the next edit hook or search finds the graph ready (called when an indexing job ends)."""
+    cached_symbols(root)
 
 
 def _warm(root,key):
@@ -388,6 +438,13 @@ def build(root,view_id=None,storage_id=None,file_path=None,background=False):
         cached=_CACHE.get(key)
         if cached:_CACHE.move_to_end(key)
     was_cached=cached is not None
+    save_note=None
+    if cached is None:
+        cached=_disk_load(key)
+        if cached is not None:
+            with _LOCK:
+                _CACHE[key]=cached
+                while len(_CACHE)>3:_CACHE.popitem(last=False)
     if cached is None:
         slots=_WARM_SLOT if background else _ANALYSIS_SLOTS
         if not slots.acquire(timeout=None if background else 3):
@@ -401,7 +458,9 @@ def build(root,view_id=None,storage_id=None,file_path=None,background=False):
             with _LOCK:
                 _CACHE[key]=cached
                 while len(_CACHE)>3:_CACHE.popitem(last=False)
+            save_note=_disk_save(key,cached)
     data=copy.deepcopy(cached)
+    if save_note:data['diagnostics']=[*data.get('diagnostics',[]),{'path':'','reason':save_note}]
     # Só compara metadados do diretório de trabalho quando a visão é a atual.
     for file in data['files']:
         file['status']='stored'
@@ -418,6 +477,72 @@ def build(root,view_id=None,storage_id=None,file_path=None,background=False):
                 limits={'files':MAX_FILES,'symbols':MAX_SYMBOLS,'edges':MAX_EDGES,'display_nodes_default':120},
                 languages=['Java','Angular','Python','JavaScript','TypeScript','JSX','TSX','HTML','CSS','Markdown'],cache_hit=was_cached)
     return _focus(data,file_path) if file_path else data
+
+
+def working_tree_changes(root):
+    """Project-relative paths changed in the git working tree (staged, unstaged, untracked) -> 'deleted' or
+    'changed'; empty when the folder is not in a git repository."""
+    def git(*args):
+        return subprocess.run(['git',*args],cwd=root,capture_output=True,timeout=30,
+                              creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    prefix=git('rev-parse','--show-prefix')
+    if prefix.returncode:
+        return {}
+    prefix=prefix.stdout.decode('utf-8','replace').strip()
+    status=git('status','--porcelain=v1','-z','--untracked-files=all','--','.')
+    if status.returncode:
+        raise RuntimeError('git status failed: '+status.stderr.decode('utf-8','replace').strip()[:200])
+    entries=status.stdout.decode('utf-8','replace').split('\0');changes={};i=0
+    while i<len(entries):
+        entry=entries[i];i+=1
+        if len(entry)<4:continue
+        code,path=entry[:2],entry[3:]
+        if 'R' in code or 'C' in code:i+=1
+        if path.startswith(prefix):changes[path[len(prefix):]]='deleted' if 'D' in code else 'changed'
+    return changes
+
+
+def pending_changes(root,view_path):
+    """Files the indexed view does not reflect yet: working-tree changes, indexed files whose size or modification time
+    differs on disk, and files tracked by git inside the index scope that were never indexed (commits made after the
+    last indexing). Path -> 'deleted' or 'changed'."""
+    changes=working_tree_changes(root)
+    conn=indexer._readonly(view_path)
+    try:
+        columns={row[1] for row in conn.execute('PRAGMA table_info(manifest)')}
+        if not {'size','mtime_ns'} <= columns:
+            raise RuntimeError('Index without file sizes and times; reindex the project.')
+        rows=conn.execute('SELECT path,size,mtime_ns FROM manifest').fetchall()
+    finally:
+        conn.close()
+    indexed=set()
+    for original,size,stamp in rows:
+        rel=original.replace('\\','/');indexed.add(rel)
+        if rel in changes:continue
+        try:
+            stat=os.stat(os.path.join(root,rel))
+        except OSError:
+            changes[rel]='deleted';continue
+        if (stat.st_size,stat.st_mtime_ns)!=(size,stamp):changes[rel]='changed'
+    scope=index_scope.load_scope(root)
+    listed=subprocess.run(['git','ls-files','-z'],cwd=root,capture_output=True,timeout=30,
+                          creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    if scope and listed.returncode==0:
+        for rel in listed.stdout.decode('utf-8','replace').split('\0'):
+            if rel and rel not in indexed and rel not in changes and rel.lower().endswith(SOURCE_EXTENSIONS) \
+                    and index_scope.in_scope(scope,rel) and os.path.isfile(os.path.join(root,rel)):
+                changes[rel]='changed'
+    return changes
+
+
+def build_current(root,view_id=None):
+    """The graph an agent should see while editing: the indexed view plus every file it does not reflect yet (see
+    pending_changes and build_overlay) when that view is the current one; a pinned or older view is returned as
+    indexed."""
+    inventory=index_inventory.inspect(root,view_id)
+    selected=inventory.get('selected') or {}
+    changes=pending_changes(root,selected['path']) if selected.get('current') else {}
+    return build_overlay(root,changes,view_id) if changes else build(root,view_id)
 
 
 def build_overlay(root,changes,view_id=None):

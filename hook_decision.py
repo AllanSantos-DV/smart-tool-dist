@@ -16,6 +16,8 @@ import config
 import doc_check
 import duplicates
 import edit_preview
+import index_profile
+import index_scope
 import endpoint_sync
 import project_store
 import router
@@ -116,9 +118,10 @@ def _duplicate_lines(findings):
 
 
 def _edit_review(payload, doc_mode, duplicate_mode):
-    """Checks of an edit before it runs. Docstrings follow doc_mode: missing ones deny the edit in require mode and
-    become a reminder in remind mode; a documented function whose signature changed always gets a reminder. Copies of
-    indexed functions follow duplicate_mode and only add context, never deny."""
+    """Checks of an edit before it runs. Docstrings follow doc_mode, in code files of registered projects only (tests,
+    docs and files outside a project are left out, as in the docs coverage): missing ones deny the edit in require mode and become a reminder in remind mode; a
+    documented function whose signature changed always gets a reminder. Copies of indexed functions follow
+    duplicate_mode and only add context, never deny."""
     doc_findings, duplicate_findings, failures = [], [], []
     for path, before, after in edit_preview.preview(payload.get("tool_name"), payload.get("tool_input"), payload.get("cwd")):
         if not doc_check.supported(path):
@@ -126,7 +129,8 @@ def _edit_review(payload, doc_mode, duplicate_mode):
         root = _project_of(path)
         rel = os.path.relpath(path, root).replace(os.sep, "/") if root else os.path.basename(path)
         edited = doc_check.written(path, before, after)
-        if doc_mode != "off":
+        profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile")) if root else None
+        if doc_mode != "off" and root and index_profile.kind(rel, profile) == "code":
             doc_findings += [(root, rel, item) for item in doc_check.review(path, before, after, edited)]
         if duplicate_mode != "off" and root and edited["touched"]:
             try:

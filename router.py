@@ -292,16 +292,19 @@ def log_unavailable(tool_name, tool_input, exc):
     )
 
 
-# Verbo ancorado no início do comando ou de um segmento (`|`, `;`, `&&`, `$(`): casar por
-# substring solta faria qualquer palavra inglesa dentro de um heredoc Python contar como
-# busca. A ausência de verbo é prova mecânica de que o `command` não busca código.
+# Search/read verbs count only where they start a command: at the beginning, after `;`, `&&`, `||`, `$(`, a backtick,
+# a loop/if keyword or a shell invoker (`bash -c`, `powershell -Command`, `cmd /c`). After a single `|` they filter the
+# output of the command before them (`python x.py | tail -5`), which reads no source code.
 _SEARCH_VERB_RE = re.compile(
-    # Início, separador de segmento, ou logo depois de um invocador de shell
-    # (`powershell -Command`, `bash -c`, `cmd /c`), que é como o verbo real costuma
-    # aparecer no meio de um comando em máquina Windows.
-    r"(?:^|[|;&]|\$\(|`|-c\s|-Command\s|/c\s|/k\s)\s*(?:sudo\s+|command\s+)?"
+    r"(?:^|[;&]|\|\||\$\(|`|-c\s|-Command\s|/c\s|/k\s)\s*[\"']?\s*(?:(?:do|then|else)\s+)?(?:sudo\s+|command\s+)?"
     r"(grep|egrep|fgrep|rg|ripgrep|find|findstr|fd|cat|type|head|tail|less|more|"
     r"ls|dir|awk|sed|ack|ag|select-string|sls|get-content|gc|get-childitem|gci)\b",
+    re.IGNORECASE,
+)
+# Commands that read code or pages without a search verb at their start: their pipe filters still search content.
+_READ_PRODUCER_RE = re.compile(
+    r"\bgit\s+(grep|ls-files|show|log\s+-p|diff)\b|\b(curl|wget|iwr|invoke-webrequest)\b|\bgh\s+api\b|"
+    r"readFileSync|read_text\(|open\(",
     re.IGNORECASE,
 )
 _READ_TOOLS = frozenset({"Read", "NotebookRead"})
@@ -318,14 +321,17 @@ def _mechanical_decision(tool_name, tool_input):
     Medido em 1973 decisões reais: 97,8% eram `allow`, e 1512 delas (77%) caíam nestes
     casos — cada uma custando uma ida ao gateway antes de toda tool call do agente. Os
     dois únicos `Read` redirecionados nesse histórico eram decisões erradas (um deles com
-    `offset`/`limit` explícitos, onde só as linhas pedidas servem)."""
+    `offset`/`limit` explícitos, onde só as linhas pedidas servem). Remedido em 2026-10-08
+    sobre 2488 Bash que foram ao modelo (mediana 1,5 s, 7,8% redirecionados): ignorar os
+    filtros depois de `|` (salvo quando o produtor lê código ou páginas) decide 439 deles
+    sem modelo (13,3 min em 58 h) e perde 1 dos 155 redirecionamentos."""
     if tool_name in _READ_TOOLS:
         return "allow", "Reading a specific file is never replaced by semantic search."
     if tool_name == "Bash":
         command = tool_input.get("command")
         if not isinstance(command, str) or not command.strip():
             return "allow", "Bash without a readable command."
-        if not _SEARCH_VERB_RE.search(command):
+        if not _SEARCH_VERB_RE.search(command) and not _READ_PRODUCER_RE.search(command):
             return "allow", "The command neither searches nor reads source code."
     return None
 

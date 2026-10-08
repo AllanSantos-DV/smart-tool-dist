@@ -860,6 +860,8 @@ def _prepare_project_index(arguments, job_id, cfg, token, query_vector=None, pre
     if not stats.get("ready", True):
         raise RuntimeError(f"{stats.get('failed', 0)} file(s) could not be read consistently. Resume indexing.")
     project_store.confirm_changes(project_identity.project_id(root), project.get('dirty_seq', 0))
+    import code_graph
+    code_graph.warm(root)
     if lexical:
         stats["warning"] = LEXICAL_WARNING
     return stats

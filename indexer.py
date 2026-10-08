@@ -841,6 +841,12 @@ def search(root, query_vector=None, top_k=20, query=None, model_id=None, include
     return [(scores[chunk_id], *by_id[chunk_id][1:5]) for chunk_id in ids[:top_k]]
 
 
+def graph_cache_path(view_path):
+    """Where code_graph keeps the saved analysis of one index view (graph-cache/<view>.json.gz next to it)."""
+    return os.path.join(os.path.dirname(view_path), "graph-cache",
+                        os.path.basename(view_path).removesuffix(".sqlite3") + ".json.gz")
+
+
 def remove_index(root):
     """Remove somente arquivos de índice da raiz conhecida, nunca arquivos do projeto."""
     import glob
@@ -855,6 +861,10 @@ def remove_index(root):
                 except PermissionError as exc:
                     raise RuntimeError("The index is open in another process. Close the external reader and try removing it again.") from exc
                 removed.append(safe)
+                try:
+                    os.remove(graph_cache_path(safe))
+                except FileNotFoundError:
+                    pass
     invalidate_cache(root)
     return removed
 

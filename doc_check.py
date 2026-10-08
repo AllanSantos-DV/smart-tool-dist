@@ -229,7 +229,7 @@ def coverage(root, include_tests=False, limit=30, view_id=None):
     """Docstring coverage of the indexed code: functions the language convention expects documented (plus any already
     documented) and those still missing, file by file, so an agent can document a project that started without it.
     Tests are left out unless include_tests."""
-    data = code_graph.build(root, view_id)
+    data = code_graph.build_current(root, view_id)
     profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile"))
     kinds = ("code", "test") if include_tests else ("code",)
     by_path = defaultdict(list)

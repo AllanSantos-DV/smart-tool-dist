@@ -415,6 +415,22 @@ def _exclude_matcher(exclude):
     return matches
 
 
+def in_scope(scope, rel_path):
+    """Whether resolve_included_files would list rel_path: under an include base, outside the exclusions and outside
+    hidden folders."""
+    rel_path = rel_path.replace("\\", "/")
+    include = scope.get("include") or [""]
+    matcher = _exclude_matcher(set(scope.get("exclude") or []) | set(scope.get("user_exclude") or []) |
+                               _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
+    parts = rel_path.split("/")
+    if matcher(rel_path) or any(part.startswith(".") for part in parts[:-1]):
+        return False
+    if any(base in ("", ".") for base in include):
+        return True
+    return len(parts) == 1 or any(rel_path == base.strip("/") or rel_path.startswith(base.strip("/") + "/")
+                                  for base in include)
+
+
 def resolve_included_files(root, scope, cancel_check=None):
     if not valid_scope(scope):
         raise ValueError("Invalid scope; request a new project analysis.")

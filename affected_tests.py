@@ -12,6 +12,7 @@ import subprocess
 from collections import defaultdict, deque
 
 import code_graph
+import index_inventory
 import index_profile
 import index_scope
 
@@ -21,11 +22,14 @@ RUN_ALL = re.compile(
     r"uv\.lock|Pipfile(\.lock)?|tsconfig[^/]*\.json|jsconfig\.json|(jest|vitest|vite|babel)\.config\.[^/]+|"
     r"\.babelrc|\.mocharc[^/]*|pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?|gradle\.properties|"
     r"\.env[^/]*)$")
+CI_CONFIG = re.compile(r"(^|/)(\.github|\.circleci|\.buildkite)/|(^|/)(\.gitlab-ci\.ya?ml|azure-pipelines\.ya?ml|"
+                       r"Jenkinsfile|\.travis\.ya?ml|bitbucket-pipelines\.ya?ml|\.gitignore|\.gitattributes|"
+                       r"\.editorconfig|\.mailmap|CODEOWNERS|LICENSE(\.[^/]*)?|\.npmignore)$")
 NOTE = ("Selection from the indexed import graph: tests that load code through strings (mock.patch targets, "
         "importlib, require(variable), reflection, Spring scanning) or read data files are not seen. Run the full "
         "suite before committing; run_all is true when a changed file can change every test (config, lockfile, "
-        "unanalyzed code). Changed files are read from the working tree, so new files and imports count before "
-        "reindexing; pytest fixtures link a test to the conftest.py that defines them.")
+        "unanalyzed code). Changed files and files committed after the last indexing are read from disk, so new "
+        "files and imports count before reindexing; pytest fixtures link a test to the conftest.py that defines them.")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.M)
 
 
@@ -195,7 +199,10 @@ def affected(root, base="HEAD", limit=30, view_id=None):
     if not isinstance(base, str) or not re.fullmatch(r"[\w./@^~{}-]{1,200}", base) or base.startswith("-"):
         raise ValueError("base must be a git revision such as HEAD, main or origin/main.")
     changes = _changes(root, base)
-    data = code_graph.build_overlay(root, {path: change["status"] for path, change in changes.items()}, view_id)
+    selected = index_inventory.inspect(root, view_id)["selected"] or {}
+    pending = code_graph.pending_changes(root, selected["path"]) if selected.get("current") else {}
+    data = code_graph.build_overlay(root, {**pending, **{path: change["status"] for path, change in changes.items()}},
+                                    view_id)
     profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile"))
     kind = {}
     for path in set(changes) | {f["path"] for f in data.get("files") or []}:
@@ -213,6 +220,8 @@ def affected(root, base="HEAD", limit=30, view_id=None):
     by_id = {s["id"]: s for s in data.get("symbols") or []}
     run_all, not_analyzed, changed_code, changed_tests, conftests = [], [], [], [], []
     for path, change in sorted(changes.items()):
+        if CI_CONFIG.search(path):
+            continue
         if RUN_ALL.search(path):
             run_all.append(f"{path} changed (configuration or dependencies)")
         elif os.path.basename(path) == "conftest.py":

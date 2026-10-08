@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.4 - beta
+
+Found by using 0.9.3 on its own repository right after installing it.
+
+- Impact (`graph` with `symbol`), docstring coverage (`docs`), `affected_tests` and the duplicate warning on edit now see
+  every file the index does not reflect yet: working-tree changes, indexed files changed on disk and files committed
+  after the last indexing. In the default `on_search` mode the index only updates on a search, so a function added
+  earlier in the session was "not found" by `graph`, and a copy of it was not flagged by the duplicate warning. Only
+  the current view gets these files; a pinned or older view is read as indexed.
+- The code graph analysis is saved next to the index (`graph-cache/`, about 0.3 MB per view) and reloaded after a
+  daemon restart or when a project left the in-memory cache: 0.03-0.12 s instead of 7-11 s of analysis on remeda
+  and gson. An indexing job warms the graph when it ends. The duplicate warning, which never waits for an analysis,
+  used to skip the first edit after a restart or a reindex; it now checks it.
+- Hook routing decides more Bash commands without the router model: a search verb after a single `|` filters the
+  output of the command before it (`python x.py | tail -5`, `npm test | grep FAIL`) and no longer sends the call to
+  the model, unless that command reads code or pages (`git grep`, `git ls-files`, `curl`, `gh api`, ...). Replayed on
+  2,489 real Bash decisions that went to the model (median 1.5 s, 7.8% redirected): 438 become mechanical, 13 minutes
+  of waiting saved in 58 hours, 1 of 155 redirects lost. Search verbs after `do`/`then`/`else` and inside a quoted
+  `bash -c "..."` / `powershell -Command "..."` are now recognized.
+- `affected_tests` no longer asks for the whole suite when only CI configuration or repository metadata changed
+  (`.github/`, `.gitlab-ci.yml`, `Jenkinsfile`, `.gitignore`, `.gitattributes`, `LICENSE`, ...).
+- The docstring reminder on edit only applies to code files of registered projects: test files (whose test functions
+  normally have no docstring) and files outside any project are left out, as in the `docs` coverage.
+
 ## 0.9.3 - beta
 
 - Camoufox download (1.3 GB) on networks that cut long transfers (seen stopping at 500-530 MB on every attempt): it is
