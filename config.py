@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
     "hook_mode": "redirect",
     "doc_mode": "remind",
     "duplicate_mode": "warn",
+    "auto_update": True,
     "contact": "",
     "model_adapter": "",
     "model_adapter_options": {},
@@ -63,6 +64,14 @@ def duplicate_mode(cfg=None):
     value = (cfg if cfg is not None else load_config()).get("duplicate_mode") or DEFAULT_CONFIG["duplicate_mode"]
     if value not in DUPLICATE_MODES:
         raise ValueError(f"Invalid duplicate_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
+    return value
+
+
+def auto_update(cfg=None):
+    """Whether the tray installs a newer release by itself when it starts (once per version)."""
+    value = (cfg if cfg is not None else load_config()).get("auto_update", DEFAULT_CONFIG["auto_update"])
+    if not isinstance(value, bool):
+        raise ValueError(f"Invalid auto_update ({value!r}) in {CONFIG_PATH}: use true or false.")
     return value
 
 

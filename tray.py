@@ -20,8 +20,10 @@ import pystray
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autostart
+import config
 import daemon_launcher
 import update_check
+import version
 
 POLL_INTERVAL_S = 45
 UPDATE_CHECK_INTERVAL_S = 24 * 3600
@@ -110,6 +112,9 @@ def _poll_loop(icon):
 
 
 def _update_loop(icon):
+    """Checks npm at start and every 24 h. At start (logon, before agent sessions use the daemon) a newer version is
+    installed right away when auto_update is on; later checks only notify and offer it in the menu."""
+    first = True
     while True:
         try:
             latest = update_check.newer_version()
@@ -118,19 +123,56 @@ def _update_loop(icon):
         if latest and latest != _state["update"]:
             _state["update"] = latest
             icon.update_menu()
-            icon.notify(f"Smart Tool {latest} is available. Update with: {update_check.UPDATE_COMMAND}", "Smart Tool")
+            if first and config.auto_update() and update_check.should_auto_update(latest):
+                icon.notify(f"Updating Smart Tool to {latest}...", "Smart Tool")
+                update_check.run_update(latest, automatic=True)
+            else:
+                icon.notify(f"Smart Tool {latest} is available: use \"Update to {latest}\" in this menu.", "Smart Tool")
+        first = False
         time.sleep(UPDATE_CHECK_INTERVAL_S)
 
 
 def _update_label(item):
-    return f"Update to {_state['update']} (copy command)"
+    return f"Update to {_state['update']}" if _state["update"] else "Check for updates"
 
 
-def _copy_update_command(icon, item):
-    import subprocess
-    subprocess.run(["clip.exe"], input=update_check.UPDATE_COMMAND.encode("ascii"), check=True,
-                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    icon.notify(f"Copied: {update_check.UPDATE_COMMAND}. Paste it in a terminal.", "Smart Tool")
+_update_busy = threading.Lock()
+
+
+def _update_now(icon, item):
+    """Menu action: installs the known newer version, or checks npm first and says when there is none."""
+    if not _update_busy.acquire(blocking=False):
+        return
+
+    def run():
+        try:
+            latest = _state["update"] or update_check.newer_version()
+            if not latest:
+                icon.notify(f"Smart Tool {version.VERSION} is the latest version.", "Smart Tool")
+                return
+            _state["update"] = latest
+            icon.update_menu()
+            update_check.run_update(latest, automatic=False)
+        except Exception as exc:
+            icon.notify(f"Could not update: {exc}", "Smart Tool")
+        finally:
+            _update_busy.release()
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _auto_update_checked(item):
+    try:
+        return config.auto_update()
+    except Exception:
+        return False
+
+
+def _toggle_auto_update(icon, item):
+    try:
+        config.update_config(lambda cfg: cfg.__setitem__("auto_update", not config.auto_update(cfg)))
+    except Exception as exc:
+        icon.notify(f"Could not change automatic updates: {exc}", "Smart Tool")
+    icon.update_menu()
 
 
 def _open_setup(icon, item):
@@ -227,7 +269,8 @@ def main():
             pystray.MenuItem("Index a folder…", _add_project),
             pystray.MenuItem("Open settings", _open_setup),
             pystray.MenuItem("Start with Windows", _toggle_autostart, checked=_autostart_checked),
-            pystray.MenuItem(_update_label, _copy_update_command, visible=lambda item: bool(_state["update"])),
+            pystray.MenuItem(_update_label, _update_now),
+            pystray.MenuItem("Update automatically", _toggle_auto_update, checked=_auto_update_checked),
             pystray.MenuItem("Quit", _quit),
         ),
     )

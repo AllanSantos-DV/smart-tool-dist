@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.9.6 - beta
+
+Reported by the claude-code-boss session validating 0.9.5.
+
+- `project_manage action=duplicates` reads the files the index does not reflect yet (working tree, files changed on
+  disk, commits after the last indexing) and says how many it read: it kept reporting a function removed in a commit
+  made after the last indexing, with no sign that the index was behind.
+- In `graph` impact results, a test or caller that is an anonymous callback registered with `test('title', fn)`,
+  `it()` or `describe()` shows its title (`test "embedder (Q47): ..."`) instead of `callback`.
+- `graph` with `symbol` accepts a partial path before `::` (`brain-embedder.js::loadConfig`), matching the files whose
+  path ends with it; it needed the full path from the project root.
+
+Automatic updates.
+
+- When the tray starts (at logon, before agent sessions use the daemon) and npm has a newer version, it runs the
+  install command in a visible console that closes on success and stays open on failure. Each version is installed
+  automatically once: a failed update restores the previous version and restarts the tray, which then only offers it.
+- The tray menu has "Update to X" (or "Check for updates", which says when the installed version is the latest) and an
+  "Update automatically" switch (`auto_update`, on by default). Later daily checks only notify.
+
+Agents that ignored the hook's redirect: only 44 of 368 blocked calls (12%) were followed by a `smart_search` within
+30 s; the rest rewrote the search in Bash, node or python.
+
+- The block message names the exact tool and arguments (`mcp__smart-tool__smart_search` with the project root filled
+  in, `web_fetch` with the URL), says it is a routing rule and not a failure, that redoing the search through Bash,
+  python, node or PowerShell bypasses it, and, in Claude Code, how to load the tool with ToolSearch.
+- The MCP server sends instructions on what to do when a call is blocked, and `smart_search`, `web_fetch`,
+  `web_search` and their `_result` tools load upfront (`anthropic/alwaysLoad`): Claude Code defers MCP tools, so a
+  blocked agent often did not have the replacement in its tool list. In real `claude -p` sessions, an agent asked to
+  read a page went straight to `web_fetch`, and one asked to run a broad `grep -rn` switched to `smart_search` after
+  the block.
+- `cd dir; grep -n x file.py` was measured as a search over the whole tree (the `;` stuck to the directory name hid
+  the file): 45 of the 92 logged Bash redirects with `cd dir;` were reads of one file. A command with a recursive
+  search after a file read (`sed -n 1,9p a.py; grep -rn x src`) is still measured by the directory it searches.
+- A subagent whose tool list has no Smart Tool tool (claude-code-guide, statusline-setup, or an agent in
+  `.claude/agents` with a `tools` list without it) is not redirected: it had nothing to switch to and gave up.
+- Bash commands that change files, the repository or dependencies (`git checkout`, `rm`, `sed -i`, `writeFileSync`,
+  `npm run`, ...) are never redirected and skip the router model: 12 of 283 Bash redirects were such commands.
+
 ## 0.9.5 - beta
 
 Reported by the claude-code-boss session on its first day using 0.9.4.

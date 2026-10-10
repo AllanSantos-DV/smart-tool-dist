@@ -300,6 +300,20 @@ def _smart_search_job_payload(job_id):
         payload['view'] = job['view']
     return payload
 
+# Claude Code defers MCP tools behind tool search; the tools the hook redirects to (and their job polling) load
+# upfront, so a blocked agent already has the replacement in its tool list.
+ALWAYS_LOAD = {"anthropic/alwaysLoad": True}
+SERVER_INSTRUCTIONS = (
+    "Smart Tool serves an indexed semantic search over the user's projects and a cheaper web reader. The user installed "
+    "a PreToolUse hook that blocks broad raw searches (recursive grep/find/ls, wide Glob/Grep) and native "
+    "WebFetch/WebSearch. A call blocked by Smart Tool is a routing rule, not a failure: make the call the block "
+    "message names (smart_search with project_root and query_identifiers, web_fetch with url and prompt, web_search "
+    "with query). Never retry the same search or download through Bash, python, node, PowerShell, curl or wget: that "
+    "bypasses the rule the user set. Reading one known file, or searching inside one known file, is never blocked. "
+    "Before changing a function, project_manage action=graph with symbol lists its callers and tests; after editing, "
+    "project_manage action=affected_tests lists the tests to run."
+)
+
 TOOLS = [
     {
         "name": "project_manage",
@@ -339,6 +353,7 @@ TOOLS = [
     },
     {
         "name": "smart_search",
+        "_meta": ALWAYS_LOAD,
         "description": (
             "Semantic search (embed+rerank) over the project's index. Use instead of "
             "raw grep/read when the search has no clear scope (e.g. a folder with node_modules). "
@@ -372,6 +387,7 @@ TOOLS = [
     },
     {
         "name": "smart_search_result",
+        "_meta": ALWAYS_LOAD,
         "description": (
             "Checks the progress and result of a background smart_search. "
             "Pass the job_id returned by smart_search; while pending, wait retry_after_s and check again."
@@ -386,6 +402,7 @@ TOOLS = [
     },
     {
         "name": "web_search",
+        "_meta": ALWAYS_LOAD,
         "description": (
             "Web search with curated results (title/url/snippet) - use instead of "
             "the native WebSearch: several sources in parallel, the query in two languages and a cache shared across sessions. Starts with free HTTP "
@@ -433,6 +450,7 @@ TOOLS = [
     },
     {
         "name": "web_fetch",
+        "_meta": ALWAYS_LOAD,
         "description": (
             "Reads a known URL and returns only the answer to the prompt, written by the gateway's mini model - use instead of "
             "the native WebFetch. The page is cached for 24 h: another prompt on the same URL does not download it again. "
@@ -449,6 +467,7 @@ TOOLS = [
     },
     {
         "name": "web_search_result",
+        "_meta": ALWAYS_LOAD,
         "description": (
             "Checks the status/result of a deep research job "
             "(web_search with depth='deep' or depth='research')."
@@ -3243,10 +3262,9 @@ def _web_route(tool, url):
     if problem:
         return {"redirect": False, "reason": f"gateway unavailable: {problem}"}
     if tool == "WebFetch":
-        return {"redirect": True, "reason": "Use the web_fetch tool from the smart-tool MCP (url + prompt): the mini model reads "
-                "the page, the answer comes back short and the page is cached for 24 h."}
-    return {"redirect": True, "reason": "Use the web_search tool from the smart-tool MCP (query + query_en): several sources, "
-            "two languages and a cache shared across sessions."}
+        return {"redirect": True, "reason": "the mini model reads the page, the answer comes back short and the page is "
+                "cached for 24 h."}
+    return {"redirect": True, "reason": "several sources, two languages and a cache shared across sessions."}
 
 
 HOOK_MAX_BODY_BYTES = 4 * 1024 * 1024
@@ -3330,6 +3348,7 @@ def _dispatch(method, params, session_id):
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "smart-tool", "version": version.VERSION},
+            "instructions": SERVER_INSTRUCTIONS,
         }
     if method == "tools/list":
         return {"tools": TOOLS}

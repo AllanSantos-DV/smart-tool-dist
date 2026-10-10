@@ -74,6 +74,7 @@ _HEAVY_DIR_NAMES = frozenset({
 # dos de cima superestimaria o custo e enviesaria a decisão pra `redirect`.
 _IGNORED_BY_DEFAULT_DIRS = frozenset({".git", "__pycache__", ".mypy_cache", ".pytest_cache"})
 _PATH_FIELDS = ("path", "file_path", "notebook_path")
+_RECURSIVE_RE = re.compile(r"\b(?:grep|egrep|fgrep)\s+(?:-\w+\s+)*-\w*[rR]|\b(?:rg|find|fd|tree)\s|\bls\s+-\w*R|-Recurse\b")
 
 
 def _resolve_path(raw, cwd):
@@ -107,6 +108,9 @@ def _command_paths(command, cwd):
     previous, base = "", cwd
     for token in re.findall(r'"([^"]+)"|\'([^\']+)\'|(\S+)', command or ""):
         raw = next((t for t in token if t), "")
+        if token[2]:
+            # `cd dir; grep x file`: the separator sticks to the unquoted word before it.
+            raw = raw.rstrip(";")
         after_cd, previous = previous.lower() in ("cd", "pushd", "set-location", "sl"), raw
         if after_cd:
             # The directory of a `cd` is where the command runs (base for what follows), not what it searches.
@@ -167,6 +171,9 @@ def _target_facts(tool_name, tool_input, cwd):
     raw = _target_path(tool_input, cwd)
     if raw is None and tool_name == "Bash":
         candidates = _command_paths(tool_input.get("command"), cwd)
+        if candidates and _RECURSIVE_RE.search(tool_input.get("command") or ""):
+            # `sed -n 1,9p a.py; grep -rn x src`: the recursive part is the cost, not the file read before it.
+            candidates = [c for c in candidates if os.path.isdir(c)] or candidates
         if candidates:
             raw = candidates[0]
     scope_note = None
@@ -308,6 +315,22 @@ _READ_PRODUCER_RE = re.compile(
     re.IGNORECASE,
 )
 _READ_TOOLS = frozenset({"Read", "NotebookRead"})
+# Commands that change files, the repository or dependencies are never redirected (smart_search cannot do the change).
+# Verbs are matched outside quoted strings, so a grep pattern like "pip install" is not one; file writes inside an
+# inline script (node -e, python -c) are matched anywhere.
+_QUOTED_RE = re.compile(r"""'[^']*'|"(?:\\.|[^"\\])*\"""")
+_MUTATING_VERB_RE = re.compile(
+    r"(?:^|[;&|(]|\s)(?:rm|mv|cp|mkdir|rmdir|touch|chmod|tee)\s"
+    r"|\bgit\s+(?:-C\s+\S+\s+)?(?:checkout|commit|add|push|pull|reset|stash|restore|rm|mv|merge|rebase|apply|tag|clean|"
+    r"clone|switch|cherry-pick)\b|\bsed\s+-i"
+    r"|\b(?:npm|pnpm|yarn|pip|uv)\s+(?:install|i|add|run|publish|ci|test)\b"
+)
+_FILE_WRITE_RE = re.compile(r"writeFileSync|writeFile\(|write_text\(|Set-Content|Out-File")
+
+
+def _mutates(command):
+    """Whether a shell command changes files, the repository or dependencies."""
+    return bool(_FILE_WRITE_RE.search(command) or _MUTATING_VERB_RE.search(_QUOTED_RE.sub("''", command)))
 
 BREAKER_PATH = os.path.join(os.path.dirname(METRICS_PATH), "router-breaker.json")
 BREAKER_FAILURES = 3
@@ -324,7 +347,9 @@ def _mechanical_decision(tool_name, tool_input):
     `offset`/`limit` explícitos, onde só as linhas pedidas servem). Remedido em 2026-10-08
     sobre 2488 Bash que foram ao modelo (mediana 1,5 s, 7,8% redirecionados): ignorar os
     filtros depois de `|` (salvo quando o produtor lê código ou páginas) decide 439 deles
-    sem modelo (13,3 min em 58 h) e perde 1 dos 155 redirecionamentos."""
+    sem modelo (13,3 min em 58 h) e perde 1 dos 155 redirecionamentos. Remedido em 2026-10-09 sobre 3294 Bash decididos
+    pelo modelo: comandos que alteram arquivos, o repositório ou dependências foram 12 dos 283 redirecionamentos (todos
+    errados: o agente contornava o bloqueio) e 566 liberações."""
     if tool_name in _READ_TOOLS:
         return "allow", "Reading a specific file is never replaced by semantic search."
     if tool_name == "Bash":
@@ -333,6 +358,8 @@ def _mechanical_decision(tool_name, tool_input):
             return "allow", "Bash without a readable command."
         if not _SEARCH_VERB_RE.search(command) and not _READ_PRODUCER_RE.search(command):
             return "allow", "The command neither searches nor reads source code."
+        if _mutates(command):
+            return "allow", "The command changes files, the repository or dependencies."
     return None
 
 

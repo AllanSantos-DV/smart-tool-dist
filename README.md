@@ -29,7 +29,9 @@ are cheaper, or just tells the agent what Smart Tool would do.
 npx @allansantos-dev/smart-tool@latest install
 ```
 
-Run the same command to update; `~/.smart-tool` is kept. It downloads [uv](https://docs.astral.sh/uv/) (checksum
+Updates install themselves: when the tray starts (at logon) and npm has a newer version, it runs this same command in
+a visible console, once per version; the tray menu has "Update to X" (or "Check for updates") on demand and an
+"Update automatically" switch. Running the command by hand also updates; `~/.smart-tool` is kept. It downloads [uv](https://docs.astral.sh/uv/) (checksum
 verified) and a private Python 3.12 into `~/.smart-tool/runtime`, with nothing added to `PATH` or the registry, then
 copies Smart Tool to `%LOCALAPPDATA%\Programs\SmartTool` with its own virtual environment,
 installs the web runtime, registers a per-user Scheduled Task that starts the tray at logon and starts the daemon on

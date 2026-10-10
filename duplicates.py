@@ -199,13 +199,16 @@ def _entry(path, name, start, end, file_lines, ext):
             "hash": hashlib.sha1(normalized.encode("utf-8")).hexdigest(), **_features(body, ext, short)}
 
 
-def _working_tree_functions(root, changes, profile):
-    """Production functions of the files changed in the working tree, read from disk, so a copy of a function written
-    earlier in the same session is caught before the index catches up."""
+def _working_tree_functions(root, changes, profile, include_tests=False):
+    """Functions of the files the index does not reflect yet, read from disk (production code, plus tests when
+    include_tests), with the same identity as indexed ones, so a copy written earlier in the session is caught and
+    a function removed since the last indexing is not reported."""
     found = []
+    kinds = ("code", "test") if include_tests else ("code",)
     for rel, status in changes.items():
         ext = rel.rsplit(".", 1)[-1].lower() if "." in rel else ""
-        if status == "deleted" or ext not in _LANG or index_profile.kind(rel, profile) != "code":
+        kind = index_profile.kind(rel, profile)
+        if status == "deleted" or ext not in _LANG or kind not in kinds:
             continue
         try:
             with open(os.path.join(root, rel), encoding="utf-8") as stream:
@@ -215,12 +218,18 @@ def _working_tree_functions(root, changes, profile):
         if _GENERATED.search(source[:4000]):
             continue
         lines = source.splitlines()
-        for function in doc_check.functions(rel, source):
-            if function["end"] - function["start"] + 1 < MIN_LINES:
+        functions = doc_check.functions(rel, source)
+        occurrences = {}
+        for function in functions:
+            if function["end"] - function["start"] + 1 < MIN_LINES or any(
+                    other is not function and other["start"] <= function["start"] and function["end"] <= other["end"]
+                    and (other["start"], other["end"]) != (function["start"], function["end"]) for other in functions):
                 continue
             entry = _entry(rel, function["name"], function["start"], function["end"], lines, ext)
             if entry:
-                found.append({**entry, "kind": "code"})
+                occurrence = occurrences[entry["hash"]] = occurrences.get(entry["hash"], 0) + 1
+                found.append({**entry, "kind": kind, "fp": hashlib.sha1(
+                    f"{rel}\0{entry['hash']}\0{occurrence}".encode("utf-8")).hexdigest()})
     return found
 
 
@@ -359,6 +368,13 @@ def find(root, embed, configured_model, min_similarity=DEFAULT_MIN_SIMILARITY, i
     started = time.monotonic()
     dismissed = dismissed or {}
     functions, notes, view = _functions(root, include_tests)
+    if view.get("current"):
+        pending = code_graph.pending_changes(root, view["path"])
+        if pending:
+            profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile"))
+            functions = [f for f in functions if f["path"] not in pending] + _working_tree_functions(
+                root, pending, profile, include_tests)
+            notes.append(f"{len(pending)} file(s) changed since the last indexing were read from disk.")
     groups = {}
     for f in functions:
         groups.setdefault(f["hash"], []).append(f)

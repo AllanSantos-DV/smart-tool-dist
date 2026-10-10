@@ -2,6 +2,7 @@
 which tests reach it through static calls and which files import its module, each with the first line of its
 docstring. Answers the question an agent asks before an edit without a chain of searches and file reads."""
 import os
+import re
 from collections import defaultdict
 
 import code_graph
@@ -17,7 +18,7 @@ NOTE = ("Static analysis of the indexed snapshot plus the files changed in the w
 def _matches(symbols, name):
     path, _sep, wanted = name.strip().rpartition("::")
     path = path.replace("\\", "/").removeprefix("./")
-    pool = [s for s in symbols if s["path"] == path] if path else symbols
+    pool = [s for s in symbols if s["path"] == path or s["path"].endswith("/" + path)] if path else symbols
     exact = [s for s in pool if s["id"] == wanted or s["name"] == wanted]
     return exact or [s for s in pool if s["name"].split(".")[-1] == wanted]
 
@@ -47,6 +48,31 @@ def summaries(root, symbols, wanted_ids):
                 docs[(path, function["start"])] = function["doc"]
     return {s["id"]: docs[(s["path"], s["start_line"])] for s in symbols
             if s["id"] in wanted_ids and (s["path"], s["start_line"]) in docs}
+
+
+_TEST_TITLE = re.compile(r"""\b(test|it|describe|suite)(?:\.\w+)?\s*\(\s*(['"`])(.+?)\2""")
+
+
+def _name_test_callbacks(root, by_id, sites):
+    """Anonymous callbacks registered with test('title', fn), it(), describe() are named after their title, so a test
+    reads 'test "loads the config"' instead of 'callback'."""
+    lines_of = {}
+    for site in sites:
+        symbol = by_id.get(site.get("id")) or {}
+        if symbol.get("name", "").split(".")[-1] not in ("callback", "anonymous"):
+            continue
+        path = symbol["path"]
+        if path not in lines_of:
+            try:
+                with open(os.path.join(root, path), encoding="utf-8") as stream:
+                    lines_of[path] = stream.read().splitlines()
+            except (OSError, UnicodeDecodeError):
+                lines_of[path] = []
+        start = symbol["start_line"]
+        text = " ".join(lines_of[path][max(start - 2, 0):start])
+        match = _TEST_TITLE.search(text)
+        if match:
+            site["function"] = f'{match.group(1)} "{match.group(3)[:80]}"'
 
 
 def impact(root, symbol, view_id=None, depth=3, limit=30):
@@ -92,6 +118,7 @@ def impact(root, symbol, view_id=None, depth=3, limit=30):
     importers = sorted({d["source"] for d in data["dependencies"] if d.get("target") in files and d["source"] not in files})
     ordered_tests = sorted(tests.values(), key=lambda t: (t["hops"], t["path"], t["line"]))
     shown = direct[:limit] + outgoing[:limit] + ordered_tests[:limit]
+    _name_test_callbacks(root, by_id, shown)
     docs = summaries(root, data["symbols"], targets | {site["id"] for site in shown})
     for site in shown:
         doc = docs.get(site.pop("id"))

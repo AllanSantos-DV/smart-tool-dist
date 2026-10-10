@@ -42,6 +42,114 @@ def deny(reason):
                                    "permissionDecisionReason": reason}}
 
 
+# Claude Code built-in subagents whose tool list has no MCP tool (claude-code-guide: Glob, Grep, Read, WebFetch,
+# WebSearch; statusline-setup: Read, Edit).
+BUILTIN_AGENTS_WITHOUT_MCP = frozenset({"claude-code-guide", "statusline-setup"})
+
+
+def _frontmatter(path):
+    """`name` and `tools` of an agent definition (.md with YAML frontmatter); tools is None when the field is absent
+    (the agent inherits every tool), else the list of tool names (inline `[a, b]`, `a, b` or a `- a` block)."""
+    with open(path, encoding="utf-8") as stream:
+        lines = stream.read().splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None, None
+    name, tools, block = None, None, False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if block and line.lstrip().startswith("- "):
+            tools.append(line.strip()[2:].strip().strip("'\""))
+            continue
+        block = False
+        key, _sep, value = line.partition(":")
+        value = value.strip()
+        if key == "name":
+            name = value.strip("'\"")
+        elif key == "tools":
+            if value:
+                tools = [item.strip().strip("'\"") for item in value.strip("[]").split(",") if item.strip()]
+            else:
+                tools, block = [], True
+    return name, tools
+
+
+def agent_has_smart_tool(agent_type, cwd):
+    """Whether the subagent running the call can call the Smart Tool MCP tools: denying a native tool to an agent that
+    has no replacement only makes it give up. Agents defined in .claude/agents (user or project) are read; unknown
+    agents keep the redirect."""
+    if not agent_type:
+        return True
+    if agent_type in BUILTIN_AGENTS_WITHOUT_MCP:
+        return False
+    for folder in (os.path.join(cwd or "", ".claude", "agents"), os.path.join(endpoint_sync.claude_dir(), "agents")):
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for entry in names:
+            if not entry.endswith(".md"):
+                continue
+            try:
+                name, tools = _frontmatter(os.path.join(folder, entry))
+            except (OSError, UnicodeDecodeError):
+                continue
+            if (name or entry.split(".")[0]) != agent_type:
+                continue
+            return tools is None or any(tool == "*" or tool.startswith(f"mcp__{SMART_TOOL_SERVER}") for tool in tools)
+    return True
+
+
+def _search_root(tool_input, cwd):
+    """project_root for smart_search: the registered project holding what the call searches (its path field, or the
+    first existing path of the command, after any `cd`), else that directory; the session directory when the call
+    names no path."""
+    raw = router._target_path(tool_input, cwd)
+    paths = [router._resolve_path(raw, cwd)] if raw else router._command_paths(tool_input.get("command"), cwd)
+    target = os.path.abspath(next((p for p in paths if p), None) or cwd or ".")
+    if os.path.isfile(target):
+        target = os.path.dirname(target)
+    key = os.path.normcase(target) + os.sep
+    roots = [p["root"] for p in project_store.all_projects()
+             if key.startswith(os.path.normcase(os.path.abspath(p["root"])).rstrip(os.sep) + os.sep)]
+    return max(roots, key=len) if roots else target
+
+
+def _tool_name(client, tool):
+    return f"mcp__{SMART_TOOL_SERVER}__{tool}" if client == "claude" else f"the {tool} tool of the {SMART_TOOL_SERVER} MCP server"
+
+
+def _load_hint(client, tool):
+    """Claude Code defers MCP tools behind tool search: a blocked agent may not have the schema loaded yet."""
+    if client != "claude":
+        return ""
+    return f' If it is not in your tool list yet, load it first with ToolSearch, query "select:mcp__{SMART_TOOL_SERVER}__{tool}".'
+
+
+def redirect_message(client, tool_name, tool_input, reason, cwd):
+    """Deny text for a broad raw search: the exact tool and arguments to call, and that rewriting the same search in
+    Bash, python, node or PowerShell is the bypass the rule exists to stop."""
+    root = _search_root(tool_input, cwd).replace("\\", "/")
+    return (f"Blocked by Smart Tool, a routing rule set by the user, not a failure ({tool_name}: {clean_reason(reason)}). "
+            f'Run this search with {_tool_name(client, "smart_search")}: project_root="{root}", query_identifiers = what '
+            f"you are looking for in identifier terms (plus query_comments when the project has two languages)."
+            f'{_load_hint(client, "smart_search")} Do not repeat the same search through Bash, python, node or '
+            f"PowerShell: that bypasses the rule. Reading one known file, or searching inside one known file, is never "
+            f"blocked.")
+
+
+def web_message(client, tool_name, url, why):
+    """Deny text for native WebFetch/WebSearch: the Smart Tool call to make instead, with the URL filled in."""
+    if tool_name == "WebFetch":
+        call = f'{_tool_name(client, "web_fetch")} with url="{url}" and prompt = what you need from the page'
+        tool, fetchers = "web_fetch", "curl, wget, python or PowerShell"
+    else:
+        call = f"{_tool_name(client, 'web_search')} with query (and query_en in English)"
+        tool, fetchers = "web_search", "curl, a browser script or another search tool"
+    return (f"Blocked by Smart Tool, a routing rule set by the user, not a failure. Call {call}: {why}"
+            f"{_load_hint(client, tool)} Do not fetch it through {fetchers}: that bypasses the rule.")
+
+
 def smart_tool_in_session(cwd):
     """Claude Code loads MCP servers from ~/.claude.json (user and per project) and the project's .mcp.json."""
     with open(endpoint_sync.claude_json(), encoding="utf-8") as stream:
@@ -149,7 +257,8 @@ def _edit_review(payload, doc_mode, duplicate_mode):
 
 def decide(payload, client, web_route):
     """Hook output for one PreToolUse payload: edits follow doc_mode (require | remind | off) and duplicate_mode
-    (warn | off), the other tools follow hook_mode (redirect | advise | off)."""
+    (warn | off), the other tools follow hook_mode (redirect | advise | off). A subagent whose tool list has no
+    Smart Tool MCP tool is never redirected: it has nothing to switch to."""
     cfg = config.load_config()
     if isinstance(payload, dict) and payload.get("tool_name") in EDIT_TOOLS:
         doc_mode, duplicate_mode = config.doc_mode(cfg), config.duplicate_mode(cfg)
@@ -161,6 +270,9 @@ def decide(payload, client, web_route):
         return {}
     output = _route(payload, client, web_route, cfg)
     reason = (output.get("hookSpecificOutput") or {}).get("permissionDecisionReason")
+    if reason and not agent_has_smart_tool(payload.get("agent_type") if payload.get("agent_id") else None,
+                                           payload.get("cwd")):
+        return {}
     return advise(reason) if mode == "advise" and reason else output
 
 
@@ -178,8 +290,9 @@ def _route(payload, client, web_route, cfg):
             present = False
         if not present:
             return {}
-        decision = web_route(tool_name, str(tool_input.get("url") or ""))
-        return deny(clean_reason(decision.get("reason"))) if decision.get("redirect") else {}
+        url = str(tool_input.get("url") or "")
+        decision = web_route(tool_name, url)
+        return deny(web_message(client, tool_name, url, clean_reason(decision.get("reason")))) if decision.get("redirect") else {}
     router.CLIENT.set(client)
     try:
         decision, reason = router.decide(tool_name, tool_input, router_model, cwd=cwd)
@@ -190,5 +303,5 @@ def _route(payload, client, web_route, cfg):
             pass
         return {"systemMessage": f"Smart Tool unavailable, routing skipped: {type(exc).__name__}"}
     if decision == "redirect":
-        return deny(f"Use smart_search instead of raw {tool_name}: {clean_reason(reason)}")
+        return deny(redirect_message(client, tool_name, tool_input, reason, cwd))
     return {}
