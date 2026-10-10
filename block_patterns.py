@@ -247,20 +247,27 @@ def review_later(tool_name, tool_input, rule_reason, metrics_path, redact, log):
     return True
 
 
-def decide_proposal(entry_id, action):
-    """accept moves a proposal to accepted; reject moves it to rejected; remove deletes an accepted pattern."""
+def decide_proposals(entry_ids, action):
+    """accept moves proposals to accepted; reject moves them to rejected; remove deletes accepted patterns. All ids are
+    decided in one write, or none when any id is unknown (ValueError naming it)."""
+    if action not in ("accept", "reject", "remove"):
+        raise ValueError("Invalid action: use accept, reject or remove.")
+    wanted = list(dict.fromkeys(entry_ids))
+    if not wanted:
+        raise ValueError("No pattern selected.")
     with _LOCK:
         data = load()
         source = "accepted" if action == "remove" else "proposals"
-        entry = next((e for e in data[source] if e["id"] == entry_id), None)
-        if entry is None:
-            raise ValueError(f"No {source[:-1]} with id {entry_id}.")
-        data[source] = [e for e in data[source] if e["id"] != entry_id]
-        if action == "accept":
-            data["accepted"].append({**entry, "accepted_at": time.time()})
-        elif action == "reject":
-            data["rejected"].append({**entry, "rejected_by": "user"})
-        elif action != "remove":
-            raise ValueError("Invalid action: use accept, reject or remove.")
+        found = {e["id"]: e for e in data[source] if e["id"] in wanted}
+        missing = [entry_id for entry_id in wanted if entry_id not in found]
+        if missing:
+            raise ValueError(f"No {source[:-1]} with id {', '.join(missing)}.")
+        data[source] = [e for e in data[source] if e["id"] not in found]
+        now = time.time()
+        for entry_id in wanted:
+            if action == "accept":
+                data["accepted"].append({**found[entry_id], "accepted_at": now})
+            elif action == "reject":
+                data["rejected"].append({**found[entry_id], "rejected_by": "user"})
         _save(data)
         return data

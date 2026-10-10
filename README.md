@@ -9,6 +9,9 @@ A local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharpe
 | `web_fetch` | Reads a known URL and returns only the answer to your prompt, written by a small model; pages are cached for 24 h. Pages over 60,000 characters are not cut: the model reads the parts closest to the prompt (needs an `embedding_model`) |
 | `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage; `graph` with `symbol` tells what changing a function touches: callers, calls, the tests that reach it and the files that import it |
 
+Agents that must click, type or log in also get Microsoft's [Playwright MCP](https://github.com/microsoft/playwright-mcp),
+registered as the `playwright` server where this machine lets a browser be driven (see Set up, step 3).
+
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
@@ -51,7 +54,18 @@ Open the setup screen from the tray icon ("Open settings") or at `http://127.0.0
    reasoning: web search tier order and result checks), the index classification model (also reviews block patterns) and the research model. Any id the gateway
    accepts works; the catalog is shown as suggestions.
 3. **Agents**: register the MCP server in Claude Code or Codex (runs their official `mcp add` command), install the
-   hook and choose its behavior:
+   hook and choose its behavior.
+
+   **Browser control** comes with the registration, and with every update for clients where smart-tool is registered:
+   the official Playwright MCP (pinned in `web_adapters/node`) is registered as the `playwright` server, driving the
+   Chromium Smart Tool installs, headless, with an isolated in-memory profile (no logins of yours) and its files in
+   `~/.smart-tool/data/playwright-mcp`. Before registering, Smart Tool starts that server and opens a blank page as an
+   agent would; where that fails (a corporate policy that forbids remote debugging, a missing browser) nothing is
+   registered, agents keep reading pages through `web_fetch`, and the setup screen shows the reason with a retry
+   button. A `playwright` server you registered yourself is never touched. Remove it with
+   `claude mcp remove playwright -s user` / `codex mcp remove playwright`.
+
+   The hook behaviors:
    - **Redirect** (default): the native tool is denied with the reason and the Smart Tool tool to use. The decision
      is a fixed rule, under a millisecond and the same every time: a content search over a project folder (`grep -r`,
      `rg`, `git grep`, the Grep tool on a folder) or over more than 20 listed files goes to `smart_search`; reading or
@@ -72,6 +86,10 @@ Open the setup screen from the tray icon ("Open settings") or at `http://127.0.0
 
    A documented function edited only in its body is not mentioned. `project_manage` with `action=docs` lists the
    public functions still without a docstring, for documenting a project that started without them.
+
+   **Block patterns waiting for you** are shown in one approval panel: 8 per page, the ones that would have blocked
+   the most logged calls first, a filter over pattern, reason and example, and bulk accept or reject of the selected
+   rows; each row opens to its reason and example.
 
    **Duplicate functions on edit** compares the functions an edit writes with the indexed code. **Warn** (default)
    tells the agent when a written function has the same body as an existing one (comments, spacing and docstrings

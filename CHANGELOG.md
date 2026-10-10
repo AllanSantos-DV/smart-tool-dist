@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.10 - beta
+
+- Browser control for agents, on by default: registering smart-tool in Claude Code or Codex (and every update, for
+  clients where it is registered) also registers Microsoft's Playwright MCP (`@playwright/mcp` 0.0.83, pinned in
+  `web_adapters/node`) as the `playwright` server, driving the Chromium Smart Tool already installs, headless, with an
+  isolated in-memory profile. A probe first starts the server and opens a blank page the way an agent would; where
+  that fails (a corporate policy against remote debugging, a missing browser, the client CLI refusing) nothing is
+  registered, agents keep the read-only browsers of `web_fetch` and `web_search`, and the setup screen shows the
+  reason and a retry button instead of an error. A registration Smart Tool made is refreshed on update (Node and
+  Chromium paths change) and removed when the probe stops passing; a `playwright` server you registered is kept.
+- Block pattern proposals no longer stack one block per proposal (21 pending ones made the setup screen scroll
+  forever): one approval panel shows 8 per page, ordered by how many logged calls each would have blocked, with a
+  filter, a select-page toggle and bulk accept/reject in a single write (all ids or none); reason and example open on
+  demand, and blocking patterns sit in a collapsed list.
+
 ## 0.9.9 - beta
 
 - `web_fetch` renders JavaScript pages with [Moli](https://github.com/lexmount/moli) first (a headless browser built

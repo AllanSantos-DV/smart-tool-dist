@@ -291,6 +291,25 @@ def verify(target, python):
         raise RuntimeError(f"The active daemon (pid {pid}) does not belong to this installation: {command.strip()[:200]}")
 
 
+def enable_browser_control(target, python):
+    """Registers Playwright MCP (browser_control.ensure) in each client where smart-tool is registered. Never fails the
+    installation: a machine that cannot drive a browser keeps the read-only browsers, and the outcome is printed."""
+    script = ("import json, browser_control, endpoint_sync; "
+              "print(json.dumps({c: browser_control.ensure(c) for c, url in endpoint_sync.registrations().items() if url}))")
+    try:
+        result = subprocess.run([str(python), "-c", script], cwd=target, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=300)
+        outcome = json.loads(result.stdout.strip().splitlines()[-1]) if not result.returncode else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError) as exc:
+        result, outcome = None, f"{type(exc).__name__}: {exc}"
+    if not isinstance(outcome, dict):
+        detail = outcome or ((result.stderr or result.stdout).strip().splitlines() or ["no output"])[-1]
+        print(f"Browser control not set up: {detail}")
+        return
+    for client, state in outcome.items():
+        print(f"Browser control in {client}: {state['state']}" + (f" ({state['reason']})" if state.get("reason") else ""))
+
+
 MIN_PYTHON = (3, 11)
 
 
@@ -363,6 +382,8 @@ def main():
         shutil.rmtree(backup, ignore_errors=True)
         raise SystemExit(1)
     shutil.rmtree(backup)
+    if not args.no_start:
+        enable_browser_control(target, python)
     print("Smart Tool ready." if not args.no_start else "Files installed; daemon not restarted (--no-start).")
 
 

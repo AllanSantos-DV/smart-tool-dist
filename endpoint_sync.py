@@ -117,6 +117,15 @@ def register_command(client, base):
 def register(client, base):
     """Runs the client's own CLI (it owns its config file; ~/.claude.json is rewritten by Claude Code all the time)."""
     command = register_command(client, base)
+    run_cli(command)
+    if registrations().get(client) != f"{base}/mcp":
+        raise RuntimeError(f"'{' '.join(command)}' finished, but the registration did not appear in the client's configuration.")
+    return " ".join(command)
+
+
+def run_cli(command):
+    """Runs a client CLI command (claude, codex) found on PATH, killing its whole shim tree after REGISTER_TIMEOUT_S.
+    Raises RuntimeError with the command and the CLI's own message when it is missing, hangs or exits non-zero."""
     executable = shutil.which(command[0])
     if not executable:
         raise RuntimeError(f"CLI '{command[0]}' not found in Smart Tool's PATH. Register it manually: {' '.join(command)}")
@@ -140,9 +149,6 @@ def register(client, base):
     if proc.returncode != 0:
         detail = (stderr or stdout).strip()[-400:]
         raise RuntimeError(f"'{' '.join(command)}' failed (code {proc.returncode}): {detail}")
-    if registrations().get(client) != f"{base}/mcp":
-        raise RuntimeError(f"'{' '.join(command)}' finished, but the registration did not appear in the client's configuration.")
-    return " ".join(command)
 
 
 def known_port():

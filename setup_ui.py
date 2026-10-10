@@ -20,6 +20,7 @@ import secrets
 
 import autostart
 import block_patterns
+import browser_control
 import client_hooks
 import config
 import daemon_launcher
@@ -168,12 +169,17 @@ def handle_local_models_save(body):
 
 def handle_integration_get():
     registered = endpoint_sync.registrations()
+    try:
+        browser, browser_error = browser_control.status(), ""
+    except ValueError as exc:
+        browser, browser_error = {}, str(exc)
     clients = []
     for key, info in AGENT_CLIENTS.items():
         spec, state = client_hooks.CLIENTS[key], client_hooks.status(info)
         clients.append({"client": key, "label": spec["label"], "mcp_url": registered.get(key), "hook": state["installed"],
                         "hook_error": state["error"], "file": spec["files"][0], "docs": spec["docs"],
-                        "register_command": " ".join(endpoint_sync.register_command(key, setup_origin()))})
+                        "register_command": " ".join(endpoint_sync.register_command(key, setup_origin())),
+                        "browser_control": browser.get(key), "browser_control_error": browser_error})
     try:
         mode, mode_error = config.hook_mode(), ""
     except ValueError as exc:
@@ -206,9 +212,12 @@ def handle_integration_get():
 def handle_integration_save(body):
     """`hook_mode` sets redirect/advise/off for every client; `register_mcp` runs the client's CLI; hook in two steps:
     `preview` shows the exact change, `install` writes it (with backup)."""
-    if isinstance(body, dict) and body.get("action") == "block_pattern":
+    if isinstance(body, dict) and body.get("action") == "block_patterns":
+        ids = body.get("ids")
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            raise SetupError("ids must be a list of pattern ids.")
         try:
-            block_patterns.decide_proposal(str(body.get("id") or ""), body.get("decision"))
+            block_patterns.decide_proposals(ids, body.get("decision"))
         except (OSError, ValueError) as exc:
             raise SetupError(str(exc))
         return handle_integration_get()
@@ -228,14 +237,18 @@ def handle_integration_save(body):
     info = AGENT_CLIENTS[body["client"]]
     try:
         if body.get("action") == "register_mcp":
-            return {"command": endpoint_sync.register(body["client"], setup_origin()), **handle_integration_get()}
+            command = endpoint_sync.register(body["client"], setup_origin())
+            return {"command": command, "browser_control": browser_control.ensure(body["client"]),
+                    **handle_integration_get()}
+        if body.get("action") == "browser_control":
+            return {"browser_control": browser_control.ensure(body["client"]), **handle_integration_get()}
         if body.get("action") == "preview":
             return client_hooks.preview(info)
         if body.get("action") == "install":
             return {**client_hooks.install(info, body.get("token"), True), **handle_integration_get()}
     except (ValueError, RuntimeError) as exc:
         raise SetupError(str(exc))
-    raise SetupError("Invalid action: use hook_mode, register_mcp, preview or install.")
+    raise SetupError("Invalid action: use hook_mode, register_mcp, browser_control, preview or install.")
 
 
 def handle_providers_get():
@@ -462,6 +475,29 @@ _PAGE_TEMPLATE = """<!doctype html>
   .provider-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; }
   .provider-head strong { font: 600 .98rem var(--display); letter-spacing: .02em; }
   .blocked { color: var(--muted); font-size: .88rem; border: 1px dashed var(--line); border-radius: 10px; padding: 14px 16px; }
+  .pattern-panel, .pattern-blocking { margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .pattern-head { display: flex; flex-direction: column; gap: 2px; }
+  .pattern-tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 12px; }
+  .pattern-bulk { margin-top: 10px; }
+  .pattern-list { list-style: none; margin: 10px 0 0; padding: 0; border-top: 1px solid var(--line); }
+  .pattern-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start;
+    padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .pattern-blocking .pattern-row { grid-template-columns: minmax(0, 1fr); }
+  .pattern-row input[type=checkbox] { margin-top: 6px; }
+  .pattern-body summary { display: flex; gap: 8px; align-items: baseline; cursor: pointer; min-width: 0; }
+  .pattern-tool { font: 600 .74rem var(--display); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); flex: none; }
+  .pattern-code { font: .78rem/1.4 var(--mono); overflow-wrap: anywhere; min-width: 0; display: -webkit-box;
+    -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .pattern-body[open] .pattern-code { -webkit-line-clamp: unset; }
+  .pattern-main { min-width: 0; }
+  .pattern-meta { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
+  .pattern-detail { font-size: .84rem; padding: 4px 0 2px; }
+  .pattern-detail p { margin: 4px 0; }
+  .pattern-reach { font: .78rem var(--mono); color: var(--muted); white-space: nowrap; }
+  .pattern-actions { display: flex; gap: 6px; }
+  .pattern-actions button { padding: 4px 10px; font-size: .78rem; }
+  .pattern-pager { justify-content: space-between; }
+  .pattern-blocking > summary { cursor: pointer; font: 600 .9rem var(--display); }
 
   body:not(.ready) .station[data-live="1"] .wire::after { transform: scaleX(0); }
   @media (max-width: 900px) { .panels { grid-template-columns: minmax(0, 1fr); } }
@@ -897,6 +933,14 @@ $("btn-save-local-models").addEventListener("click", async () => {
   }
 });
 
+function browserText(item) {
+  if (item.browser_control_error) return "Browser control status unreadable: " + item.browser_control_error;
+  const state = item.browser_control || {};
+  if (state.state === "registered") return "Browser control on: Playwright MCP drives an isolated, headless Chromium";
+  if (state.state === "kept") return "Browser control: your own playwright MCP server is kept";
+  if (state.state === "unavailable") return "Browser control unavailable on this machine (" + state.reason + "); pages are still read by web_fetch";
+  return "Browser control is set up when the MCP is registered";
+}
 async function loadAgents() {
   try {
     const resp = await fetch("/setup/integration");
@@ -918,13 +962,28 @@ async function loadAgents() {
       row.className = "provider";
       const mcp = item.mcp_url ? "MCP registered: " + item.mcp_url : "smart-tool MCP not registered in this client";
       const hook = item.hook_error ? "Hook unreadable: " + item.hook_error : item.hook ? "Hook installed and up to date" : "Hook missing or outdated";
-      row.innerHTML = `<div class="provider-head"><strong></strong><span class="state"></span></div><p class="hint mcp"></p><p class="hint mono cmd"></p><p class="hint file"></p>
-        <div class="actions"><button type="button" class="register">Register MCP</button><button type="button" class="hook">Install or update hook</button></div>
+      row.innerHTML = `<div class="provider-head"><strong></strong><span class="state"></span></div><p class="hint mcp"></p><p class="hint browser"></p><p class="hint mono cmd"></p><p class="hint file"></p>
+        <div class="actions"><button type="button" class="register">Register MCP</button><button type="button" class="hook">Install or update hook</button><button type="button" class="quiet browser-retry">Set up browser control</button></div>
         <div class="plan" hidden><span class="hint plan-file"></span><pre class="code-preview"></pre>
           <div class="actions"><button type="button" class="confirm">Confirm and write</button><button type="button" class="quiet cancel">Cancel</button></div></div>`;
       row.querySelector("strong").textContent = item.label;
       row.querySelector(".state").textContent = hook;
       row.querySelector(".mcp").textContent = mcp;
+      row.querySelector(".browser").textContent = browserText(item);
+      const retry = row.querySelector(".browser-retry");
+      retry.hidden = !item.mcp_url || ["registered", "kept"].includes((item.browser_control || {}).state);
+      retry.addEventListener("click", async () => {
+        retry.disabled = true;
+        setMsg("agents-msg", "", "Checking whether agents can drive a browser here…");
+        try {
+          const result = await post("/setup/integration", { client: item.client, action: "browser_control" });
+          setMsg("agents-msg", "ok", item.label + ": " + browserText({ browser_control: result.browser_control }));
+          await loadAgents();
+        } catch (error) {
+          setMsg("agents-msg", "error", error.message);
+          retry.disabled = false;
+        }
+      });
       row.querySelector(".file").textContent = item.file;
       row.querySelector(".cmd").textContent = item.mcp_url ? "" : "Or in a terminal: " + item.register_command;
       const register = row.querySelector(".register");
@@ -934,7 +993,7 @@ async function loadAgents() {
         setMsg("agents-msg", "", "Registering the MCP in " + item.label + "…");
         try {
           const result = await post("/setup/integration", { client: item.client, action: "register_mcp" });
-          setMsg("agents-msg", "ok", "MCP registered with: " + result.command + ". Reconnect open sessions (/mcp).");
+          setMsg("agents-msg", "ok", "MCP registered with: " + result.command + ". " + browserText({ browser_control: result.browser_control }) + ". Reconnect open sessions (/mcp).");
           await loadAgents();
         } catch (error) {
           setMsg("agents-msg", "error", error.message);
@@ -973,49 +1032,163 @@ async function loadAgents() {
     setMsg("agents-msg", "error", "Agent status unavailable: " + error.message);
   }
 }
+const PATTERN_PAGE_SIZE = 8;
+const patternView = { page: 0, filter: "", sort: "impact", selected: new Set(), open: false };
+let lastPatterns = null;
+function patternPage(items, view) {
+  const needle = view.filter.trim().toLowerCase();
+  const matched = items.filter((item) => !needle || [item.tool, item.pattern, item.reason, item.example]
+    .some((text) => String(text || "").toLowerCase().includes(needle)));
+  const sorted = matched.slice().sort(view.sort === "newest"
+    ? (a, b) => (b.proposed_at || 0) - (a.proposed_at || 0)
+    : (a, b) => (b.history_matches || 0) - (a.history_matches || 0) || (b.proposed_at || 0) - (a.proposed_at || 0));
+  const pages = Math.max(1, Math.ceil(sorted.length / PATTERN_PAGE_SIZE));
+  const page = Math.min(Math.max(0, view.page), pages - 1);
+  return { rows: sorted.slice(page * PATTERN_PAGE_SIZE, (page + 1) * PATTERN_PAGE_SIZE), page, pages,
+           matched: sorted.length, total: items.length,
+           calls: items.reduce((sum, item) => sum + (item.history_matches || 0), 0) };
+}
+function patternEl(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+async function decidePatterns(ids, decision, label) {
+  try {
+    const result = await post("/setup/integration", { action: "block_patterns", ids, decision });
+    for (const id of ids) patternView.selected.delete(id);
+    renderPatterns(result.block_patterns);
+    setMsg("agents-msg", "ok", label + ": " + ids.length + " pattern(s).");
+  } catch (error) {
+    setMsg("agents-msg", "error", error.message);
+  }
+}
+function patternRow(item, actions, selectable) {
+  const row = patternEl("li", "pattern-row");
+  if (selectable) {
+    const check = patternEl("input");
+    check.type = "checkbox";
+    check.checked = patternView.selected.has(item.id);
+    check.setAttribute("aria-label", "Select " + item.pattern);
+    check.addEventListener("change", () => {
+      if (check.checked) patternView.selected.add(item.id); else patternView.selected.delete(item.id);
+      renderPatterns(lastPatterns);
+    });
+    row.appendChild(check);
+  }
+  const body = patternEl("details", "pattern-body");
+  const summary = patternEl("summary");
+  const code = patternEl("code", "pattern-code", item.pattern);
+  code.title = item.pattern;
+  summary.append(patternEl("span", "pattern-tool", item.tool), code);
+  const detail = patternEl("div", "pattern-detail");
+  detail.append(patternEl("p", "", item.reason), patternEl("p", "hint mono", "Example: " + item.example),
+                patternEl("p", "hint mono", item.pattern));
+  body.append(summary, detail);
+  const reach = patternEl("span", "pattern-reach", item.history_total ? item.history_matches + " / " + item.history_total : "–");
+  reach.title = item.history_total ? "Would have blocked " + item.history_matches + " of " + item.history_total + " logged " + item.tool + " calls" : "No logged calls to compare";
+  const buttons = patternEl("span", "pattern-actions");
+  for (const [decision, label] of actions) {
+    const button = patternEl("button", "quiet", label);
+    button.type = "button";
+    button.addEventListener("click", () => decidePatterns([item.id], decision, label));
+    buttons.appendChild(button);
+  }
+  const meta = patternEl("div", "pattern-meta");
+  meta.append(reach, buttons);
+  const main = patternEl("div", "pattern-main");
+  main.append(body, meta);
+  row.appendChild(main);
+  return row;
+}
 function renderPatterns(patterns) {
+  lastPatterns = patterns;
   const box = $("patterns-list");
   box.textContent = "";
-  if (patterns.error) { const p = document.createElement("p"); p.className = "msg error"; p.textContent = patterns.error; box.appendChild(p); return; }
-  const groups = [["proposals", "Proposed", [["accept", "Accept"], ["reject", "Reject"]]], ["accepted", "Blocking", [["remove", "Remove"]]]];
-  for (const [key, title, actions] of groups) {
-    if (!patterns[key].length) continue;
-    const head = document.createElement("h3");
-    head.textContent = title + " (" + patterns[key].length + ")";
-    box.appendChild(head);
-    for (const item of patterns[key]) {
-      const row = document.createElement("div");
-      row.className = "provider";
-      const code = document.createElement("code");
-      code.textContent = item.tool + ": " + item.pattern;
-      const why = document.createElement("p");
-      const seen = item.history_total ? " Would have blocked " + item.history_matches + " of " + item.history_total + " logged " + item.tool + " calls." : "";
-      why.textContent = item.reason + seen;
-      const example = document.createElement("p");
-      example.className = "hint";
-      example.textContent = "Example: " + item.example;
-      row.append(code, why, example);
-      const buttons = document.createElement("div");
-      buttons.className = "actions";
-      for (const [decision, label] of actions) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.textContent = label;
-        button.addEventListener("click", async () => {
-          try {
-            renderPatterns((await post("/setup/integration", { action: "block_pattern", id: item.id, decision })).block_patterns);
-            setMsg("agents-msg", "ok", label + ": " + item.pattern);
-          } catch (error) {
-            setMsg("agents-msg", "error", error.message);
-          }
-        });
-        buttons.appendChild(button);
-      }
-      row.appendChild(buttons);
-      box.appendChild(row);
+  if (patterns.error) { box.appendChild(patternEl("p", "msg error", patterns.error)); return; }
+  const proposals = patterns.proposals;
+  const live = new Set(proposals.map((item) => item.id));
+  for (const id of [...patternView.selected]) if (!live.has(id)) patternView.selected.delete(id);
+  if (proposals.length) {
+    const view = patternPage(proposals, patternView);
+    patternView.page = view.page;
+    const panel = patternEl("div", "pattern-panel");
+    const head = patternEl("div", "pattern-head");
+    head.append(patternEl("strong", "", proposals.length + " proposed pattern(s) waiting"),
+                patternEl("span", "hint", "Together they would have blocked " + view.calls + " logged call(s). Open a row for its reason and example."));
+    const tools = patternEl("div", "pattern-tools");
+    const filter = patternEl("input");
+    filter.type = "text";
+    filter.placeholder = "Filter by pattern, reason or example";
+    filter.value = patternView.filter;
+    filter.setAttribute("aria-label", "Filter proposed patterns");
+    filter.addEventListener("input", () => {
+      patternView.filter = filter.value;
+      patternView.page = 0;
+      renderPatterns(lastPatterns);
+      const again = document.querySelector(".pattern-tools input[type=text]");
+      if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
+    });
+    const sort = patternEl("select");
+    sort.setAttribute("aria-label", "Order of proposed patterns");
+    for (const [value, label] of [["impact", "Most blocked calls first"], ["newest", "Newest first"]]) {
+      const option = patternEl("option", "", label);
+      option.value = value;
+      sort.appendChild(option);
     }
+    sort.value = patternView.sort;
+    sort.addEventListener("change", () => { patternView.sort = sort.value; patternView.page = 0; renderPatterns(lastPatterns); });
+    tools.append(filter, sort);
+    const bulk = patternEl("div", "actions pattern-bulk");
+    const pageIds = view.rows.map((item) => item.id);
+    const allOnPage = pageIds.length > 0 && pageIds.every((id) => patternView.selected.has(id));
+    const selectPage = patternEl("button", "quiet", allOnPage ? "Clear this page" : "Select this page");
+    selectPage.type = "button";
+    selectPage.disabled = !pageIds.length;
+    selectPage.addEventListener("click", () => {
+      for (const id of pageIds) if (allOnPage) patternView.selected.delete(id); else patternView.selected.add(id);
+      renderPatterns(lastPatterns);
+    });
+    const count = patternView.selected.size;
+    const accept = patternEl("button", "", "Accept selected (" + count + ")");
+    const reject = patternEl("button", "quiet", "Reject selected (" + count + ")");
+    for (const [button, decision, label] of [[accept, "accept", "Accepted"], [reject, "reject", "Rejected"]]) {
+      button.type = "button";
+      button.disabled = !count;
+      button.addEventListener("click", () => decidePatterns([...patternView.selected], decision, label));
+    }
+    bulk.append(selectPage, accept, reject);
+    const list = patternEl("ul", "pattern-list");
+    for (const item of view.rows) list.appendChild(patternRow(item, [["accept", "Accept"], ["reject", "Reject"]], true));
+    if (!view.rows.length) list.appendChild(patternEl("li", "hint", "No proposal matches the filter."));
+    const pager = patternEl("div", "actions pattern-pager");
+    const prev = patternEl("button", "quiet", "Previous");
+    const next = patternEl("button", "quiet", "Next");
+    prev.type = "button";
+    next.type = "button";
+    prev.disabled = view.page === 0;
+    next.disabled = view.page >= view.pages - 1;
+    prev.addEventListener("click", () => { patternView.page -= 1; renderPatterns(lastPatterns); });
+    next.addEventListener("click", () => { patternView.page += 1; renderPatterns(lastPatterns); });
+    const first = view.page * PATTERN_PAGE_SIZE;
+    const shown = view.matched ? (first + 1) + "–" + (first + view.rows.length) : "0";
+    const filtered = view.matched < view.total ? " (filtered from " + view.total + ")" : "";
+    pager.append(prev, patternEl("span", "hint", shown + " of " + view.matched + filtered + " · page " + (view.page + 1) + " of " + view.pages), next);
+    panel.append(head, tools, bulk, list, pager);
+    box.appendChild(panel);
   }
-  if (patterns.rejected) { const p = document.createElement("p"); p.className = "hint"; p.textContent = patterns.rejected + " rejected proposal(s) are not offered again."; box.appendChild(p); }
+  if (patterns.accepted.length) {
+    const blocking = patternEl("details", "pattern-blocking");
+    blocking.open = patternView.open;
+    blocking.addEventListener("toggle", () => { patternView.open = blocking.open; });
+    blocking.appendChild(patternEl("summary", "", "Blocking patterns (" + patterns.accepted.length + ")"));
+    const list = patternEl("ul", "pattern-list");
+    for (const item of patterns.accepted) list.appendChild(patternRow(item, [["remove", "Remove"]], false));
+    blocking.appendChild(list);
+    box.appendChild(blocking);
+  }
+  if (patterns.rejected) box.appendChild(patternEl("p", "hint", patterns.rejected + " rejected proposal(s) are not offered again."));
 }
 loadAgents();
 $("btn-save-pattern-proposals").addEventListener("click", async () => {

@@ -30,6 +30,8 @@ OPEN_WEBSEARCH_CLI = NODE_DIR / "node_modules" / "open-websearch" / "build" / "i
 TYPESCRIPT_PARSER = NODE_DIR / "node_modules" / "typescript" / "lib" / "typescript.js"
 JAVA_PARSER = NODE_DIR / 'node_modules' / 'java-parser' / 'src' / 'index.js'
 ANGULAR_PARSER = NODE_DIR / 'node_modules' / '@angular' / 'compiler' / 'fesm2022' / 'compiler.mjs'
+# Browser control for agents (browser_control.py): Microsoft's Playwright MCP over the Chromium installed below.
+PLAYWRIGHT_MCP_CLI = NODE_DIR / "node_modules" / "@playwright" / "mcp" / "cli.js"
 NODE_RUNTIME = NODE_DIR / ".node-runtime"
 # Moli renders the JavaScript pages web_fetch cannot read over HTTP; Chromium (Crawl4AI) stays as its fallback.
 # Measured on 2026-10-10 over 21 such pages: 1.6 s and 90 MB peak (median) against 4.2 s and 581 MB for Chromium.
@@ -239,6 +241,7 @@ def _check():
         "typescript_parser": bool(node and TYPESCRIPT_PARSER.is_file()),
         "java_parser":bool(node and JAVA_PARSER.is_file()),
         "angular_parser":bool(node and ANGULAR_PARSER.is_file()),
+        "playwright_mcp": bool(node and PLAYWRIGHT_MCP_CLI.is_file()),
         "browser_python": BROWSER_PYTHON.is_file(),
         "browser_packages": False,
         "camoufox_browser": False,
@@ -309,7 +312,8 @@ def install(reuse_browser_runtime=None):
     if not node or not npm:
         _install_node()
         node, npm = _node_commands()
-    if not all(path.is_file() for path in (OPEN_WEBSEARCH_CLI,TYPESCRIPT_PARSER,JAVA_PARSER,ANGULAR_PARSER)):
+    if not all(path.is_file() for path in (OPEN_WEBSEARCH_CLI, TYPESCRIPT_PARSER, JAVA_PARSER, ANGULAR_PARSER,
+                                               PLAYWRIGHT_MCP_CLI)):
         _run([npm, "ci", "--omit=dev", "--no-audit", "--no-fund"], cwd=NODE_DIR,
              label="Web adapters and code parser via npm", idle_s=300)
     if reuse_browser_runtime:
@@ -338,7 +342,7 @@ def install(reuse_browser_runtime=None):
     status = _check()
     if not all(status.values()):
         raise RuntimeError(f"Incomplete web runtime: {status}")
-    print("Smart Tool runtime installed: Node, open-websearch, TypeScript, Java, Angular, Camoufox, Crawl4AI and Moli.")
+    print("Smart Tool runtime installed: Node, open-websearch, TypeScript, Java, Angular, Playwright MCP, Camoufox, Crawl4AI and Moli.")
 
 
 def main():

@@ -25,6 +25,8 @@ Node runtime and packages (web_adapters/node, from nodejs.org and npm)
 - typescript (Apache-2.0)
 - java-parser (Apache-2.0)
 - @angular/compiler (MIT)
+- @playwright/mcp (Apache-2.0), https://github.com/microsoft/playwright-mcp: browser control for agents, registered as
+  the `playwright` MCP server over the Chromium above
 - their dependencies as pinned in web_adapters/node/package-lock.json (MIT, ISC, BSD and Apache-2.0)
 
 Web search sources
