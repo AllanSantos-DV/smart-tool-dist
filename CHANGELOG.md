@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.8 - beta
+
+- An update could keep running the previous code: npm dates every file in the package 1985-10-26, the installer kept
+  that date when copying, and Python reuses a compiled `.pyc` when the source's date and size match, so a file changed
+  without changing size (a version bump, a one-character fix) went on running the old bytecode. Reproduced on a real
+  reinstall: `version.py` said 0.9.6 and the daemon served 0.9.8. Copied and restored files now get the current time,
+  and the program's `__pycache__` folders are cleared after copying and after a rollback (two copies within the same
+  second keep the same date). The update to this version already clears any stale bytecode left by earlier ones.
+  Reported by the agent-launcher session, which had the same bug.
+
 ## 0.9.7 - beta
 
 The hook decides code searches with a fixed rule instead of the router model.

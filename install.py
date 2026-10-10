@@ -197,6 +197,7 @@ def copy_files(target, files, backup, changed, removed):
         changed.append(rel)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)
+        os.utime(dest)
     for rel in sorted(previous - set(files)):
         if (target / rel).is_file():
             (backup / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -210,16 +211,31 @@ def copy_files(target, files, backup, changed, removed):
                                               indent=1), encoding="utf-8")
 
 
+def clear_bytecode(target):
+    """Deletes the program's __pycache__ folders (the virtual environment's are left alone). npm writes the same
+    mtime (1985-10-26) into every tarball entry, and Python's bytecode check compares only the source's mtime and
+    size: a file changed without changing size kept running the old code after an update (reproduced on 2026-10-10:
+    version.py said 0.9.6, the daemon served 0.9.8)."""
+    for current, dirs, _files in os.walk(target):
+        dirs[:] = [d for d in dirs if d != ".venv"]
+        if "__pycache__" in dirs:
+            shutil.rmtree(Path(current) / "__pycache__", ignore_errors=True)
+            dirs.remove("__pycache__")
+
+
 def restore(target, backup, changed, removed):
     for rel in changed:
         if (backup / rel).is_file():
             shutil.copy2(backup / rel, target / rel)
+            os.utime(target / rel)
         else:
             (target / rel).unlink(missing_ok=True)
     for rel in removed:
         if (backup / rel).is_file():
             (target / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.move(backup / rel, target / rel)
+            os.utime(target / rel)
+    clear_bytecode(target)
     if (backup / MANIFEST).is_file():
         shutil.copy2(backup / MANIFEST, target / MANIFEST)
     else:
@@ -319,6 +335,7 @@ def main():
     changed, removed, frozen, deps_touched = [], [], None, False
     try:
         copy_files(target, files, backup, changed, removed)
+        clear_bytecode(target)
         print(f"Files changed: {len(changed)}; removed as obsolete: {len(removed)}")
         if not args.skip_deps:
             frozen = freeze(python)
