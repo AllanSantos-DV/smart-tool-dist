@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.9 - beta
+
+- `web_fetch` renders JavaScript pages with [Moli](https://github.com/lexmount/moli) first (a headless browser built
+  for agents: layout and paint only when a page needs them; 43 MB download, SHA-256 checked) and starts Chromium
+  through Crawl4AI only when Moli fails or comes back thin. On 21 pages HTTP could not read: Moli 1.6 s and 90 MB
+  peak (median) against 4.2 s and 581 MB; Moli read 14, Chromium 16, both together 17 (only Chromium read YouTube,
+  Google Maps and Airbnb). With several agent sessions reading at once, measured on N simultaneous rendered reads:
+  aggregate peak memory 448 → 35 MB (1), 1,788 → 194 MB (3), 2,901 → 634 MB (5), 4.4-4.7 GB → 1.0-1.4 GB (10), and
+  the median read time halved (10 at once: 5.0 s → 2.5 s). Pages only Chromium reads now take Moli's 1-4 s more.
+  The `web_fetch` metric records which engine read the page and Moli's error when it fell back.
+
 ## 0.9.8 - beta
 
 - An update could keep running the previous code: npm dates every file in the package 1985-10-26, the installer kept

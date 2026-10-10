@@ -37,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import capabilities
 import client_hooks
+import install_runtime
 import integration_metrics
 import config
 import freshness
@@ -3187,17 +3188,52 @@ def _tool_result(text, is_error=False):
 
 WEB_FETCH_TIMEOUT_S = 90
 WEB_FETCH_RENDER_TIMEOUT_S = 60
+MOLI_RENDER_TIMEOUT_S = 25
+# Engine of the last render on this request's thread: web_fetch.read_page calls _render_page on the handler's thread.
+_RENDER = threading.local()
 WEB_FETCH_VECTOR_ROOT = os.path.join(paths.DATA_DIR, "web-fetch")
 
 
+def _moli_markdown(url, timeout):
+    """Markdown of a JavaScript page rendered by Moli (layout and paint only when the page needs them)."""
+    if not install_runtime.MOLI_EXE.is_file():
+        raise RuntimeError(f"Moli is not installed ({install_runtime.MOLI_EXE}); reinstall Smart Tool.")
+    done = subprocess.run([str(install_runtime.MOLI_EXE), "fetch", "--dump", "markdown", url], capture_output=True,
+                          timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if done.returncode:
+        raise RuntimeError(f"moli exited {done.returncode}: {done.stderr.decode('utf-8', 'replace').strip()[-300:]}")
+    return done.stdout.decode("utf-8", "replace")
+
+
 def _render_page(url, deadline):
+    """Moli first; Chromium through Crawl4AI only when Moli fails or comes back thin. Measured on 2026-10-10 over 21
+    pages HTTP could not read: Moli 1.6 s and 90 MB peak (median), Chromium 4.2 s and 581 MB; Moli read 14, Chromium
+    16, both together 17 (only Chromium read YouTube, Google Maps and Airbnb). The engine that answered goes to the
+    web_fetch metric through _RENDER."""
     left = deadline - time.monotonic()
     if left < 5:
         return ""
+    _RENDER.engine, _RENDER.moli_error = None, None
+    try:
+        markdown = _moli_markdown(url, min(MOLI_RENDER_TIMEOUT_S, left - 2))
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        markdown, _RENDER.moli_error = "", f"{type(exc).__name__}: {exc}"[:200]
+        _log(f"web_fetch Moli render failed, trying Chromium: {_RENDER.moli_error}")
+    if not web_fetch.thin(markdown):
+        _RENDER.engine = "moli"
+        return markdown
+    left = deadline - time.monotonic()
+    if left < 5:
+        return markdown
     raw = _run_search_script(CAMOUFOX_VENV_PYTHON, CRAWL4AI_SEARCH_SCRIPT, [url, "--max-pages", "1"],
                              min(WEB_FETCH_RENDER_TIMEOUT_S, left))
     pages = raw.get("pages") if isinstance(raw, dict) else None
-    return (pages[0].get("markdown") or "") if pages else ""
+    chromium = (pages[0].get("markdown") or "") if pages else ""
+    if len(chromium.strip()) > len(markdown.strip()):
+        _RENDER.engine = "chromium"
+        return chromium
+    _RENDER.engine = "moli"
+    return markdown
 
 
 def _web_fetch_embed(texts, deadline):
@@ -3243,6 +3279,7 @@ def _handle_web_fetch(arguments):
         if problem:
             raise RuntimeError(f"Gateway model unavailable ({problem}).")
         deadline = started + WEB_FETCH_TIMEOUT_S
+        _RENDER.engine, _RENDER.moli_error = None, None
         page = web_fetch.read_page(url, deadline, _render_page)
         selected, pieces = web_fetch.select(page["text"], prompt, lambda texts: _web_fetch_embed(texts, deadline))
         text = web_fetch.answer(config.load_config()["router_model"], prompt, {**page, "text": selected}, deadline)
@@ -3252,6 +3289,7 @@ def _handle_web_fetch(arguments):
         raise RuntimeError(f"web_fetch failed: {str(exc).rstrip('.')}. The native WebFetch is allowed for this URL for "
                            f"{web_fetch.FAILED_TTL_S // 60} min.") from None
     _metric("web_fetch", cached=page["cached"], rendered=page["rendered"], render_error=page.get("render_error"),
+            render_engine=_RENDER.engine if page["rendered"] else None, moli_error=_RENDER.moli_error,
             page_chars=page["chars"], read_chars=len(selected), pieces=pieces,
             answer_chars=len(text), elapsed_s=round(time.monotonic() - started, 2))
     origin = "from cache" if page["cached"] else "rendered in the browser" if page["rendered"] else "downloaded now"

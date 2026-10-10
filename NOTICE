@@ -15,6 +15,7 @@ Python packages (installation venv, from PyPI)
 
 Browser runtime (web_adapters/browser/.venv, from PyPI and the projects' download servers)
 - camoufox Python package (MIT) and the Camoufox browser, a Firefox fork (MPL-2.0), fetched by `camoufox fetch`
+- Moli (Apache-2.0 OR MIT), https://github.com/lexmount/moli: renders JavaScript pages for web_fetch; downloaded at install time from its GitHub release (SHA-256 checked), with its own license files
 - crawl4ai (Apache-2.0), https://github.com/unclecode/crawl4ai: page rendering is powered by Crawl4AI
 - Playwright (Apache-2.0) and the Chromium build it installs (BSD-style, see https://www.chromium.org)
 

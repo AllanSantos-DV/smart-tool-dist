@@ -146,4 +146,4 @@ user` / `codex mcp remove smart-tool`, then delete `%LOCALAPPDATA%\Programs\Smar
 
 Apache License 2.0. See `LICENSE` and `NOTICE` for third-party components.
 
-Page rendering is powered by [Crawl4AI](https://github.com/unclecode/crawl4ai) (Apache-2.0).
+Page rendering is powered by [Moli](https://github.com/lexmount/moli) (Apache-2.0 / MIT), with [Crawl4AI](https://github.com/unclecode/crawl4ai) (Apache-2.0) as its fallback.
