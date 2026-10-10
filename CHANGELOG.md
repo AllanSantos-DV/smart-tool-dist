@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.11 - beta
+
+- Documentation only, no change to the program. The README opens with "How it works": what each tool does behind the
+  scenes, in plain words, for someone who has never used it (the index and the hybrid search, the web search sources,
+  how `web_fetch` reads a page, the hook, what stays on the machine). Its status line said 0.9.0; a test now fails
+  when the README status or the top of this changelog differs from `version.py`, as one already did for the product
+  page. The product page credits Moli as the page renderer (Crawl4AI is its fallback), lists Moli among the browsers
+  the installer downloads, links to "How it works" and has a favicon.
+
 ## 0.9.10 - beta
 
 - Browser control for agents, on by default: registering smart-tool in Claude Code or Codex (and every update, for

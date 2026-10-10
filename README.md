@@ -15,7 +15,50 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.0 beta. Windows only.
+**Status:** 0.9.11 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+
+## How it works
+
+A coding agent normally finds code by running `grep` over the whole project and reads the web by downloading whole
+pages. Both fill its context with text it does not need, and every token of it is paid for. Smart Tool is a small
+program that runs on your machine and offers the agent better tools for the same jobs, through
+[MCP](https://modelcontextprotocol.io), the standard way agents call outside tools.
+
+```
+Claude Code / Codex ──MCP──▶ Smart Tool daemon (127.0.0.1, one per machine)
+                               ├─ smart_search ──▶ local index of your project (SQLite)
+                               ├─ web_search ───▶ several search engines at once, shared cache
+                               ├─ web_fetch ────▶ the page, read by a small model
+                               └─ project_manage
+        your model gateway (OpenAI, OpenRouter, Ollama...) ◀── embeddings and small chat calls
+```
+
+**Searching code.** When a project is registered, a small model looks at its folder structure once and decides what
+is worth indexing (source, tests, docs; not build output or dependencies). Each file is cut into chunks of up to 200
+lines, and each chunk gets an embedding, a list of numbers that captures its meaning. A search runs two ways at
+once, by meaning (embeddings) and by exact words (SQLite full-text search), merges the two lists and, if you set a
+rerank model, reorders the best candidates. The agent gets back a few chunks split into code, tests and docs, with
+the functions most likely to matter, instead of every line that contains a word. The index follows the project:
+only files whose content changed are processed again, and each Git branch keeps its own view.
+
+**Searching the web.** `web_search` asks several free search sources in parallel (DuckDuckGo, Wikipedia, Yahoo,
+Exa, Google and others), in the language of the question and in English, and merges what comes back. Search APIs with a
+free quota (Tavily, Firecrawl) and a real browser are tried only when those results are not enough. Answers are cached and shared by every agent
+session on the machine, so the same question asked twice costs nothing the second time.
+
+**Reading a page.** `web_fetch` takes a URL and a question. It downloads the page over plain HTTP; when the page only
+shows its content with JavaScript, it opens it in a headless browser ([Moli](https://github.com/lexmount/moli)
+first, Chromium as the fallback). A small model then reads the page and returns only the answer, with the source.
+The agent receives a paragraph instead of the whole page.
+
+**Steering the agent (optional hook).** Agents keep reaching for their built-in tools out of habit. The hook sees
+each call before it runs: a content search over a project folder is stopped and the agent is told the exact Smart
+Tool call to make instead; reading a known file, or anything else, runs as usual. The same hook can remind the agent
+to document functions it edits and warn when it writes a function that already exists in the project.
+
+**What stays local.** The daemon, the indexes, the caches and the logs live on your machine. Text leaves it only to
+reach the model gateway you chose (for embeddings and the small model calls) and the web search sources. With a local
+gateway such as Ollama, nothing about your code leaves the machine.
 
 ## Requirements
 
