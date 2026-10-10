@@ -19,6 +19,7 @@ import re
 import secrets
 
 import autostart
+import block_patterns
 import client_hooks
 import config
 import daemon_launcher
@@ -185,19 +186,36 @@ def handle_integration_get():
         duplicate_mode, duplicate_error = config.duplicate_mode(), ""
     except ValueError as exc:
         duplicate_mode, duplicate_error = "", str(exc)
+    try:
+        proposals_mode, proposals_error = config.pattern_proposals(), ""
+    except ValueError as exc:
+        proposals_mode, proposals_error = "", str(exc)
+    try:
+        stored, patterns_error = block_patterns.load(), ""
+    except ValueError as exc:
+        stored, patterns_error = block_patterns._empty(), str(exc)
     return {"daemon_url": setup_origin(), "clients": clients, "hook_mode": mode, "hook_mode_error": mode_error,
             "hook_modes": list(config.HOOK_MODES), "doc_mode": doc_mode, "doc_mode_error": doc_error,
             "doc_modes": list(config.DOC_MODES), "duplicate_mode": duplicate_mode,
-            "duplicate_mode_error": duplicate_error, "duplicate_modes": list(config.DUPLICATE_MODES)}
+            "duplicate_mode_error": duplicate_error, "duplicate_modes": list(config.DUPLICATE_MODES),
+            "pattern_proposals": proposals_mode, "pattern_proposals_error": proposals_error,
+            "block_patterns": {"proposals": stored["proposals"], "accepted": stored["accepted"],
+                               "rejected": len(stored["rejected"]), "error": patterns_error}}
 
 
 def handle_integration_save(body):
     """`hook_mode` sets redirect/advise/off for every client; `register_mcp` runs the client's CLI; hook in two steps:
     `preview` shows the exact change, `install` writes it (with backup)."""
-    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "duplicate_mode"):
+    if isinstance(body, dict) and body.get("action") == "block_pattern":
+        try:
+            block_patterns.decide_proposal(str(body.get("id") or ""), body.get("decision"))
+        except (OSError, ValueError) as exc:
+            raise SetupError(str(exc))
+        return handle_integration_get()
+    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "duplicate_mode", "pattern_proposals"):
         action = body["action"]
         allowed = {"hook_mode": config.HOOK_MODES, "doc_mode": config.DOC_MODES,
-                   "duplicate_mode": config.DUPLICATE_MODES}[action]
+                   "duplicate_mode": config.DUPLICATE_MODES, "pattern_proposals": config.PATTERN_PROPOSAL_MODES}[action]
         if body.get("mode") not in allowed:
             raise SetupError(f"Invalid mode: use {', '.join(allowed)}.")
         try:
@@ -593,6 +611,14 @@ _PAGE_TEMPLATE = """<!doctype html>
           </select>
           <span class="hint">Compares functions the edit writes with the indexed code: identical bodies, and near-identical ones with only local names changed. Never blocks.</span></div>
         <div class="actions"><button type="button" id="btn-save-duplicate-mode">Save duplicates</button></div>
+        <div class="field" style="margin-top:16px"><label for="sel-pattern-proposals">Block patterns proposed by a model</label>
+          <select id="sel-pattern-proposals">
+            <option value="on">On: searches the rule lets run are reviewed in the background and may become proposals (default)</option>
+            <option value="off">Off: no review</option>
+          </select>
+          <span class="hint">The hook decides with a fixed rule: content searches over a project folder go to smart_search. The scope model (else the router model) never delays a call: it reviews, afterwards, bulk reads the rule could not measure and proposes patterns, each checked against the logged calls. Nothing blocks until you accept it here.</span></div>
+        <div class="actions"><button type="button" id="btn-save-pattern-proposals">Save proposals setting</button></div>
+        <div id="patterns-list"></div>
         <div class="msg" id="agents-msg" role="status"></div>
         <div id="agents-list"></div>
       </section>
@@ -882,6 +908,9 @@ async function loadAgents() {
     if (data.hook_mode_error) setMsg("agents-msg", "error", data.hook_mode_error);
     if (data.doc_mode_error) setMsg("agents-msg", "error", data.doc_mode_error);
     if (data.duplicate_mode_error) setMsg("agents-msg", "error", data.duplicate_mode_error);
+    if (document.activeElement !== $("sel-pattern-proposals")) $("sel-pattern-proposals").value = data.pattern_proposals;
+    if (data.pattern_proposals_error) setMsg("agents-msg", "error", data.pattern_proposals_error);
+    renderPatterns(data.block_patterns);
     const list = $("agents-list");
     list.textContent = "";
     for (const item of data.clients) {
@@ -944,7 +973,59 @@ async function loadAgents() {
     setMsg("agents-msg", "error", "Agent status unavailable: " + error.message);
   }
 }
+function renderPatterns(patterns) {
+  const box = $("patterns-list");
+  box.textContent = "";
+  if (patterns.error) { const p = document.createElement("p"); p.className = "msg error"; p.textContent = patterns.error; box.appendChild(p); return; }
+  const groups = [["proposals", "Proposed", [["accept", "Accept"], ["reject", "Reject"]]], ["accepted", "Blocking", [["remove", "Remove"]]]];
+  for (const [key, title, actions] of groups) {
+    if (!patterns[key].length) continue;
+    const head = document.createElement("h3");
+    head.textContent = title + " (" + patterns[key].length + ")";
+    box.appendChild(head);
+    for (const item of patterns[key]) {
+      const row = document.createElement("div");
+      row.className = "provider";
+      const code = document.createElement("code");
+      code.textContent = item.tool + ": " + item.pattern;
+      const why = document.createElement("p");
+      const seen = item.history_total ? " Would have blocked " + item.history_matches + " of " + item.history_total + " logged " + item.tool + " calls." : "";
+      why.textContent = item.reason + seen;
+      const example = document.createElement("p");
+      example.className = "hint";
+      example.textContent = "Example: " + item.example;
+      row.append(code, why, example);
+      const buttons = document.createElement("div");
+      buttons.className = "actions";
+      for (const [decision, label] of actions) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        button.addEventListener("click", async () => {
+          try {
+            renderPatterns((await post("/setup/integration", { action: "block_pattern", id: item.id, decision })).block_patterns);
+            setMsg("agents-msg", "ok", label + ": " + item.pattern);
+          } catch (error) {
+            setMsg("agents-msg", "error", error.message);
+          }
+        });
+        buttons.appendChild(button);
+      }
+      row.appendChild(buttons);
+      box.appendChild(row);
+    }
+  }
+  if (patterns.rejected) { const p = document.createElement("p"); p.className = "hint"; p.textContent = patterns.rejected + " rejected proposal(s) are not offered again."; box.appendChild(p); }
+}
 loadAgents();
+$("btn-save-pattern-proposals").addEventListener("click", async () => {
+  try {
+    await post("/setup/integration", { action: "pattern_proposals", mode: $("sel-pattern-proposals").value });
+    setMsg("agents-msg", "ok", "Proposals setting saved.");
+  } catch (error) {
+    setMsg("agents-msg", "error", error.message);
+  }
+});
 $("btn-save-doc-mode").addEventListener("click", async () => {
   try {
     await post("/setup/integration", { action: "doc_mode", mode: $("sel-doc-mode").value });

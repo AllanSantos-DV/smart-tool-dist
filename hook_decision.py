@@ -100,15 +100,10 @@ def agent_has_smart_tool(agent_type, cwd):
     return True
 
 
-def _search_root(tool_input, cwd):
-    """project_root for smart_search: the registered project holding what the call searches (its path field, or the
-    first existing path of the command, after any `cd`), else that directory; the session directory when the call
-    names no path."""
-    raw = router._target_path(tool_input, cwd)
-    paths = [router._resolve_path(raw, cwd)] if raw else router._command_paths(tool_input.get("command"), cwd)
-    target = os.path.abspath(next((p for p in paths if p), None) or cwd or ".")
-    if os.path.isfile(target):
-        target = os.path.dirname(target)
+def _search_root(target, cwd):
+    """project_root for smart_search: the registered project holding the folder the redirected search reads, else that
+    folder; the session folder when the rule names none."""
+    target = os.path.abspath(target or cwd or ".")
     key = os.path.normcase(target) + os.sep
     roots = [p["root"] for p in project_store.all_projects()
              if key.startswith(os.path.normcase(os.path.abspath(p["root"])).rstrip(os.sep) + os.sep)]
@@ -126,10 +121,10 @@ def _load_hint(client, tool):
     return f' If it is not in your tool list yet, load it first with ToolSearch, query "select:mcp__{SMART_TOOL_SERVER}__{tool}".'
 
 
-def redirect_message(client, tool_name, tool_input, reason, cwd):
-    """Deny text for a broad raw search: the exact tool and arguments to call, and that rewriting the same search in
-    Bash, python, node or PowerShell is the bypass the rule exists to stop."""
-    root = _search_root(tool_input, cwd).replace("\\", "/")
+def redirect_message(client, tool_name, target, reason, cwd):
+    """Deny text for a broad raw search: the exact tool and arguments to call (project_root from the folder the search
+    reads), and that rewriting the same search in Bash, python, node or PowerShell is the bypass the rule stops."""
+    root = _search_root(target, cwd).replace("\\", "/")
     return (f"Blocked by Smart Tool, a routing rule set by the user, not a failure ({tool_name}: {clean_reason(reason)}). "
             f'Run this search with {_tool_name(client, "smart_search")}: project_root="{root}", query_identifiers = what '
             f"you are looking for in identifier terms (plus query_comments when the project has two languages)."
@@ -280,10 +275,9 @@ def _route(payload, client, web_route, cfg):
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
     cwd = payload.get("cwd")
-    router_model = cfg.get("router_model")
-    if not router_model:
-        return {}
     if tool_name in WEB_TOOLS:
+        if not cfg.get("router_model"):
+            return {}
         try:
             present = smart_tool_in_session(cwd)
         except (OSError, ValueError):
@@ -295,7 +289,7 @@ def _route(payload, client, web_route, cfg):
         return deny(web_message(client, tool_name, url, clean_reason(decision.get("reason")))) if decision.get("redirect") else {}
     router.CLIENT.set(client)
     try:
-        decision, reason = router.decide(tool_name, tool_input, router_model, cwd=cwd)
+        decision, reason, target = router.decide(tool_name, tool_input, cwd=cwd)
     except Exception as exc:
         try:
             router.log_unavailable(tool_name, tool_input, exc)
@@ -303,5 +297,5 @@ def _route(payload, client, web_route, cfg):
             pass
         return {"systemMessage": f"Smart Tool unavailable, routing skipped: {type(exc).__name__}"}
     if decision == "redirect":
-        return deny(redirect_message(client, tool_name, tool_input, reason, cwd))
+        return deny(redirect_message(client, tool_name, target, reason, cwd))
     return {}

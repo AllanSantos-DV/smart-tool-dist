@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.9.7 - beta
+
+The hook decides code searches with a fixed rule instead of the router model.
+
+- Deterministic redirect (`redirect_rule.py`): only the part of a Bash command that searches content is measured, with
+  its own paths (`cd` carried, `$VAR` set in the command or the environment, `~` and globs expanded). A content search
+  over a project folder (`grep -r`, `rg`, `git grep`, `git -C dir grep`, the Grep tool on a folder) or over more than
+  20 listed files goes to `smart_search`; reading or searching known files, listings, Glob, commands that change files
+  and paths it cannot resolve run. Replayed on 2,789 real decisions of the router model: the model redirected 315,
+  the rule 463 (134 shared); in a sample of 40 redirected by the rule alone, 40 were content searches over a folder or
+  many files; in a sample of 40 redirected by the model alone, ~36 were wrong. A decision takes 0.2 ms (median)
+  instead of 1.5 s: the router model cost 119 min of agent waiting in 84 h. The same call always gets the same answer.
+- Block patterns proposed by a model (`pattern_proposals`, on by default): bulk reads the rule let run (globs, xargs,
+  -exec, loops, scripts walking folders) and paths it could not resolve are reviewed in the background by the scope
+  model (else the router model); the agent never waits. A proposed regex is checked (it compiles, matches the call,
+  does not match calls allowed on purpose, blocks at most 25% of the logged calls of that tool) and waits in the setup
+  screen with how many logged calls it would have blocked; it redirects only after you accept it. With gpt-4o-mini, 17
+  of 20 reviews proposed a pattern and none was usable; with gpt-5-mini, 2 of 20, one a real gap (grep over
+  `$(git ls-files)` held in a variable).
+- A new branch or worktree starts from the project's latest view: the scope is inherited while the folder structure
+  and root docs still match (no scope or profile model call), and the index starts as a copy that only reprocesses the
+  files whose content differs. Measured on a branch at the same commit: the first search took 52 s (scope 11 s,
+  profile 20.5 s, rebuilding the index 17 s), seen in real use as the p90 of 64 s over 219 searches.
+- `smart_search_result` waits up to 15 s for the job before answering pending: answering at once had an agent poll the
+  same job 7 times in 16 s and give up on Smart Tool.
+- Code redirects no longer need a router model: `smart_search` answers with the lexical index when no embedding model
+  is configured.
+
 ## 0.9.6 - beta
 
 Reported by the claude-code-boss session validating 0.9.5.

@@ -230,10 +230,26 @@ def migrate_legacy(root):
             if not old and index_views.describe(root).get('git'):
                 old = next((os.path.join(INDEX_DIR, key + '.sqlite3') for key in
                             [project_identity.project_id(root), *project_identity.legacy_ids(root)]
-                            if os.path.isfile(os.path.join(INDEX_DIR, key + '.sqlite3'))), None)
+                            if os.path.isfile(os.path.join(INDEX_DIR, key + '.sqlite3'))), None) or \
+                    _sibling_view_db(root, target)
             if old:
                 _backup(old, target)
     return target
+
+
+def _sibling_view_db(root, target):
+    """Most recently written index of another Git view of the same project, or None. A new branch or worktree starts
+    from its copy: the full content check a view change forces then reprocesses only the files that differ, instead
+    of chunking every file again (17 s of a 52 s first search on a branch at the same commit, measured 2026-10-09)."""
+    prefix = project_identity.project_id(root) + ".v-"
+    try:
+        names = os.listdir(INDEX_DIR)
+    except OSError:
+        return None
+    candidates = [os.path.join(INDEX_DIR, n) for n in names
+                  if n.startswith(prefix) and n.endswith(".sqlite3") and ".building-" not in n]
+    candidates = [p for p in candidates if os.path.normcase(p) != os.path.normcase(target)]
+    return max(candidates, key=os.path.getmtime, default=None)
 
 
 def _open_path(path):

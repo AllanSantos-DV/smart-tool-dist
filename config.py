@@ -34,6 +34,7 @@ DEFAULT_CONFIG = {
     "doc_mode": "remind",
     "duplicate_mode": "warn",
     "auto_update": True,
+    "pattern_proposals": "on",
     "contact": "",
     "model_adapter": "",
     "model_adapter_options": {},
@@ -51,6 +52,9 @@ DOC_MODES = ("require", "remind", "off")
 # Edit hook on functions that copy one already indexed (exact or near-identical body): warn = let the edit run and
 # point to the existing function; off = say nothing. Never blocks: near matches are leads, not defects.
 DUPLICATE_MODES = ("warn", "off")
+# Router model reviewing, in the background, searches the deterministic redirect rule let run: on = propose block
+# patterns for the user to accept in the setup screen; off = no review.
+PATTERN_PROPOSAL_MODES = ("on", "off")
 
 
 def doc_mode(cfg=None):
@@ -64,6 +68,15 @@ def duplicate_mode(cfg=None):
     value = (cfg if cfg is not None else load_config()).get("duplicate_mode") or DEFAULT_CONFIG["duplicate_mode"]
     if value not in DUPLICATE_MODES:
         raise ValueError(f"Invalid duplicate_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
+    return value
+
+
+def pattern_proposals(cfg=None):
+    """on: the router model reviews searches the redirect rule let run and proposes block patterns for the user to
+    accept; off: no review."""
+    value = (cfg if cfg is not None else load_config()).get("pattern_proposals") or DEFAULT_CONFIG["pattern_proposals"]
+    if value not in PATTERN_PROPOSAL_MODES:
+        raise ValueError(f"Invalid pattern_proposals ({value!r}) in {CONFIG_PATH}: use on or off.")
     return value
 
 

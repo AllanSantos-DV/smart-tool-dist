@@ -48,11 +48,16 @@ Open the setup screen from the tray icon ("Open settings") or at `http://127.0.0
    URL ending where the API starts, like the OpenAI SDK `base_url` (`https://api.openai.com/v1`,
    `https://openrouter.ai/api/v1`, `http://localhost:11434/v1`), and an optional API key. Saving tests `/models` first.
 2. **Models**: embedding, rerank (optional; without it results use the hybrid order), the router model (small, no
-   reasoning: it decides before tool calls), the index classification model and the research model. Any id the gateway
+   reasoning: web search tier order and result checks), the index classification model (also reviews block patterns) and the research model. Any id the gateway
    accepts works; the catalog is shown as suggestions.
 3. **Agents**: register the MCP server in Claude Code or Codex (runs their official `mcp add` command), install the
    hook and choose its behavior:
-   - **Redirect** (default): the native tool is denied with the reason and the Smart Tool tool to use.
+   - **Redirect** (default): the native tool is denied with the reason and the Smart Tool tool to use. The decision
+     is a fixed rule, under a millisecond and the same every time: a content search over a project folder (`grep -r`,
+     `rg`, `git grep`, the Grep tool on a folder) or over more than 20 listed files goes to `smart_search`; reading or
+     searching known files, listings, Glob and commands that change files run. With **Block patterns proposed by a
+     model** on (default), the scope model reviews, in the background, bulk reads the rule could not measure and
+     proposes regex patterns, each checked against the logged calls; a pattern blocks only after you accept it.
    - **Advise only**: the native tool runs; the agent receives the same advice next to the result and decides.
    - **Off**: no routing.
 

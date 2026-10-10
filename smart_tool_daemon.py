@@ -169,6 +169,10 @@ _jobs = {}
 _JOBS_LOCK = threading.Lock()
 _MAX_JOBS_RETAINED = 200
 SMART_SEARCH_SYNC_WAIT_S = 3
+# smart_search_result waits for the job this long before answering pending: answering at once had an agent poll the
+# same job 7 times in 16 s and then give up on Smart Tool (claude -p session, 2026-10-09; job durations median 6 s,
+# p75 10.7 s).
+SMART_SEARCH_RESULT_WAIT_S = 15
 SMART_SEARCH_MAX_PENDING = 8
 SMART_SEARCH_EXECUTOR = project_scheduler.ProjectScheduler(workers=3)
 _PROJECT_LOCKS = {}
@@ -305,8 +309,8 @@ def _smart_search_job_payload(job_id):
 ALWAYS_LOAD = {"anthropic/alwaysLoad": True}
 SERVER_INSTRUCTIONS = (
     "Smart Tool serves an indexed semantic search over the user's projects and a cheaper web reader. The user installed "
-    "a PreToolUse hook that blocks broad raw searches (recursive grep/find/ls, wide Glob/Grep) and native "
-    "WebFetch/WebSearch. A call blocked by Smart Tool is a routing rule, not a failure: make the call the block "
+    "a PreToolUse hook that blocks content searches over a project folder (grep -r, rg, git grep, Grep on a folder) "
+    "and native WebFetch/WebSearch. A call blocked by Smart Tool is a routing rule, not a failure: make the call the block "
     "message names (smart_search with project_root and query_identifiers, web_fetch with url and prompt, web_search "
     "with query). Never retry the same search or download through Bash, python, node, PowerShell, curl or wget: that "
     "bypasses the rule the user set. Reading one known file, or searching inside one known file, is never blocked. "
@@ -807,6 +811,11 @@ def _prepare_project_index(arguments, job_id, cfg, token, query_vector=None, pre
     checkpoint()
     _update_job(job_id, phase="scope")
     scope = index_scope.load_scope(root)
+    if scope is None and not arguments.get("force_scope"):
+        inherited = index_scope.sibling_scope(root)
+        if inherited is not None and not index_scope.needs_rescan(root, inherited):
+            index_scope.save_scope(root, inherited)
+            scope = inherited
     scope_model = cfg.get("scope_model") or cfg.get("router_model")
     if arguments.get("force_scope") or (project.get('scope_dirty') and not (scope or {}).get('manual')) or scope is None or index_scope.needs_rescan(root, scope):
         problem = _gateway_problem() if scope_model else None
@@ -1342,6 +1351,10 @@ def _handle_smart_search_result(arguments):
     if not job_id:
         raise ValueError("smart_search_result requires 'job_id'")
     payload = _smart_search_job_payload(job_id)
+    deadline = time.monotonic() + SMART_SEARCH_RESULT_WAIT_S
+    while payload["status"] == "pending" and time.monotonic() < deadline:
+        time.sleep(0.25)
+        payload = _smart_search_job_payload(job_id)
     _mark_notice_delivered(job_id)
     return _to_json_sanitized(payload)
 

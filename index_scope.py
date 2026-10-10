@@ -138,6 +138,32 @@ def load_scope(root):
     return None
 
 
+def sibling_scope(root):
+    """Scope of the most recently saved other Git view of the same project, or None. A new branch or a worktree starts
+    without a scope; asking the scope and profile models again cost ~28 s of a 52 s first search (measured 2026-10-09
+    on a branch at the same commit). The caller still checks it with needs_rescan before using it."""
+    if not index_views.describe(root).get("git"):
+        return None
+    own = scope_path(root)
+    prefix = project_identity.project_id(root) + ".v-"
+    try:
+        names = [n for n in os.listdir(SCOPE_DIR) if n.startswith(prefix) and n.endswith(".scope.json")]
+    except OSError:
+        return None
+    paths = sorted((os.path.join(SCOPE_DIR, n) for n in names), key=os.path.getmtime, reverse=True)
+    for path in paths:
+        if os.path.normcase(path) == os.path.normcase(own):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError, UnicodeError):
+            continue
+        if valid_scope(data):
+            return data
+    return None
+
+
 def save_scope(root, scope):
     if not valid_scope(scope):
         raise ValueError("Scope must contain lists of paths in include/exclude.")
