@@ -23,6 +23,8 @@ RUN_DIR = paths.DATA_DIR
 REGISTRY_PATH = os.path.join(RUN_DIR, "daemon.json")
 LOCK_PATH = os.path.join(RUN_DIR, "daemon.lock")
 LOCK_STALE_SECONDS = 30
+UPDATE_MARKER = os.path.join(RUN_DIR, "updating")
+UPDATE_STALE_SECONDS = 900
 DEFAULT_PORT = int(os.environ.get("SMART_TOOL_PORT", "8765"))
 DAEMON_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smart_tool_daemon.py")
 
@@ -106,11 +108,22 @@ def _spawn_daemon():
     )
 
 
+def updating():
+    """Whether the installer is replacing the files (its marker, younger than UPDATE_STALE_SECONDS): a hook or the
+    tray starting the daemon then would run half-copied code and hold the port the installer waits for."""
+    try:
+        return time.time() - os.path.getmtime(UPDATE_MARKER) < UPDATE_STALE_SECONDS
+    except OSError:
+        return False
+
+
 def ensure_daemon_running(wait_seconds=10):
     """Retorna a URL base do daemon (sem `/mcp`), subindo o processo se necessário."""
     info = read_registry()
     if info and health(info["url"]):
         return info["url"]
+    if updating():
+        raise RuntimeError("Smart Tool is being updated; the daemon starts again when the update finishes.")
 
     if not _acquire_lock():
         url = _wait_for_daemon(wait_seconds)
@@ -145,6 +158,8 @@ def start_daemon_if_down():
     processo falha no bind exclusivo da porta e morre sozinho."""
     if daemon_url_if_up():
         return True
+    if updating():
+        return False
     if _acquire_lock():
         # O lock NÃO é liberado aqui: ele é o freio de taxa. Expirando por idade
         # (`LOCK_STALE_SECONDS`), um daemon que não consegue subir — porta tomada, import

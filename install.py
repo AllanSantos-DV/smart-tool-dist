@@ -93,9 +93,25 @@ def stop_processes(target):
         time.sleep(0.5)
 
 
-def wait_port_free():
+UPDATE_MARKER = Path(paths.DATA_DIR) / "updating"
+
+
+def mark_updating(on):
+    """While on, hooks and the tray do not start the daemon (daemon_launcher.updating): an agent working during the
+    update used to bring it back from the half-copied folder and hold the port."""
+    if on:
+        UPDATE_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        UPDATE_MARKER.write_text(str(os.getpid()), encoding="utf-8")
+    else:
+        UPDATE_MARKER.unlink(missing_ok=True)
+
+
+def wait_port_free(target):
+    """Waits for the registered port to go quiet, closing again a daemon of this installation that a hook of the
+    previous version (which does not know the marker) brought back meanwhile."""
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline and _daemon_up():
+        stop_processes(target)
         time.sleep(0.5)
     if _daemon_up():
         raise RuntimeError("Another Smart Tool daemon is still active on the registered port; close it before updating.")
@@ -346,9 +362,21 @@ def main():
     print(("Updating" if existed else "Installing") + f" Smart Tool at {target} ({len(files)} files from {SOURCE})")
     target.mkdir(parents=True, exist_ok=True)
     remove_other_installs(target)
+    mark_updating(True)
+    try:
+        _update(args, target, files, existed, python, pythonw)
+    finally:
+        mark_updating(False)
+    if not args.no_start:
+        enable_browser_control(target, python)
+    print("Smart Tool ready." if not args.no_start else "Files installed; daemon not restarted (--no-start).")
+
+
+def _update(args, target, files, existed, python, pythonw):
+    """Replaces the installed files, dependencies and daemon, restoring the previous version on any failure."""
     stop_processes(target)
     if not args.no_start:
-        wait_port_free()
+        wait_port_free(target)
     backup = target.parent / f".smart-tool-backup-{time.strftime('%Y%m%d-%H%M%S')}"
     backup.mkdir()
     changed, removed, frozen, deps_touched = [], [], None, False
@@ -361,16 +389,18 @@ def main():
             deps_touched = True
             install_dependencies(target, python)
         if not args.no_start:
+            mark_updating(False)
             start(target, python, pythonw)
             verify(target, python)
     except BaseException as exc:
         print(f"Failed: {exc}. Restoring the previous version.", file=sys.stderr)
         problems = []
-        steps = [lambda: stop_processes(target), lambda: restore(target, backup, changed, removed)]
+        steps = [lambda: mark_updating(True), lambda: stop_processes(target),
+                 lambda: restore(target, backup, changed, removed)]
         if deps_touched:
             steps.append(lambda: restore_packages(python, frozen, backup))
         if existed and not args.no_start:
-            steps.append(lambda: start(target, python, pythonw))
+            steps += [lambda: mark_updating(False), lambda: start(target, python, pythonw)]
         for step in steps:
             try:
                 step()
@@ -382,9 +412,6 @@ def main():
         shutil.rmtree(backup, ignore_errors=True)
         raise SystemExit(1)
     shutil.rmtree(backup)
-    if not args.no_start:
-        enable_browser_control(target, python)
-    print("Smart Tool ready." if not args.no_start else "Files installed; daemon not restarted (--no-start).")
 
 
 if __name__ == "__main__":

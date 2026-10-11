@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.13 - beta
+
+- Setup audit: `project_manage` with `action=setup_audit` and a `project_root` (or `python setup_audit.py --project
+  <folder>`) reports what Claude Code and Codex actually load for that folder (settings layers, enabled plugins with
+  their hooks, MCP servers and skills, CLAUDE.md and AGENTS.md, Codex `config.toml` and `hooks.json`) and where they
+  collide: several PreToolUse hooks deciding on the same tool in parallel, hook scripts that do not exist or discard
+  their errors, hooks calling an MCP server that is not configured, hook endpoints down, MCP servers that do not
+  start (each is started or called with `initialize` and `tools/list`, as a session would) or offer the same tools
+  twice (a gateway re-exposing a server also registered directly), skills sharing a name or over the description
+  budget, an AGENTS.md only Codex reads, broken `@imports` and a Codex instruction chain over 32 KiB. Each finding
+  links the documentation it relies on; nothing is edited; env and header values never enter the report; what could
+  not be checked is listed as not verified, and a second run shows what is new and what was resolved. On the
+  author's machine the first run found four hooks deciding on every Bash call in parallel and a gateway offering six
+  tools twice.
+- Updating while agents work no longer fails with "Another Smart Tool daemon is still active": a Codex hook running
+  during the update started the daemon again from the half-copied folder and held the port. The installer now marks
+  the update so hooks and the tray do not start the daemon until it ends, and closes again a daemon a previous
+  version's hook brought back meanwhile.
+
 ## 0.9.12 - beta
 
 - Security: `web_fetch` rendering with Moli (0.9.9 to 0.9.11) followed redirects and page requests to private

@@ -15,7 +15,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.12 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.13 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -151,6 +151,16 @@ Open the setup screen from the tray icon ("Open settings") or at `http://127.0.0
    likeliest failures first, and the command to run them. Changed files are read from disk, so new files and imports
    count before the project is reindexed. `run_all` is true, with
    the reason, when a configuration or lockfile changed or a changed code file is outside the import graph.
+
+   `project_manage` with `action=setup_audit` and a `project_root` (or `python setup_audit.py --project <folder>`)
+   reports what Claude Code and Codex actually load for that folder (settings layers, enabled plugins, hooks, MCP
+   servers, skills, CLAUDE.md and AGENTS.md) and where they collide: several hooks deciding on the same tool in
+   parallel, hook scripts that do not exist or hide their errors, hooks calling an MCP server that is not configured,
+   MCP servers that do not start or offer the same tools twice (a gateway re-exposing a server also registered
+   directly), skills sharing a name or over the description budget, an AGENTS.md only Codex reads, broken `@imports`
+   and a Codex instruction chain over 32 KiB. Each finding links the documentation it relies on; nothing is edited,
+   env and header values never enter the report, and what could not be checked is listed as not verified. A second
+   run shows what is new and what was resolved.
 4. **Local models** (optional): if the mcp-memory embedding sidecar is installed on the machine, its local embedder
    can serve as a fallback (or preferred) embedding model.
 5. **Web search providers** work without keys on their free public tiers; add your own key for more volume. Set your
