@@ -9,6 +9,7 @@ sources into the installation folder or the user's profile; each keeps its own l
 Python packages (installation venv, from PyPI)
 - ddgs (MIT)
 - trafilatura (Apache-2.0)
+- pypdf (BSD-3-Clause): text of PDFs read by web_fetch
 - pystray (LGPL-3.0; used unmodified as a library)
 - Pillow (MIT-CMU)
 - PyYAML (MIT)

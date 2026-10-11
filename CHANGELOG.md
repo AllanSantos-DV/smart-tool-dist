@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.9.12 - beta
+
+- Security: `web_fetch` rendering with Moli (0.9.9 to 0.9.11) followed redirects and page requests to private
+  addresses, so a public page could redirect it to `127.0.0.1` or the local network and the agent received what was
+  there. Moli now runs with `--block-private-networks`, the same rule as the HTTP reader and the Chromium fallback.
+- Security, browser control: pages the agent opens are untrusted input. Playwright MCP is registered with
+  `--no-webmcp` (tools a page registers are never offered to the agent); every request of its browser carries
+  `X-Smart-Tool-Agent-Browser`, and the daemon refuses any request with it, so a page cannot steer the agent into the
+  setup page and its token, redirects included; `browser_run_code_unsafe` (arbitrary JavaScript in the server
+  process, outside any client sandbox) is denied in the client (`permissions.deny` in Claude Code, `disabled_tools` in
+  Codex), and the server is not registered when that fails. Existing registrations are refreshed on update.
+- Security hardening: block pattern proposals with lookarounds or backreferences, or that take over 5 s on a long
+  command, are discarded; an accepted pattern applies only to calls whose reach the rule cannot measure (a single-file
+  search stays allowed, as documented) and the block message no longer repeats the model's text; client CLIs that are
+  `.cmd` shims never receive arguments cmd.exe would interpret; the Moli archive extraction refuses drive-relative and
+  alternate-stream names.
+- `web_fetch` reads PDFs (pypdf, page by page, up to 300 pages, in a subprocess stopped at the request's deadline; a
+  PDF with only an owner password opens, one that needs a password to open is refused with that reason). The hook sends the native WebFetch here, and a PDF
+  was a dead end: 9 times in 10 days of sessions.
+- Agents are told to use `smart_search` first to explore code, not only after a block: in 10 days, 89 searches were
+  started by the agent against about 5,600 folder searches with the built-in tools. The server instructions and the
+  `smart_search` description now say when to use it, as `web_search`/`web_fetch` already did.
+
 ## 0.9.11 - beta
 
 - Documentation only, no change to the program. The README opens with "How it works": what each tool does behind the

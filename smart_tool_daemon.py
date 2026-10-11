@@ -35,6 +35,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import browser_control
 import capabilities
 import client_hooks
 import install_runtime
@@ -309,7 +310,10 @@ def _smart_search_job_payload(job_id):
 # upfront, so a blocked agent already has the replacement in its tool list.
 ALWAYS_LOAD = {"anthropic/alwaysLoad": True}
 SERVER_INSTRUCTIONS = (
-    "Smart Tool serves an indexed semantic search over the user's projects and a cheaper web reader. The user installed "
+    "Smart Tool serves an indexed semantic search over the user's projects and a cheaper web reader. Use smart_search "
+    "FIRST to explore code in the user's projects (where something is implemented, how a flow works, what already "
+    "exists to reuse) before reading files one by one; Grep/Read are for an exact string or a file you already know. "
+    "Use web_search/web_fetch for any web research. The user also installed "
     "a PreToolUse hook that blocks content searches over a project folder (grep -r, rg, git grep, Grep on a folder) "
     "and native WebFetch/WebSearch. A call blocked by Smart Tool is a routing rule, not a failure: make the call the block "
     "message names (smart_search with project_root and query_identifiers, web_fetch with url and prompt, web_search "
@@ -360,8 +364,9 @@ TOOLS = [
         "name": "smart_search",
         "_meta": ALWAYS_LOAD,
         "description": (
-            "Semantic search (embed+rerank) over the project's index. Use instead of "
-            "raw grep/read when the search has no clear scope (e.g. a folder with node_modules). "
+            "Semantic search (embed+rerank) over the project's index: the first step to understand code in a "
+            "project, finding functions, flows and reusable code by meaning, ranked, with name:line. Use it before "
+            "a series of Grep/Read; use Grep only for an exact literal or inside a known file. "
             "Results come in three blocks, code, test and doc, plus the project profile with the natural "
             "languages of identifiers, comments and docs (also in project_manage list/status as search_profile). "
             "Fill query_identifiers with identifier and function-name terms in the identifiers' language and "
@@ -3195,10 +3200,13 @@ WEB_FETCH_VECTOR_ROOT = os.path.join(paths.DATA_DIR, "web-fetch")
 
 
 def _moli_markdown(url, timeout):
-    """Markdown of a JavaScript page rendered by Moli (layout and paint only when the page needs them)."""
+    """Markdown of a JavaScript page rendered by Moli (layout and paint only when the page needs them). Every request
+    Moli makes (redirects, scripts, frames, fetch) refuses private, loopback, link-local and CGNAT addresses, as the
+    HTTP reader and the Crawl4AI route guard do: a public page cannot read this machine or its network through it."""
     if not install_runtime.MOLI_EXE.is_file():
         raise RuntimeError(f"Moli is not installed ({install_runtime.MOLI_EXE}); reinstall Smart Tool.")
-    done = subprocess.run([str(install_runtime.MOLI_EXE), "fetch", "--dump", "markdown", url], capture_output=True,
+    done = subprocess.run([str(install_runtime.MOLI_EXE), "fetch", "--block-private-networks", "--dump", "markdown",
+                           url], capture_output=True,
                           timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if done.returncode:
         raise RuntimeError(f"moli exited {done.returncode}: {done.stderr.decode('utf-8', 'replace').strip()[-300:]}")
@@ -3475,6 +3483,11 @@ class MCPHandler(BaseHTTPRequestHandler):
         return origin is None or _loopback_host(origin, require_port=True)
 
     def _reject_foreign_origin(self):
+        """The agent's browser (Playwright MCP marks every request with AGENT_HEADER) never reaches the daemon: a page
+        it opens could otherwise steer the agent into /setup, whose token unlocks every setting."""
+        if self.headers.get(browser_control.AGENT_HEADER):
+            self._write_json(403, {"error": "Smart Tool's pages are not available to the agent's browser"})
+            return True
         if self._origin_allowed():
             return False
         self._write_json(403, {"error": "origin not allowed"})

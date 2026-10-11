@@ -938,6 +938,7 @@ function browserText(item) {
   const state = item.browser_control || {};
   if (state.state === "registered") return "Browser control on: Playwright MCP drives an isolated, headless Chromium";
   if (state.state === "kept") return "Browser control: your own playwright MCP server is kept";
+  if (state.state === "undenied") return "Browser control is registered without its safety rule: " + state.reason;
   if (state.state === "unavailable") return "Browser control unavailable on this machine (" + state.reason + "); pages are still read by web_fetch";
   return "Browser control is set up when the MCP is registered";
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Routing of the native tool calls the PreToolUse hook matches (Grep, Glob, Bash, Read). Deterministic: calls that
-neither search nor read code, or that change files, run; accepted block patterns redirect; the rest follows
-redirect_rule. Searches the rule lets run are reviewed in the background by the router model, which may propose new
+neither search nor read code, or that change files, run; the rest follows redirect_rule, and accepted block patterns
+redirect only allowed calls whose reach the rule cannot measure (block_patterns.reviewable). Searches the rule lets run are reviewed in the background by the router model, which may propose new
 block patterns (block_patterns). Every decision is logged in router-metrics.jsonl. Also holds the router-model
 helpers of the web search (tier order and result assessment)."""
 import contextvars
@@ -157,12 +157,13 @@ def decide(tool_name, tool_input, cwd=None):
         decision, reason = mechanical
         _log_decision(tool_name, tool_input, decision, reason, extra={"mechanical": True})
         return decision, reason, None
-    learned = block_patterns.matching(tool_name, safe_input)
+    decision, target, reason = redirect_rule.decide(tool_name, safe_input, cwd)
+    learned = (block_patterns.matching(tool_name, safe_input)
+               if decision == "allow" and block_patterns.reviewable(tool_name, safe_input, reason) else None)
     if learned:
-        reason = f"accepted block pattern: {learned['reason']}"
+        reason = f"accepted block pattern {learned['id']} (approved by the user in Smart Tool's setup screen)"
         _log_decision(tool_name, tool_input, "redirect", reason, extra={"pattern": learned["id"]})
         return "redirect", reason, cwd
-    decision, target, reason = redirect_rule.decide(tool_name, safe_input, cwd)
     _log_decision(tool_name, tool_input, decision, reason, extra={"rule": True})
     if decision == "allow":
         try:

@@ -15,7 +15,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.11 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.12 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -48,7 +48,8 @@ session on the machine, so the same question asked twice costs nothing the secon
 
 **Reading a page.** `web_fetch` takes a URL and a question. It downloads the page over plain HTTP; when the page only
 shows its content with JavaScript, it opens it in a headless browser ([Moli](https://github.com/lexmount/moli)
-first, Chromium as the fallback). A small model then reads the page and returns only the answer, with the source.
+first, Chromium as the fallback), which never reaches this machine or your local network. PDFs are read as text, page
+by page. A small model then reads the page and returns only the answer, with the source.
 The agent receives a paragraph instead of the whole page.
 
 **Steering the agent (optional hook).** Agents keep reaching for their built-in tools out of habit. The hook sees
@@ -105,7 +106,11 @@ Open the setup screen from the tray icon ("Open settings") or at `http://127.0.0
    `~/.smart-tool/data/playwright-mcp`. Before registering, Smart Tool starts that server and opens a blank page as an
    agent would; where that fails (a corporate policy that forbids remote debugging, a missing browser) nothing is
    registered, agents keep reading pages through `web_fetch`, and the setup screen shows the reason with a retry
-   button. A `playwright` server you registered yourself is never touched. Remove it with
+   button. Pages the agent opens are treated as untrusted: tools a page registers (WebMCP) are never exposed, the
+   browser cannot open Smart Tool's own pages (every request it makes carries a header the daemon refuses), and
+   `browser_run_code_unsafe`, which runs arbitrary JavaScript in the server process, is denied in the client
+   (`permissions.deny` in `~/.claude/settings.json`, `disabled_tools` in `~/.codex/config.toml`); if it cannot be
+   denied, the server is not registered. A `playwright` server you registered yourself is never touched. Remove it with
    `claude mcp remove playwright -s user` / `codex mcp remove playwright`.
 
    The hook behaviors:

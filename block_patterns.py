@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 
@@ -29,6 +31,40 @@ CALL_MAX_CHARS = 1500
 REVIEWED_REASONS = ("The searched path uses a variable the hook cannot resolve.", "No content search over a folder.")
 _BULK_READ = re.compile(r"\*|\bxargs\b|-exec\b|\bfor\s+\w+\s+in\b|os\.walk|rglob|glob\(|readdirSync|readdir\(|"
                         r"walkSync|-Recurse\b|Get-ChildItem", re.IGNORECASE)
+# A lookaround, backreference or conditional can match by exclusion ("anything but these files").
+_OPEN_ENDED = re.compile(r"\(\?<?[=!]|\(\?P=|\(\?\(|\\[1-9]")
+# Every hook call runs the accepted patterns, so one that backtracks exponentially would hang the daemon (re holds
+# the GIL and cannot be interrupted). Every regex of a proposal runs in a subprocess: first a timing over each prefix
+# of the call followed by a run of characters commands are made of, and over each separator of the call itself (1 to
+# 3 characters with punctuation, such as "; " or "\\") repeated where it first appears; over SLOW_REGEX_S of regex
+# time, or no answer in SLOW_REGEX_S + START_SLACK_S, discards it. Then the checks against the call, the samples and
+# the logged history (no answer in HISTORY_TIMEOUT_S discards it too).
+SLOW_REGEX_S = 5
+START_SLACK_S = 10
+HISTORY_TIMEOUT_S = 60
+_RUNS = tuple(unit * (200 // len(unit)) for unit in ("a", " ", "/", "_", "1", "a ", "a/", "a.", "$a/", "-a "))
+_PREFIXES = 150
+_MEASURE_SCRIPT = """
+import json, re, sys, time
+sys.path.insert(0, sys.argv[1])
+import block_patterns as b
+tool, pattern, text, metrics = json.loads(sys.stdin.read())
+regex = re.compile(pattern)
+if sys.argv[2] == "timing":
+    start = time.perf_counter()
+    step = max(1, len(text) // b._PREFIXES)
+    for end in range(0, len(text) + 1, step):
+        for run in b._RUNS:
+            regex.search(text[:end] + run + "\\x00")
+    for unit in b._units(text):
+        regex.search(text[:max(0, text.find(unit))] + unit * (200 // len(unit)) + "\\x00")
+    print(json.dumps({"seconds": time.perf_counter() - start}))
+else:
+    allowed = next((x for x in b.ALLOWED_ON_PURPOSE if regex.search(x)), None)
+    matches, total = b._history(tool, regex, metrics)
+    print(json.dumps({"matches_call": bool(regex.search(text)), "allowed": allowed, "matches": matches,
+                      "total": total}))
+"""
 # Calls the rule lets run on purpose: a pattern matching any of them would block what must run.
 ALLOWED_ON_PURPOSE = ("grep -n handler src/app.py", "grep -n \"def load\" -A20 src/app.py | head -40",
                       "sed -n 1,80p src/app.py", "cat README.md", "head -50 src/app.py", "tail -20 logs/app.log",
@@ -120,6 +156,33 @@ def matching(tool_name, tool_input):
     return next((entry for entry, regex in compiled if entry["tool"] == tool_name and regex.search(text)), None)
 
 
+def _units(text, limit=400):
+    """Distinct 1-3 character pieces of text holding a non-alphanumeric character, plus each one after a letter: the
+    separators a pattern's repetition may hinge on."""
+    seen = {}
+    for size in (1, 2, 3):
+        for start in range(len(text) - size + 1):
+            piece = text[start:start + size]
+            if not piece.isalnum():
+                seen.setdefault(piece, None)
+                seen.setdefault("a" + piece, None)
+    return list(seen)[:limit]
+
+
+def _measure(stage, timeout, tool_name, pattern, text, metrics_path):
+    """One stage of _MEASURE_SCRIPT ("timing" or "checks") in a subprocess; None when it did not answer in time."""
+    try:
+        done = subprocess.run([sys.executable, "-I", "-c", _MEASURE_SCRIPT, os.path.dirname(os.path.abspath(__file__)), stage],
+                              input=json.dumps([tool_name, pattern, text, metrics_path]), capture_output=True,
+                              text=True, encoding="utf-8", timeout=timeout,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        return None
+    if done.returncode:
+        raise RuntimeError(f"pattern check failed: {done.stderr.strip()[-300:]}")
+    return json.loads(done.stdout)
+
+
 def _history(tool_name, regex, metrics_path):
     """(matches, total) of the logged calls of this tool the pattern would have blocked."""
     matches = total = 0
@@ -177,15 +240,23 @@ def propose(tool_name, tool_input, rule_reason, model, metrics_path, redact):
         problem, regex = f"invalid regex: {exc}", None
     if regex and len(pattern) > PATTERN_MAX_CHARS:
         problem = f"longer than {PATTERN_MAX_CHARS} characters"
-    elif regex and not regex.search(text):
-        problem = "does not match the call it came from"
-    elif regex and any(regex.search(sample) for sample in ALLOWED_ON_PURPOSE):
-        problem = "matches calls the rule lets run on purpose: " + next(x for x in ALLOWED_ON_PURPOSE if regex.search(x))
+    elif regex and _OPEN_ENDED.search(pattern):
+        problem = "lookaround, backreference or conditional (matches by exclusion)"
     if regex and not problem:
-        matches, total = _history(tool_name, regex, metrics_path)
-        entry.update(history_matches=matches, history_total=total)
-        if total and matches / total > BROAD_SHARE:
-            problem = f"too broad: would block {matches} of {total} logged {tool_name} calls"
+        timing = _measure("timing", SLOW_REGEX_S + START_SLACK_S, tool_name, pattern, text, metrics_path)
+        checks = (_measure("checks", HISTORY_TIMEOUT_S, tool_name, pattern, text, metrics_path)
+                  if timing and timing["seconds"] <= SLOW_REGEX_S else None)
+        if checks is None:
+            problem = f"catastrophic backtracking: over {SLOW_REGEX_S}s on a long command or the logged calls"
+        elif not checks["matches_call"]:
+            problem = "does not match the call it came from"
+        elif checks["allowed"]:
+            problem = "matches calls the rule lets run on purpose: " + checks["allowed"]
+        else:
+            matches, total = checks["matches"], checks["total"]
+            entry.update(history_matches=matches, history_total=total)
+            if total and matches / total > BROAD_SHARE:
+                problem = f"too broad: would block {matches} of {total} logged {tool_name} calls"
     with _LOCK:
         data = load()
         if any(e["id"] == entry["id"] for group in data.values() for e in group):

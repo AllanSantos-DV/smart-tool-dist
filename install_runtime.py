@@ -87,9 +87,11 @@ def _extract_folder(zip_path, top, destination):
             parts = Path(member.filename.replace("\\", "/")).parts
             if parts == (top,) and member.is_dir():
                 continue
-            if len(parts) < 2 or parts[0] != top or ".." in parts:
-                raise RuntimeError(f"{zip_path.name} contains an unexpected path: {member.filename}")
             target = destination.joinpath(*parts[1:])
+            # "C:x" (drive-relative) and "x:stream" (alternate data stream) components escape joinpath's confinement.
+            if (len(parts) < 2 or parts[0] != top or ".." in parts or any(":" in part for part in parts)
+                    or not target.resolve().is_relative_to(destination.resolve())):
+                raise RuntimeError(f"{zip_path.name} contains an unexpected path: {member.filename}")
             if member.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
             else:

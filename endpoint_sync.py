@@ -102,6 +102,7 @@ def registrations():
 
 
 REGISTER_TIMEOUT_S = 60
+_CMD_METACHARS = re.compile(r'[&|<>^%!"\r\n]')
 
 
 def register_command(client, base):
@@ -129,6 +130,11 @@ def run_cli(command):
     executable = shutil.which(command[0])
     if not executable:
         raise RuntimeError(f"CLI '{command[0]}' not found in Smart Tool's PATH. Register it manually: {' '.join(command)}")
+    unsafe = [arg for arg in command[1:] if _CMD_METACHARS.search(arg)]
+    if executable.lower().endswith((".cmd", ".bat")) and unsafe:
+        # cmd.exe parses a .cmd shim's arguments again: & | < > ^ % ! would run as commands or expand as variables.
+        raise RuntimeError(f"'{command[0]}' is a cmd.exe script and this argument has characters cmd.exe would "
+                           f"interpret: {unsafe[0]}. Register it manually: {' '.join(command)}")
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     try:
         proc = subprocess.Popen([executable, *command[1:]], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
