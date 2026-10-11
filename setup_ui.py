@@ -29,7 +29,9 @@ import gateway
 import model_catalog
 import model_defaults
 import local_embedder
+import project_store
 import secret_store
+import setup_audit
 import version
 import web_search_external
 
@@ -249,6 +251,30 @@ def handle_integration_save(body):
     except (ValueError, RuntimeError) as exc:
         raise SetupError(str(exc))
     raise SetupError("Invalid action: use hook_mode, register_mcp, browser_control, preview or install.")
+
+
+def handle_audit(body):
+    """Setup audit panel: `index` lists the registered projects with their last audit summary; `report` returns the
+    last stored report of one of them; `run` audits it now (MCP servers contacted unless probe is false). Only
+    registered project folders are accepted."""
+    if not isinstance(body, dict):
+        raise SetupError("Invalid request.")
+    roots = sorted({p["root"] for p in project_store.all_projects() if p.get("root")}, key=str.casefold)
+    try:
+        if body.get("action") == "index":
+            stored = setup_audit.index()
+            found = {root: stored[setup_audit.index_key(root)] for root in roots if setup_audit.index_key(root) in stored}
+            return {"projects": roots, "index": found, "schedule_s": setup_audit.SCHEDULE_S}
+        root = body.get("project_root")
+        if root not in roots:
+            raise SetupError("Choose one of the registered projects.")
+        if body.get("action") == "report":
+            return {"report": setup_audit.last_report(root)}
+        if body.get("action") == "run":
+            return {"report": setup_audit.run(root, probe=body.get("probe") is not False)}
+    except (OSError, ValueError) as exc:
+        raise SetupError(str(exc))
+    raise SetupError("Invalid action: use index, report or run.")
 
 
 def handle_providers_get():
@@ -498,6 +524,15 @@ _PAGE_TEMPLATE = """<!doctype html>
   .pattern-actions button { padding: 4px 10px; font-size: .78rem; }
   .pattern-pager { justify-content: space-between; }
   .pattern-blocking > summary { cursor: pointer; font: 600 .9rem var(--display); }
+  .audit-list { list-style: none; padding: 0; margin: 10px 0; }
+  .audit-row { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .audit-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .audit-sev { font: 600 .72rem var(--display); letter-spacing: .06em; text-transform: uppercase; }
+  .audit-error { color: var(--bad); }
+  .audit-warn { color: var(--warn); }
+  .audit-info { color: var(--muted); }
+  .audit-new { font: 600 .72rem var(--display); color: var(--signal); }
+  .audit-detail { font-size: .84rem; margin: 4px 0 0; overflow-wrap: anywhere; }
 
   body:not(.ready) .station[data-live="1"] .wire::after { transform: scaleX(0); }
   @media (max-width: 900px) { .panels { grid-template-columns: minmax(0, 1fr); } }
@@ -657,6 +692,17 @@ _PAGE_TEMPLATE = """<!doctype html>
         <div id="patterns-list"></div>
         <div class="msg" id="agents-msg" role="status"></div>
         <div id="agents-list"></div>
+      </section>
+
+      <section id="audit-section">
+        <h2>Setup audit</h2>
+        <p class="lede">What Claude Code and Codex load for a project, and where they collide: hooks deciding on the same tool at once, hooks or MCP servers that do not work, tools offered twice, skills and instructions one agent never sees. It runs on its own every 30 minutes for the registered projects; nothing is changed.</p>
+        <div class="field"><label for="sel-audit-project">Project</label>
+          <select id="sel-audit-project"></select>
+          <span class="hint" id="audit-hint"></span></div>
+        <div class="actions"><button type="button" id="btn-audit-run">Run now</button></div>
+        <div class="msg" id="audit-msg" role="status"></div>
+        <div id="audit-report"></div>
       </section>
 
       <section id="providers-section">
@@ -1225,6 +1271,114 @@ $("btn-save-hook-mode").addEventListener("click", async () => {
     setMsg("agents-msg", "error", error.message);
   }
 });
+
+const AUDIT_SEVERITY = { error: "Error", warn: "Warning", info: "Note" };
+let auditProjects = [];
+function auditWhen(seconds) {
+  return seconds ? new Date(seconds * 1000).toLocaleString() : "never";
+}
+function renderAudit(report) {
+  const box = $("audit-report");
+  box.replaceChildren();
+  if (!report) {
+    box.appendChild(patternEl("p", "hint", "Not audited yet: the next scheduled run covers it, or press Run now."));
+    return;
+  }
+  const s = report.summary;
+  box.appendChild(patternEl("p", "", s.error + " error(s), " + s.warn + " warning(s), " + s.info + " note(s) · "
+    + (report.trigger === "schedule" ? "scheduled run" : "run on request") + " at " + auditWhen(report.checked_at)));
+  const changes = report.changes;
+  if (changes) box.appendChild(patternEl("p", "hint", "Since the previous run: " + changes.new.length + " new, "
+    + changes.resolved.length + " resolved" + (changes.snapshot_changed ? " (configuration changed)." : ".")));
+  const list = patternEl("ul", "audit-list");
+  for (const finding of report.findings) {
+    const row = patternEl("li", "audit-row");
+    const head = patternEl("div", "audit-head");
+    head.append(patternEl("span", "audit-sev audit-" + finding.severity, AUDIT_SEVERITY[finding.severity] || finding.severity),
+                patternEl("span", "pattern-tool", finding.harness), patternEl("strong", "", finding.subject));
+    if (finding.new) head.appendChild(patternEl("span", "audit-new", "new"));
+    const detail = patternEl("p", "audit-detail", finding.detail + " ");
+    if ((finding.source || "").startsWith("https://")) {
+      const link = patternEl("a", "", "documentation");
+      link.setAttribute("href", finding.source);
+      link.setAttribute("target", "_blank");
+      link.setAttribute("rel", "noopener noreferrer");
+      detail.appendChild(link);
+    }
+    row.append(head, detail);
+    list.appendChild(row);
+  }
+  if (report.findings.length) box.appendChild(list);
+  else box.appendChild(patternEl("p", "msg ok", "No collision or broken piece found."));
+  if (changes && changes.resolved.length) {
+    const resolved = patternEl("details", "");
+    resolved.appendChild(patternEl("summary", "", "Resolved since the previous run (" + changes.resolved.length + ")"));
+    const items = patternEl("ul", "audit-list");
+    for (const finding of changes.resolved) items.appendChild(patternEl("li", "audit-detail", finding.subject + ": " + finding.detail));
+    resolved.appendChild(items);
+    box.appendChild(resolved);
+  }
+  const costs = [];
+  for (const side of ["claude", "codex"]) {
+    const servers = ((report[side] || {}).mcp || []).filter((m) => m.tools !== undefined);
+    if (servers.length) costs.push(side + ": " + servers.map((m) => m.name + " " + m.tools + " tools (~"
+      + Math.round(m.tool_chars / 4).toLocaleString() + " tokens)").join(", "));
+  }
+  if (costs.length) box.appendChild(patternEl("p", "hint", "MCP tools offered — " + costs.join(" · ")));
+  const unverified = patternEl("details", "");
+  unverified.appendChild(patternEl("summary", "", "Not verified (" + report.unverified.length + ")"));
+  const items = patternEl("ul", "audit-list");
+  for (const item of report.unverified) items.appendChild(patternEl("li", "audit-detail", item));
+  unverified.appendChild(items);
+  box.appendChild(unverified);
+}
+async function showAudit(root) {
+  try {
+    renderAudit((await post("/setup/audit", { action: "report", project_root: root })).report);
+  } catch (error) {
+    setMsg("audit-msg", "error", error.message);
+  }
+}
+async function loadAudit() {
+  try {
+    const data = await post("/setup/audit", { action: "index" });
+    auditProjects = data.projects;
+    const select = $("sel-audit-project");
+    select.replaceChildren();
+    for (const root of data.projects) {
+      const entry = data.index[root];
+      const label = root + (entry ? " — " + entry.summary.error + " error(s), " + entry.summary.warn + " warning(s)" : " — not audited yet");
+      const option = patternEl("option", "", label);
+      option.value = root;
+      select.appendChild(option);
+    }
+    $("audit-hint").textContent = data.projects.length ? "Runs every " + Math.round(data.schedule_s / 60) + " minutes." : "Register a project to audit it.";
+    $("btn-audit-run").disabled = !data.projects.length;
+    if (data.projects.length) {
+      const worst = data.projects.slice().sort((a, b) => ((data.index[b] || {summary: {error: -1}}).summary.error)
+        - ((data.index[a] || {summary: {error: -1}}).summary.error))[0];
+      select.value = worst;
+      await showAudit(worst);
+    }
+  } catch (error) {
+    setMsg("audit-msg", "error", "Setup audit unavailable: " + error.message);
+  }
+}
+$("sel-audit-project").addEventListener("change", () => showAudit($("sel-audit-project").value));
+$("btn-audit-run").addEventListener("click", async () => {
+  const button = $("btn-audit-run");
+  button.disabled = true;
+  setMsg("audit-msg", "", "Auditing; MCP servers are being contacted…");
+  try {
+    renderAudit((await post("/setup/audit", { action: "run", project_root: $("sel-audit-project").value })).report);
+    setMsg("audit-msg", "ok", "Audit finished.");
+  } catch (error) {
+    setMsg("audit-msg", "error", error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+loadAudit();
 
 const providerLabels = { keyless: ["warn", "No key · free tier"], configured: ["ok", "Key configured"], unreadable: ["bad", "Key unreadable in this Windows profile"] };
 function providerCard(name, info) {

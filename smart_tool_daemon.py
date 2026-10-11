@@ -3473,6 +3473,7 @@ _SETUP_SAVES = {
     "/setup/gateway": setup_ui.handle_gateway_save,
     "/setup/autostart": setup_ui.handle_autostart_action,
     "/setup/contact": setup_ui.handle_contact_save,
+    "/setup/audit": setup_ui.handle_audit,
 }
 
 
@@ -3789,9 +3790,12 @@ def main():
         _log(f"project monitor started; {recovered} interrupted job(s) recovered")
     except Exception as exc:
         _log(f"project monitor unavailable: {_project_error(exc)}")
+    audit = setup_audit.Scheduler(lambda: [p["root"] for p in project_store.all_projects() if p.get("root")], _log)
+    audit.start()
     try:
         server.serve_forever()
     finally:
+        audit.stop()
         if _PROJECT_MONITOR:
             _PROJECT_MONITOR.stop()
         with _JOBS_LOCK:

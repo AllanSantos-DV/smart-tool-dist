@@ -15,7 +15,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.13 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.14 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -160,7 +160,11 @@ Open the setup screen from the tray icon ("Open settings") or at `http://127.0.0
    directly), skills sharing a name or over the description budget, an AGENTS.md only Codex reads, broken `@imports`
    and a Codex instruction chain over 32 KiB. Each finding links the documentation it relies on; nothing is edited,
    env and header values never enter the report, and what could not be checked is listed as not verified. A second
-   run shows what is new and what was resolved.
+   run shows what is new and what was resolved. The daemon also runs it on its own for every registered project,
+   two minutes after it starts and then every 30 minutes (MCP servers shared by several projects are contacted once
+   and their result reused for 6 hours; Run now always contacts them again), and the setup screen's **Setup audit**
+   panel shows each project's last report: findings by severity, what is new, what was resolved, the tokens each MCP
+   server's tools cost and what was not verified.
 4. **Local models** (optional): if the mcp-memory embedding sidecar is installed on the machine, its local embedder
    can serve as a fallback (or preferred) embedding model.
 5. **Web search providers** work without keys on their free public tiers; add your own key for more volume. Set your

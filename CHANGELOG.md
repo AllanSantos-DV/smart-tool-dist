@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.14 - beta
+
+- The setup audit runs on its own: the daemon audits every registered project two minutes after it starts and then
+  every 30 minutes, one at a time. MCP servers several projects share are contacted once and a successful result is
+  reused for 6 hours (a failure never is, so a server fixed meanwhile shows at once; Run now always contacts them
+  again). A project's `.mcp.json` servers are only counted and started when Claude Code approved them
+  (`enableAllProjectMcpServers`, `enabledMcpjsonServers`, `disabledMcpjsonServers`): registering a cloned repository
+  for search never runs the commands it declares. The summary per project is in
+  `~/.smart-tool/data/setup-audit/index.json`; projects no longer registered are dropped from it.
+- **Setup audit** panel on the setup screen: pick a registered project (the one with the most errors opens first) and
+  see its last report, scheduled or on request: findings by severity with their documentation link, what is new,
+  what was resolved, the tokens each MCP server's tools cost and what was not verified; Run now audits it again.
+  Everything taken from config files is shown as text.
+
 ## 0.9.13 - beta
 
 - Setup audit: `project_manage` with `action=setup_audit` and a `project_root` (or `python setup_audit.py --project

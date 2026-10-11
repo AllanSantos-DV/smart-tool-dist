@@ -33,7 +33,11 @@ import endpoint_sync
 import paths
 
 REPORT_DIR = os.path.join(paths.DATA_DIR, "setup-audit")
+INDEX_NAME = "index.json"
 PROBE_TIMEOUT_S = 15
+SCHEDULE_S = 30 * 60
+FIRST_RUN_DELAY_S = 120
+PROBE_MAX_AGE_S = 6 * 3600
 SKILL_DESCRIPTION_MAX = 1536
 SKILL_BUDGET_CHARS = 8000
 CODEX_PROJECT_DOC_MAX = 32 * 1024
@@ -192,13 +196,21 @@ def _ancestors(project):
         current = parent
 
 
+def _approvals(data, approval):
+    """Folds one settings object's .mcp.json approvals (enableAllProjectMcpServers, enabledMcpjsonServers,
+    disabledMcpjsonServers) into approval."""
+    approval["all"] = approval["all"] or data.get("enableAllProjectMcpServers") is True
+    approval["on"].update(data.get("enabledMcpjsonServers") or [])
+    approval["off"].update(data.get("disabledMcpjsonServers") or [])
+
+
 def collect_claude(project, snapshot):
     """Claude Code's effective set for project: settings layers, enabled plugins, hooks, MCP, skills, CLAUDE.md."""
     layers = [(path, "managed") for path in _managed_settings()] + [
         (os.path.join(endpoint_sync.claude_dir(), "settings.json"), "user"),
         (os.path.join(project, ".claude", "settings.json"), "project"),
         (os.path.join(project, ".claude", "settings.local.json"), "local")]
-    hooks, enabled, overrides, settings = [], {}, {}, []
+    hooks, enabled, overrides, settings, approval = [], {}, {}, [], {"all": False, "on": set(), "off": set()}
     for path, scope in layers:
         data = snapshot.json(path)
         if data is None:
@@ -207,14 +219,19 @@ def collect_claude(project, snapshot):
         hooks += _hooks_from(data, f"settings:{scope}")
         enabled.update({k: v for k, v in (data.get("enabledPlugins") or {}).items()})
         overrides.update(data.get("skillOverrides") or {})
+        _approvals(data, approval)
     disabled_skills = {name for name, value in overrides.items() if value == "off"}
     state = snapshot.json(endpoint_sync.claude_json()) or {}
     mcp = _mcp_entries(state.get("mcpServers"), "user", endpoint_sync.claude_json())
     project_state = (state.get("projects") or {}).get(os.path.abspath(project).replace("\\", "/")) or \
         (state.get("projects") or {}).get(os.path.abspath(project)) or {}
     mcp += _mcp_entries(project_state.get("mcpServers"), "local", endpoint_sync.claude_json())
+    _approvals(project_state, approval)
     project_mcp = snapshot.json(os.path.join(project, ".mcp.json")) or {}
-    mcp += _mcp_entries(project_mcp.get("mcpServers"), "project", os.path.join(project, ".mcp.json"))
+    shared = _mcp_entries(project_mcp.get("mcpServers"), "project", os.path.join(project, ".mcp.json"))
+    unapproved = [e["name"] for e in shared
+                  if e["name"] in approval["off"] or not (approval["all"] or e["name"] in approval["on"])]
+    mcp += [e for e in shared if e["name"] not in unapproved]
     skills = _skills(snapshot, os.path.join(endpoint_sync.claude_dir(), "skills"), "user", disabled=disabled_skills)
     skills += _skills(snapshot, os.path.join(project, ".claude", "skills"), "project", disabled=disabled_skills)
     plugins = []
@@ -245,7 +262,7 @@ def collect_claude(project, snapshot):
         if text is not None:
             instructions.append({"path": path, "kind": kind, "bytes": len(text.encode("utf-8")), "_text": text})
     return {"settings": settings, "plugins": plugins, "hooks": hooks, "mcp": mcp, "skills": skills,
-            "instructions": instructions}
+            "instructions": instructions, "unapproved_mcp": unapproved}
 
 
 def collect_codex(project, snapshot):
@@ -513,16 +530,40 @@ def _rpc_http(entry, timeout):
         return {"error": str(getattr(exc, "reason", exc)), "kind": "down"}
 
 
-def probe_mcp(entries, cwd, timeout=PROBE_TIMEOUT_S):
-    """Tools of each MCP server, started or called as a session would (in parallel)."""
+_PROBES = {}
+_PROBES_LOCK = threading.Lock()
+
+
+def _probe_key(entry, cwd):
+    """Identity of a server launch (secrets only as a hash), shared by the projects and harnesses that register it;
+    the folder counts for servers a project registers itself and for arguments that may be relative paths."""
+    relative = any(not a.startswith("-") and not os.path.isabs(a) and ("/" in a or "\\" in a or "." in a)
+                   for a in entry["args"])
+    per_project = entry["transport"] == "stdio" and (entry["scope"] in ("project", "local") or relative)
+    spec = [entry["transport"], entry.get("command"), entry["args"], entry.get("url"), sorted(entry["_env"].items()),
+            sorted(entry["_headers"].items()), entry.get("_bearer_env"), cwd if per_project else None]
+    return hashlib.sha256(json.dumps(spec, default=str).encode()).hexdigest()
+
+
+def probe_mcp(entries, cwd, timeout=PROBE_TIMEOUT_S, max_age=0):
+    """Tools of each MCP server, started or called as a session would (in parallel). With max_age, a result of the
+    same launch younger than that is reused (failures never are: a server fixed meanwhile shows at once): the periodic
+    audit does not start every server of every project each time. Each result carries `probed_at`."""
     def one(entry):
+        key = _probe_key(entry, cwd)
+        with _PROBES_LOCK:
+            cached = _PROBES.get(key)
+        if max_age and cached and not cached.get("error") and time.time() - cached["probed_at"] < max_age:
+            return cached
         # A server whose config cannot even be used (a URL with an unexpanded variable, a bad port) is a finding.
         try:
-            if entry["transport"] == "http":
-                return _rpc_http(entry, timeout)
-            return _rpc_stdio(entry, cwd, timeout)
+            result = _rpc_http(entry, timeout) if entry["transport"] == "http" else _rpc_stdio(entry, cwd, timeout)
         except Exception as exc:
-            return {"error": f"{type(exc).__name__}: {exc}"[:200], "kind": "down"}
+            result = {"error": f"{type(exc).__name__}: {exc}"[:200], "kind": "down"}
+        result["probed_at"] = time.time()
+        with _PROBES_LOCK:
+            _PROBES[key] = result
+        return result
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         return list(pool.map(one, entries))
 
@@ -578,9 +619,10 @@ def _public(section):
     return out
 
 
-def run(project, probe=True, save=True):
+def run(project, probe=True, save=True, probe_max_age=0, trigger="manual"):
     """Collects both harnesses for project, runs every check and returns the report; with save, stores it and
-    marks findings new or resolved against the previous report of the same project."""
+    marks findings new or resolved against the previous report of the same project. probe_max_age reuses recent
+    MCP probes (periodic runs); trigger records who asked (manual or schedule)."""
     project = os.path.abspath(project)
     snapshot = _Snapshot()
     claude, codex = collect_claude(project, snapshot), collect_codex(project, snapshot)
@@ -590,12 +632,16 @@ def run(project, probe=True, save=True):
         findings += check_hook_overlap(harness, data["hooks"], tools)
         findings += check_hook_targets(harness, data["hooks"], names, probe)
         findings += check_skills(harness, data["skills"])
-        results = probe_mcp(data["mcp"], project) if probe else [None] * len(data["mcp"])
+        results = (probe_mcp(data["mcp"], project, max_age=probe_max_age) if probe
+                   else [None] * len(data["mcp"]))
         findings += check_mcp(harness, data["mcp"], results)
     findings += check_instructions(project, claude, codex)
     unverified = list(snapshot.unverified)
     if not probe:
         unverified.append("MCP servers and HTTP hook endpoints were not contacted (probe off)")
+    for name in claude["unapproved_mcp"]:
+        unverified.append(f".mcp.json server '{name}' is not approved in Claude Code, so it is neither loaded nor "
+                          "started here")
     if codex.get("plugins_unverified"):
         unverified.append("Codex plugins (their skills and hooks) are not collected yet")
     unverified += ["skill trigger overlap and contradictions between instructions need a model (not run)",
@@ -603,7 +649,7 @@ def run(project, probe=True, save=True):
     key = hashlib.sha256(json.dumps(sorted(snapshot.files.items())).encode()).hexdigest()[:16]
     order = {"error": 0, "warn": 1, "info": 2}
     findings.sort(key=lambda f: (order[f["severity"]], f["harness"], f["check"], f["subject"]))
-    report = {"project": project, "checked_at": time.time(), "snapshot_key": key, "probe": probe,
+    report = {"project": project, "checked_at": time.time(), "snapshot_key": key, "probe": probe, "trigger": trigger,
               "summary": {s: sum(f["severity"] == s for f in findings) for s in order},
               "findings": findings, "unverified": unverified,
               "claude": _public(claude), "codex": _public(codex), "files": len(snapshot.files)}
@@ -612,9 +658,70 @@ def run(project, probe=True, save=True):
     return report
 
 
+def _report_path(project):
+    return os.path.join(REPORT_DIR, hashlib.sha1(os.path.abspath(project).lower().encode()).hexdigest()[:12] + ".json")
+
+
+def last_report(project):
+    """The last stored report of project, or None when it was never audited."""
+    try:
+        with open(_report_path(project), encoding="utf-8") as stream:
+            return json.load(stream)
+    except FileNotFoundError:
+        return None
+
+
+def index():
+    """{project: {summary, new, resolved, checked_at, trigger}} of every audited project (the periodic summary)."""
+    try:
+        with open(os.path.join(REPORT_DIR, INDEX_NAME), encoding="utf-8") as stream:
+            data = json.load(stream)
+    except FileNotFoundError:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{os.path.join(REPORT_DIR, INDEX_NAME)} is not a setup audit index: fix or delete it.")
+    return data
+
+
+_INDEX_LOCK = threading.Lock()
+
+
+def index_key(project):
+    """The index key of a folder: the same for any spelling of it on this OS."""
+    return os.path.normcase(os.path.abspath(project))
+
+
+def _write_index(data):
+    atomic_io.write_secret_text(os.path.join(REPORT_DIR, INDEX_NAME), json.dumps(data, indent=1, ensure_ascii=False))
+
+
+def prune_index(projects):
+    """Drops the index entries and reports of folders no longer registered."""
+    keep = {index_key(p) for p in projects}
+    with _INDEX_LOCK:
+        data = index()
+        gone = [key for key in data if key not in keep]
+        for key in gone:
+            data.pop(key)
+            try:
+                os.remove(_report_path(key))
+            except FileNotFoundError:
+                pass
+        if gone:
+            _write_index(data)
+    return gone
+
+
 def _save_with_diff(report):
+    """Stores the report, marks findings new or resolved against the previous one and updates the index, all under
+    one lock: the scheduler, Run now and project_manage may audit the same folder at once."""
+    with _INDEX_LOCK:
+        _save_locked(report)
+
+
+def _save_locked(report):
     os.makedirs(REPORT_DIR, exist_ok=True)
-    last_path = os.path.join(REPORT_DIR, hashlib.sha1(report["project"].lower().encode()).hexdigest()[:12] + ".json")
+    last_path = _report_path(report["project"])
     try:
         with open(last_path, encoding="utf-8") as stream:
             previous = json.load(stream)
@@ -629,6 +736,58 @@ def _save_with_diff(report):
         for finding in report["findings"]:
             finding["new"] = finding["id"] not in before
     atomic_io.write_secret_text(last_path, json.dumps(report, indent=1, ensure_ascii=False))
+    changes = report.get("changes") or {}
+    data = index()
+    data[index_key(report["project"])] = {"summary": report["summary"], "new": len(changes.get("new", [])),
+                                          "resolved": len(changes.get("resolved", [])),
+                                          "checked_at": report["checked_at"], "trigger": report["trigger"],
+                                          "snapshot_key": report["snapshot_key"]}
+    _write_index(data)
+
+
+class Scheduler:
+    """Periodic mode: audits every registered project whose folder exists, FIRST_RUN_DELAY_S after start and then
+    every SCHEDULE_S, one project at a time, reusing MCP probes younger than PROBE_MAX_AGE_S. projects() returns the
+    folders; log gets one line per run and every failure (a failing project never stops the others)."""
+
+    def __init__(self, projects, log, interval=SCHEDULE_S, first_delay=FIRST_RUN_DELAY_S):
+        self._projects, self._log, self._interval, self._first_delay = projects, log, interval, first_delay
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._loop, name="setup-audit", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def run_once(self):
+        """Audits each project once; returns {project: summary or error text}."""
+        outcome, projects = {}, list(self._projects())
+        prune_index(projects)
+        for root in projects:
+            if self._stop.is_set():
+                break
+            if not os.path.isdir(root):
+                continue
+            try:
+                report = run(root, probe_max_age=PROBE_MAX_AGE_S, trigger="schedule")
+                outcome[root] = report["summary"]
+            except Exception as exc:
+                outcome[root] = f"{type(exc).__name__}: {exc}"[:200]
+                self._log(f"setup audit failed for {root}: {outcome[root]}")
+        errors = sum(v["error"] for v in outcome.values() if isinstance(v, dict))
+        self._log(f"setup audit: {len(outcome)} project(s), {errors} error finding(s)")
+        return outcome
+
+    def _loop(self):
+        if self._stop.wait(self._first_delay):
+            return
+        while True:
+            self.run_once()
+            if self._stop.wait(self._interval):
+                return
 
 
 def markdown(report):
