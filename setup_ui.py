@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Tela de modelos do Smart Tool, servida pelo daemon em `GET /setup`.
+"""Tela de configuração do Smart Tool, servida pelo daemon em `GET /setup`.
 
-Esta tela aponta o gateway de modelos OpenAI-compatível (URL base + API key opcional),
-escolhe modelos, controla o autostart e recebe chaves opcionais de Tavily/Firecrawl,
-protegidas por DPAPI no config próprio do Smart Tool.
+Uma seção por vez, escolhida na barra lateral: Overview (checklist do que precisa de
+atenção, problemas primeiro), Agents (MCP, hook — inclusive desatualizado, com o que a
+atualização muda — e controle de navegador), Models (gateway, modelos, modelos locais),
+Web search (provedores e chaves protegidas por DPAPI), Agent rules, Redirects (métricas e
+padrões de bloqueio), Setup audit e Startup (autostart).
 
 `SETUP_TOKEN` é gerado uma vez por processo (nunca persistido em disco) e embutido no
-HTML de `GET /setup`; as rotas que escrevem estado (`POST /setup/models`, `POST /setup/gateway`,
-`POST /setup/providers` e `POST /setup/autostart`) exigem
+HTML de `GET /setup`; toda rota `POST /setup/...` que escreve estado exige
 esse token de volta no header `X-Setup-Token`. Não é uma
 trava contra quem já tem acesso de leitura à máquina (que também leria o token de
 `GET /setup`) — só impede escrever config sem nunca ter carregado a página.
@@ -71,6 +72,7 @@ def status_payload():
     models = model_defaults.ensure_recommended_models(gateway["status"] == "ready")
     cfg = config.load_config()
     return {
+        "version": version.VERSION,
         "gateway": gateway,
         "models_status": models["status"],
         "models_message": models["message"],
@@ -180,7 +182,8 @@ def handle_integration_get():
     for key, info in AGENT_CLIENTS.items():
         spec, state = client_hooks.CLIENTS[key], client_hooks.status(info)
         clients.append({"client": key, "label": spec["label"], "mcp_url": registered.get(key), "hook": state["installed"],
-                        "hook_error": state["error"], "file": spec["files"][0], "docs": spec["docs"],
+                        "hook_state": state["state"], "hook_changes": state["changes"], "hook_error": state["error"],
+                        "after_install": spec.get("after_install"), "file": spec["files"][0], "docs": spec["docs"],
                         "register_command": " ".join(endpoint_sync.register_command(key, setup_origin())),
                         "browser_control": browser.get(key), "browser_control_error": browser_error})
     try:
@@ -411,181 +414,237 @@ _PAGE_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Smart Tool — Settings</title>
+<title>Settings · Smart Tool</title>
 <style>
-  :root {
-    --bg: #e8ece7; --surface: #f6f8f4; --line: #cfd6cf; --ink: #1c2621; --muted: #5d6b63;
-    --signal: #2450f0; --on-signal: #ffffff; --ok: #2d8a55; --bad: #c2381f; --warn: #a87400; --idle: #9aa69f;
-    --display: "Bahnschrift", "DIN Alternate", "Segoe UI", sans-serif;
-    --body: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-    --mono: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
-  }
+  :root { color-scheme: light dark;
+    --bg: #f6f7f9; --surface: #ffffff; --line: #dde1e6; --ink: #1b2430; --muted: #5b6472; --soft: #eef1f5;
+    --accent: #2f6fed; --on-accent: #ffffff; --selected: #eaf1ff;
+    --ok: #18723c; --ok-bg: #e6f4ea; --warn: #805300; --warn-bg: #fdf3dc; --bad: #b52c2c; --bad-bg: #fbe9e9; --idle: #5b6472; --idle-bg: #eef1f5;
+    --body: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; --mono: "Cascadia Mono", Consolas, monospace; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #121815; --surface: #1a221e; --line: #2c3731; --ink: #e3e9e4; --muted: #93a199;
-      --signal: #7d98ff; --on-signal: #0c1433; --ok: #59c786; --bad: #ff7a61; --warn: #e2b24a; --idle: #4b5850; }
+    :root { --bg: #14171c; --surface: #1c2027; --line: #39414e; --ink: #e6e9ee; --muted: #a6afbb; --soft: #232831;
+      --accent: #91baff; --on-accent: #14171c; --selected: #263751;
+      --ok: #68dc93; --ok-bg: #163322; --warn: #e0b565; --warn-bg: #3a2e14; --bad: #ff9696; --bad-bg: #3d1d1d; --idle: #a6afbb; --idle-bg: #262b33; }
   }
   * { box-sizing: border-box; }
-  html { scroll-behavior: smooth; }
-  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--body); }
-  a { color: var(--signal); }
-  main { max-width: 1080px; margin: 0 auto; padding: 36px 28px 72px; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 var(--body); }
+  a { color: var(--accent); }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 
-  .masthead { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-  .masthead h1 { display: inline; font: 700 2.1rem/1 var(--display); font-stretch: 87.5%; letter-spacing: -.01em; margin: 0; }
-  .masthead .where { font: .8rem var(--mono); color: var(--muted); margin-left: 12px; }
-  .masthead nav a { font: 600 .9rem var(--display); text-decoration: none; letter-spacing: .02em; }
-  .masthead nav a:hover { text-decoration: underline; }
+  .top { max-width: 1240px; margin: 0 auto; padding: 26px 28px 18px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .top h1 { margin: 0; font-size: 24px; letter-spacing: -.01em; }
+  .top .where { color: var(--muted); font: 12px var(--mono); }
+  .shell { max-width: 1240px; margin: 0 auto 60px; padding: 0 28px; display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 28px; align-items: start; }
 
-  .path { list-style: none; margin: 28px 0 36px; padding: 26px 28px 22px; display: grid;
-    grid-template-columns: repeat(4, 1fr); background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
-  .station { position: relative; }
-  .station a { display: block; color: inherit; text-decoration: none; padding-right: 18px; border-radius: 8px; }
-  .station a:focus-visible { outline: 2px solid var(--signal); outline-offset: 6px; }
-  .node { display: flex; align-items: center; height: 22px; }
-  .dot { width: 18px; height: 18px; border-radius: 50%; border: 3px solid var(--idle); background: var(--surface); flex: none; position: relative; z-index: 1; transition: border-color .3s, background .3s; }
-  .wire { flex: 1; height: 3px; margin-left: -1px; background: var(--line); position: relative; overflow: hidden; }
-  .wire::after { content: ""; position: absolute; inset: 0; background: var(--signal); transform: scaleX(0); transform-origin: left; }
-  .station:last-child .wire { display: none; }
-  .station[data-state="ok"] .dot { border-color: var(--ok); background: var(--ok); }
-  .station[data-state="bad"] .dot { border-color: var(--bad); }
-  .station[data-state="warn"] .dot { border-color: var(--warn); }
-  .station[data-live="1"] .wire::after { transform: scaleX(1); transition: transform .45s cubic-bezier(.6,0,.2,1) var(--delay, 0s); }
-  .station[data-break="1"] .wire { background: repeating-linear-gradient(90deg, var(--bad) 0 6px, transparent 6px 11px); }
-  .station h2 { font: 600 1.05rem/1.2 var(--display); letter-spacing: .03em; margin: 14px 0 3px; }
-  .station .detail { font: .78rem/1.35 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
-  .station .verdict { font-size: .84rem; margin-top: 6px; }
-  .station[data-state="bad"] .verdict { color: var(--bad); }
-  .station[data-state="warn"] .verdict { color: var(--warn); }
+  .side { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 2px; }
+  .side .group { margin: 16px 10px 6px; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .side .group:first-child { margin-top: 0; }
+  .side a { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 12px; border-radius: 8px; color: var(--ink); text-decoration: none; border: 1px solid transparent; }
+  .side a:hover { background: var(--soft); }
+  .side a[aria-current="page"] { background: var(--selected); border-color: var(--accent); font-weight: 600; }
+  .side .count { min-width: 22px; padding: 0 7px; border-radius: 11px; font-size: 12px; font-weight: 700; text-align: center; background: var(--warn-bg); color: var(--warn); }
+  .side .count[data-tone="bad"] { background: var(--bad-bg); color: var(--bad); }
+  .side .rule { margin: 18px 10px 0; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 12px; }
 
-  .panels { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 22px; align-items: start; }
-  .col { display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; }
-  section { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 22px 24px 24px; scroll-margin-top: 20px; }
-  section > h2 { font: 600 1.2rem/1.2 var(--display); letter-spacing: .02em; margin: 0 0 4px; }
-  section > .lede { color: var(--muted); font-size: .87rem; margin: 0 0 18px; }
-  fieldset { border: 0; border-top: 1px solid var(--line); margin: 18px 0 0; padding: 16px 0 0; min-width: 0; }
-  legend { font: 600 .78rem var(--display); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); padding: 0 10px 0 0; }
-  fieldset .lede { color: var(--muted); font-size: .82rem; margin: 2px 0 12px; }
-  .field { margin-bottom: 12px; }
-  .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
-  label { display: block; font-size: .8rem; font-weight: 600; margin-bottom: 4px; }
-  .hint { display: block; font-size: .76rem; color: var(--muted); margin-top: 3px; }
-  select, input:not([type]), input[type=text], input[type=url], input[type=number], input[type=password] {
-    width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
-    background-color: var(--bg); color: var(--ink); font: .84rem var(--mono); min-width: 0; max-width: 100%; }
-  select, input[list] { appearance: none; padding-right: 34px; cursor: pointer;
-    background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
-    background-position: calc(100% - 17px) 52%, calc(100% - 12px) 52%; background-size: 5px 5px; background-repeat: no-repeat; }
-  input[list] { cursor: text; }
-  input[list]::-webkit-calendar-picker-indicator { opacity: 0; cursor: pointer; }
-  select:hover, input[list]:hover { border-color: var(--muted); }
-  .code-preview { display: block; margin: 10px 0 0; padding: 12px 14px; max-height: 320px; overflow: auto; white-space: pre;
-    font: .78rem/1.5 var(--mono); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
-  .plan { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
+  .page-head { margin: 0 0 18px; }
+  .page-head h2 { margin: 0 0 4px; font-size: 26px; letter-spacing: -.01em; }
+  .page-head p { margin: 0; color: var(--muted); max-width: 70ch; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; margin-bottom: 18px; }
+  .card > h3 { margin: 0 0 4px; font-size: 18px; }
+  .card > .lede { margin: 0 0 14px; color: var(--muted); font-size: 14px; max-width: 75ch; }
+  .card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  .card-head h3 { margin: 0; font-size: 18px; }
+
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 4px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap; --tone: var(--idle); background: var(--idle-bg); color: var(--tone); }
+  .pill::before { content: "–"; display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; font-size: 12px; font-weight: 800; background: var(--tone); color: var(--surface); }
+  .pill[data-tone="ok"] { --tone: var(--ok); background: var(--ok-bg); }
+  .pill[data-tone="ok"]::before { content: "✓"; }
+  .pill[data-tone="warn"] { --tone: var(--warn); background: var(--warn-bg); }
+  .pill[data-tone="warn"]::before { content: "!"; }
+  .pill[data-tone="bad"] { --tone: var(--bad); background: var(--bad-bg); }
+  .pill[data-tone="bad"]::before { content: "✕"; }
+  .pill[data-tone="busy"]::before { content: "…"; }
+
+  .summary-banner { display: flex; gap: 14px; align-items: center; padding: 16px 20px; border-radius: 12px; margin-bottom: 18px; background: var(--ok-bg); color: var(--ok); font-weight: 600; }
+  .summary-banner[data-tone="warn"] { background: var(--warn-bg); color: var(--warn); }
+  .summary-banner[data-tone="bad"] { background: var(--bad-bg); color: var(--bad); }
+  .summary-banner[data-tone="busy"] { background: var(--idle-bg); color: var(--idle); }
+  .checklist { list-style: none; margin: 0; padding: 0; }
+  .check { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; align-items: center; padding: 14px 0; border-top: 1px solid var(--line); }
+  .check:first-child { border-top: 0; padding-top: 0; }
+  .check-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-weight: 600; }
+  .check-text { grid-column: 1; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+  .check-action { grid-column: 2; grid-row: 1 / span 2; }
+
+  .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 16px; padding: 16px 0; border-top: 1px solid var(--line); align-items: start; }
+  .row:first-of-type { border-top: 0; }
+  .row-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-weight: 600; }
+  .row-text { grid-column: 1; color: var(--muted); font-size: 14px; max-width: 72ch; overflow-wrap: anywhere; }
+  .row-side { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .row-more { grid-column: 1 / -1; }
+  .callout { margin: 10px 0 0; padding: 12px 14px; border-radius: 8px; background: var(--warn-bg); color: var(--ink); font-size: 14px; }
+  .callout strong { color: var(--warn); }
+  .callout ul { margin: 6px 0 0; padding-left: 20px; }
+  .callout.info { background: var(--soft); }
+  .callout.info strong { color: var(--ink); }
+
+  fieldset.choice { border: 0; padding: 16px 0; margin: 0; border-top: 1px solid var(--line); min-width: 0; }
+  fieldset.choice:first-of-type { border-top: 0; padding-top: 4px; }
+  fieldset.choice legend { font-weight: 600; font-size: 16px; padding: 0; float: left; width: 100%; }
+  fieldset.choice legend + * { clear: both; }
+  .choice-intro { color: var(--muted); font-size: 14px; margin: 4px 0 10px; max-width: 75ch; }
+  .option { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 2px 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; margin-top: 8px; cursor: pointer; }
+  .option:hover { border-color: var(--accent); }
+  .option:has(input:checked) { border-color: var(--accent); background: var(--selected); }
+  .option input { margin: 3px 0 0; width: 18px; height: 18px; accent-color: var(--accent); }
+  .option-title { font-weight: 600; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .option-text { grid-column: 2; color: var(--muted); font-size: 14px; }
+  .tag { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--accent); border: 1px solid currentColor; border-radius: 4px; padding: 0 5px; }
+  .saved { font-size: 13px; margin-top: 8px; min-height: 1.3em; }
+
+  .field { margin: 0 0 14px; }
+  .field label { display: block; font-weight: 600; margin: 0 0 3px; }
+  .field .explain { display: block; color: var(--muted); font-size: 13px; margin: 0 0 6px; max-width: 72ch; }
+  .field .hint { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 16px; }
+  input:not([type]), input[type=text], input[type=number], input[type=password], select {
+    width: 100%; max-width: 560px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font: 14px var(--mono); }
   input[type=password] { font-family: var(--body); }
-  input::placeholder { color: var(--idle); }
-  select:focus-visible, input:focus-visible, button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
-  .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
-  button { font: 600 .86rem var(--display); letter-spacing: .03em; border-radius: 8px; padding: 9px 16px; cursor: pointer;
-    background: var(--signal); color: var(--on-signal); border: 1px solid var(--signal); }
-  button.quiet { background: transparent; color: var(--ink); border-color: var(--line); }
-  button:disabled { opacity: .45; cursor: default; }
-  .state { display: inline-flex; align-items: center; gap: 8px; font-size: .86rem; }
-  .state::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--idle); }
-  .state[data-state="ok"]::before { background: var(--ok); }
-  .state[data-state="bad"]::before { background: var(--bad); }
-  .state[data-state="warn"]::before { background: var(--warn); }
-  .mono { font-family: var(--mono); font-size: .8rem; overflow-wrap: anywhere; }
-  .msg { font-size: .84rem; min-height: 1.3em; margin-top: 10px; }
+  button { font: 600 14px var(--body); min-height: 38px; padding: 7px 15px; border-radius: 6px; cursor: pointer; border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+  button:hover { border-color: var(--accent); background: var(--selected); }
+  button.primary { background: var(--accent); border-color: transparent; color: var(--on-accent); }
+  button.primary:hover { filter: brightness(1.08); }
+  button.small { min-height: 30px; padding: 3px 10px; font-size: 13px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+  .msg { font-size: 14px; margin-top: 10px; min-height: 1.3em; overflow-wrap: anywhere; }
+  .msg:empty { min-height: 0; margin: 0; }
   .msg.error { color: var(--bad); }
   .msg.ok { color: var(--ok); }
   .msg.warn { color: var(--warn); }
-  .provider + .provider { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 18px; }
-  .provider-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; }
-  .provider-head strong { font: 600 .98rem var(--display); letter-spacing: .02em; }
-  .blocked { color: var(--muted); font-size: .88rem; border: 1px dashed var(--line); border-radius: 10px; padding: 14px 16px; }
-  .pattern-panel, .pattern-blocking { margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
-  .pattern-head { display: flex; flex-direction: column; gap: 2px; }
-  .pattern-tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 12px; }
-  .pattern-bulk { margin-top: 10px; }
-  .pattern-list { list-style: none; margin: 10px 0 0; padding: 0; border-top: 1px solid var(--line); }
-  .pattern-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start;
-    padding: 10px 0; border-bottom: 1px solid var(--line); }
-  .pattern-blocking .pattern-row { grid-template-columns: minmax(0, 1fr); }
-  .pattern-row input[type=checkbox] { margin-top: 6px; }
-  .pattern-body summary { display: flex; gap: 8px; align-items: baseline; cursor: pointer; min-width: 0; }
-  .pattern-tool { font: 600 .74rem var(--display); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); flex: none; }
-  .pattern-code { font: .78rem/1.4 var(--mono); overflow-wrap: anywhere; min-width: 0; display: -webkit-box;
-    -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .pattern-body[open] .pattern-code { -webkit-line-clamp: unset; }
-  .pattern-main { min-width: 0; }
-  .pattern-meta { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
-  .pattern-detail { font-size: .84rem; padding: 4px 0 2px; }
-  .pattern-detail p { margin: 4px 0; }
-  .pattern-reach { font: .78rem var(--mono); color: var(--muted); white-space: nowrap; }
-  .pattern-actions { display: flex; gap: 6px; }
-  .pattern-actions button { padding: 4px 10px; font-size: .78rem; }
-  .pattern-pager { justify-content: space-between; }
-  .pattern-blocking > summary { cursor: pointer; font: 600 .9rem var(--display); }
-  .audit-list { list-style: none; padding: 0; margin: 10px 0; }
-  .audit-row { padding: 10px 0; border-bottom: 1px solid var(--line); }
-  .audit-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-  .audit-sev { font: 600 .72rem var(--display); letter-spacing: .06em; text-transform: uppercase; }
-  .audit-error { color: var(--bad); }
-  .audit-warn { color: var(--warn); }
-  .audit-info { color: var(--muted); }
-  .audit-new { font: 600 .72rem var(--display); color: var(--signal); }
-  .audit-detail { font-size: .84rem; margin: 4px 0 0; overflow-wrap: anywhere; }
+  .mono { font: 13px var(--mono); overflow-wrap: anywhere; }
+  details.more { margin-top: 10px; }
+  details.more > summary { cursor: pointer; color: var(--accent); font-size: 14px; }
+  pre.code { margin: 8px 0 0; padding: 12px 14px; max-height: 320px; overflow: auto; font: 12px/1.5 var(--mono); background: var(--soft); border-radius: 8px; white-space: pre; }
+  .confirm-box { margin-top: 12px; padding: 14px 16px; border: 1px solid var(--accent); border-radius: 8px; background: var(--selected); }
+  .confirm-box p { margin: 0 0 6px; font-size: 14px; }
 
-  body:not(.ready) .station[data-live="1"] .wire::after { transform: scaleX(0); }
-  @media (max-width: 900px) { .panels { grid-template-columns: minmax(0, 1fr); } }
-  @media (max-width: 640px) {
-    main { padding: 24px 16px 56px; }
-    .path { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 20px; }
-    .station a { display: grid; grid-template-columns: 22px minmax(0, 1fr); column-gap: 14px; padding: 0 0 18px; }
-    .node { flex-direction: column; height: auto; grid-row: span 3; }
-    .wire { width: 3px; height: auto; flex: 1; margin: -1px 0 0; }
-    .wire::after { transform: scaleY(0); transform-origin: top; }
-    .station[data-live="1"] .wire::after { transform: scaleY(1); }
-    body:not(.ready) .station[data-live="1"] .wire::after { transform: scaleY(0); }
-    .station:last-child .wire { display: none; }
-    .station h2 { margin-top: 0; }
-    .pair { grid-template-columns: minmax(0, 1fr); }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    html { scroll-behavior: auto; }
-    .station[data-live="1"] .wire::after, .dot { transition: none; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 6px 0 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .tile .value { font-size: 28px; font-weight: 700; line-height: 1.1; }
+  .tile .label { color: var(--muted); font-size: 13px; }
+  .bars { list-style: none; margin: 6px 0 0; padding: 0; }
+  .bars li { display: grid; grid-template-columns: minmax(90px, 200px) minmax(0, 1fr) 54px; gap: 10px; align-items: center; padding: 4px 0; font-size: 14px; }
+  .bars .bar { height: 10px; border-radius: 5px; background: var(--soft); overflow: hidden; }
+  .bars .bar span { display: block; height: 100%; background: var(--accent); border-radius: 5px; }
+  .bars .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .bars .name { overflow-wrap: anywhere; }
+
+  .provider-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 16px; padding: 16px 0; border-top: 1px solid var(--line); align-items: start; }
+  .provider-row:first-of-type { border-top: 0; padding-top: 4px; }
+  .provider-row .key-form { grid-column: 1 / -1; }
+
+  .pattern-tools { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 10px; margin-top: 12px; }
+  .pattern-list { list-style: none; margin: 10px 0 0; padding: 0; border-top: 1px solid var(--line); }
+  .pattern-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .pattern-row.plain { grid-template-columns: minmax(0, 1fr); }
+  .pattern-row input[type=checkbox] { margin-top: 6px; width: 18px; height: 18px; accent-color: var(--accent); }
+  .pattern-body summary { display: flex; gap: 8px; align-items: baseline; cursor: pointer; min-width: 0; }
+  .pattern-tool { font-size: 12px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); flex: none; }
+  .pattern-code { font: 13px/1.4 var(--mono); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .pattern-body[open] .pattern-code { -webkit-line-clamp: unset; }
+  .pattern-detail { font-size: 14px; }
+  .pattern-detail p { margin: 4px 0; }
+  .pattern-meta { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
+  .pattern-reach { font: 13px var(--mono); color: var(--muted); }
+  .pager { justify-content: space-between; }
+
+  .audit-list { list-style: none; padding: 0; margin: 10px 0; }
+  .audit-row { padding: 10px 0; border-top: 1px solid var(--line); }
+  .audit-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .audit-detail { font-size: 14px; margin: 4px 0 0; overflow-wrap: anywhere; color: var(--muted); }
+  .new-tag { font-size: 12px; font-weight: 700; color: var(--accent); }
+  dl.facts { margin: 0; }
+  dl.facts > div { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  dl.facts > div:first-child { border-top: 0; }
+  dl.facts dt { color: var(--muted); }
+  dl.facts dd { margin: 0; overflow-wrap: anywhere; }
+
+  @media (max-width: 860px) {
+    .shell { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+    .side { position: static; flex-direction: row; overflow-x: auto; gap: 6px; padding-bottom: 6px; }
+    .side .group, .side .rule { display: none; }
+    .side a { white-space: nowrap; }
+    .pair, .pattern-tools { grid-template-columns: minmax(0, 1fr); }
+    .row, .check, .provider-row { grid-template-columns: minmax(0, 1fr); }
+    .row-side, .check-action { grid-column: 1; grid-row: auto; justify-content: flex-start; }
+    .check-action { order: 1; justify-self: start; }
+    dl.facts > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   }
 </style>
 </head>
 <body>
-<main>
-  <header class="masthead">
-    <div><h1>Smart Tool</h1><span class="where">__SETUP_ORIGIN__</span></div>
-    <nav><a href="/projects">Projects and indexing →</a></nav>
-  </header>
+<header class="top">
+  <div><h1>Smart Tool settings</h1><span class="where">__SETUP_ORIGIN__ · version <span id="app-version"></span></span></div>
+  <nav><a href="/projects">Projects and indexing →</a></nav>
+</header>
+<div class="shell">
+  <nav class="side" aria-label="Settings sections">
+    <a href="#overview" data-page="overview"><span>Overview</span><span class="count" data-count="overview" hidden></span></a>
+    <div class="group">Connect</div>
+    <a href="#agents" data-page="agents"><span>Agents</span><span class="count" data-count="agents" hidden></span></a>
+    <a href="#models" data-page="models"><span>Models</span><span class="count" data-count="models" hidden></span></a>
+    <a href="#web" data-page="web"><span>Web search</span><span class="count" data-count="web" hidden></span></a>
+    <div class="group">Behavior</div>
+    <a href="#rules" data-page="rules"><span>Agent rules</span><span class="count" data-count="rules" hidden></span></a>
+    <a href="#redirects" data-page="redirects"><span>Redirects</span><span class="count" data-count="redirects" hidden></span></a>
+    <div class="group">Maintenance</div>
+    <a href="#audit" data-page="audit"><span>Setup audit</span><span class="count" data-count="audit" hidden></span></a>
+    <a href="#startup" data-page="startup"><span>Startup</span><span class="count" data-count="startup" hidden></span></a>
+    <p class="rule">Choices apply as soon as you pick them. Typed values (addresses, keys, model names) are saved with the button next to them.</p>
+  </nav>
 
-  <ol class="path" aria-label="Path of a search, from the agent to the models">
-    <li class="station" id="st-agent" data-state="ok"><a href="#autostart">
-      <div class="node"><span class="dot"></span><span class="wire"></span></div>
-      <h2>Agent</h2><div class="detail">MCP at /mcp</div><div class="verdict">Claude Code, Codex and other MCP clients</div></a></li>
-    <li class="station" id="st-daemon" data-state="ok"><a href="#autostart">
-      <div class="node"><span class="dot"></span><span class="wire"></span></div>
-      <h2>Smart Tool</h2><div class="detail">__SETUP_ORIGIN__</div><div class="verdict" id="st-daemon-verdict">Responding</div></a></li>
-    <li class="station" id="st-gateway"><a href="#gateway">
-      <div class="node"><span class="dot"></span><span class="wire"></span></div>
-      <h2>Gateway</h2><div class="detail" id="st-gateway-detail">—</div><div class="verdict" id="st-gateway-verdict">Checking</div></a></li>
-    <li class="station" id="st-models"><a href="#models">
-      <div class="node"><span class="dot"></span><span class="wire"></span></div>
-      <h2>Models</h2><div class="detail" id="st-models-detail">—</div><div class="verdict" id="st-models-verdict">Checking</div></a></li>
-  </ol>
+  <main>
+    <section class="page" data-page="overview" aria-labelledby="h-overview">
+      <header class="page-head"><h2 id="h-overview" tabindex="-1">Overview</h2>
+        <p>Everything Smart Tool needs to work, checked on this machine. Anything that needs you comes first, with a button that takes you to the fix.</p></header>
+      <div class="summary-banner" id="overview-banner" data-tone="busy" role="status">Checking…</div>
+      <div class="card"><ul class="checklist" id="overview-list"></ul></div>
+    </section>
 
-  <div class="panels">
-    <div class="col">
-      <section id="gateway">
-        <h2>Model gateway</h2>
-        <p class="lede">Where embedding, chat and, if available, rerank calls go. The OpenAI-compatible adapter covers OpenAI, OpenRouter, a LiteLLM proxy and Ollama; other adapters go in as a .py file in the folder shown below.</p>
-        <div class="state" id="gateway-state" role="status">Checking</div>
-        <div class="field" style="margin-top:16px">
+    <section class="page" data-page="agents" aria-labelledby="h-agents" hidden>
+      <header class="page-head"><h2 id="h-agents" tabindex="-1">Agents</h2>
+        <p>Connect your coding agents to Smart Tool. Each agent needs two things: the connection (MCP server), which gives it smart_search, web_search and web_fetch, and the redirect hook, which sends its folder searches and web lookups to those tools.</p></header>
+      <div class="msg" id="agents-msg" role="status"></div>
+      <div id="agents-list"></div>
+    </section>
+
+    <section class="page" data-page="rules" aria-labelledby="h-rules" hidden>
+      <header class="page-head"><h2 id="h-rules" tabindex="-1">Agent rules</h2>
+        <p>How the hook treats your agents' tool calls. These apply to every connected agent on its next tool call; nothing needs reinstalling.</p></header>
+      <div class="card" id="rules-card"></div>
+    </section>
+
+    <section class="page" data-page="redirects" aria-labelledby="h-redirects" hidden>
+      <header class="page-head"><h2 id="h-redirects" tabindex="-1">Redirects</h2>
+        <p>What the hook did with your agents' native searches, and what the agent did next. Below, the block patterns a model proposed from calls the fixed rule let through.</p></header>
+      <div class="card" id="redirects-card"><p class="lede">Loading…</p></div>
+      <div class="card">
+        <h3>Block patterns</h3>
+        <p class="lede">The hook decides with a fixed rule: content searches over a project folder go to smart_search. A model reviews the calls the rule let through, afterwards and without delaying them, and proposes patterns. Each proposal shows how many logged calls it would have blocked. Nothing blocks until you accept it.</p>
+        <div class="msg" id="patterns-msg" role="status"></div>
+        <div id="patterns-list"></div>
+      </div>
+    </section>
+
+    <section class="page" data-page="models" aria-labelledby="h-models" hidden>
+      <header class="page-head"><h2 id="h-models" tabindex="-1">Models</h2>
+        <p>Smart Tool uses models for code search (embedding and rerank), for deciding where a search goes, and for web research. They come through a model gateway you connect here.</p></header>
+      <div class="card" id="gateway">
+        <div class="card-head"><h3>1. Model gateway</h3><span class="pill" id="gateway-pill" data-tone="busy">Checking</span></div>
+        <p class="lede">Where embedding, chat and rerank calls go. The OpenAI-compatible adapter covers OpenAI, OpenRouter, a LiteLLM proxy and Ollama. Other adapters go in as a .py file in the folder shown below.</p>
+        <div class="field">
           <label for="gateway-adapter">Adapter</label>
           <select id="gateway-adapter"></select>
           <span class="hint mono" id="gateway-dir"></span>
@@ -593,185 +652,268 @@ _PAGE_TEMPLATE = """<!doctype html>
         <div id="gateway-fields"></div>
         <div class="msg error" id="gateway-errors" role="status" hidden></div>
         <div class="actions">
-          <button type="button" id="gateway-save">Test and save</button>
-          <button type="button" class="quiet" id="gateway-clear">Disconnect</button>
+          <button type="button" class="primary" id="gateway-save">Test and save</button>
+          <button type="button" id="gateway-clear">Disconnect</button>
         </div>
         <div class="msg" id="gateway-msg" role="status"></div>
-      </section>
+      </div>
 
-      <section id="models">
-        <h2>Models</h2>
-        <p class="lede">Any id the gateway accepts; the published catalog shows up as suggestions. Rerank is optional: without it the hybrid order applies.</p>
-        <div class="blocked" id="models-blocked" hidden>Connect the gateway to list the catalog and choose models.</div>
+      <div class="card" id="models-card">
+        <div class="card-head"><h3>2. Models</h3><span class="pill" id="models-pill" data-tone="busy">Checking</span></div>
+        <p class="lede">Any model id your gateway accepts. The gateway's catalog shows up as suggestions while you type.</p>
+        <p class="callout info" id="models-blocked" hidden><strong>Connect the gateway first.</strong> The catalog and the model choice open once the gateway answers.</p>
         <div id="models-form" hidden>
-          <fieldset>
-            <legend>Code search</legend>
-            <p class="lede">Indexing and smart_search.</p>
-            <div class="pair">
-              <div class="field"><label for="sel-embedding">Embedding</label><input id="sel-embedding" list="dl-embedding" autocomplete="off" spellcheck="false"><datalist id="dl-embedding"></datalist></div>
-              <div class="field"><label for="sel-rerank">Rerank</label><input id="sel-rerank" list="dl-rerank" autocomplete="off" spellcheck="false"><datalist id="dl-rerank"></datalist></div>
+          <div class="pair">
+            <div class="field"><label for="sel-embedding">Embedding</label><span class="explain">Turns code into vectors for indexing and smart_search.</span><input id="sel-embedding" list="dl-embedding" autocomplete="off" spellcheck="false"><datalist id="dl-embedding"></datalist></div>
+            <div class="field"><label for="sel-rerank">Rerank (optional)</label><span class="explain">Reorders search results by relevance. Empty keeps the hybrid order.</span><input id="sel-rerank" list="dl-rerank" autocomplete="off" spellcheck="false"><datalist id="dl-rerank"></datalist></div>
+          </div>
+          <div class="pair">
+            <div class="field"><label for="sel-scope">Index classification</label><span class="explain">Decides scope, code or documentation, and languages while indexing. Runs once per project.</span><input id="sel-scope" list="dl-scope" autocomplete="off" spellcheck="false"><datalist id="dl-scope"></datalist></div>
+            <div class="field"><label for="sel-router">Router</label><span class="explain">Decides before each agent Grep, Read or Bash. Use a small model without reasoning: above 10 s routing turns off.</span><input id="sel-router" list="dl-router" autocomplete="off" spellcheck="false"><datalist id="dl-router"></datalist></div>
+          </div>
+          <div class="field"><label for="sel-research">Web research</label><span class="explain">Used by web_search with depth=research. Empty uses the router model.</span><input id="sel-research" list="dl-research" autocomplete="off" spellcheck="false"><datalist id="dl-research"></datalist></div>
+          <details class="more">
+            <summary>Advanced web research limits</summary>
+            <div class="pair" style="margin-top:12px">
+              <div class="field"><label for="num-research-iterations">Maximum research rounds</label><span class="explain">How many search rounds a research may run before answering.</span><input type="number" id="num-research-iterations" step="1"><span class="hint" id="research-iterations-hint"></span></div>
+              <div class="field"><label for="num-quick-timeout">Quick search time limit (s)</label><span class="explain">How long a quick web search waits for its sources.</span><input type="number" id="num-quick-timeout" step="1"><span class="hint" id="quick-timeout-hint"></span></div>
             </div>
-            <div class="field"><label for="sel-scope">Index classification</label><input id="sel-scope" list="dl-scope" autocomplete="off" spellcheck="false"><datalist id="dl-scope"></datalist>
-              <span class="hint">Decides scope, code vs. documentation and languages during indexing. Runs once per project.</span></div>
-          </fieldset>
-          <fieldset>
-            <legend>Router</legend>
-            <div class="field"><label for="sel-router">Router model</label><input id="sel-router" list="dl-router" autocomplete="off" spellcheck="false"><datalist id="dl-router"></datalist>
-              <span class="hint">Decides before each agent Grep/Read/Bash. Use a small model without reasoning: above 10 s routing is turned off.</span></div>
-          </fieldset>
-          <fieldset>
-            <legend>Web research</legend>
-            <div class="field"><label for="sel-research">Iterative research model</label><input id="sel-research" list="dl-research" autocomplete="off" spellcheck="false"><datalist id="dl-research"></datalist>
-              <span class="hint">Used by web_search with depth=research. Empty uses the router model.</span></div>
-            <div class="pair">
-              <div class="field"><label for="num-research-iterations">Maximum rounds</label><input type="number" id="num-research-iterations" step="1"><span class="hint" id="research-iterations-hint"></span></div>
-              <div class="field"><label for="num-quick-timeout">Quick search time limit (s)</label><input type="number" id="num-quick-timeout" step="1"><span class="hint" id="quick-timeout-hint"></span></div>
-            </div>
-            <div class="field"><label for="num-site-memory-threshold">Minimum per-site memory similarity</label><input type="number" id="num-site-memory-threshold" step="0.01"><span class="hint" id="site-memory-threshold-hint"></span></div>
-          </fieldset>
-          <div class="actions"><button type="button" id="btn-save-models">Save models</button></div>
+            <div class="field"><label for="num-site-memory-threshold">Per-site memory similarity</label><span class="explain">How close a new question must be to a remembered page of the same site to reuse it.</span><input type="number" id="num-site-memory-threshold" step="0.01"><span class="hint" id="site-memory-threshold-hint"></span></div>
+          </details>
+          <div class="actions"><button type="button" class="primary" id="btn-save-models">Save models</button></div>
           <div class="msg" id="models-msg" role="status"></div>
         </div>
-      </section>
-    </div>
+      </div>
 
-    <div class="col">
-      <section id="autostart">
-        <h2>Start automatically</h2>
-        <p class="lede">Starts Smart Tool when you sign in to Windows.</p>
-        <div class="state" id="autostart-status" role="status">Checking</div>
-        <div class="actions"><button type="button" class="quiet" id="btn-autostart-toggle" disabled>Checking</button></div>
-        <div class="msg" id="autostart-msg" role="status"></div>
-      </section>
+      <div class="card" id="local-models-card">
+        <div class="card-head"><h3>3. Local models</h3><span class="pill" id="local-pill" data-tone="busy">Checking</span></div>
+        <p class="lede">Embedding from the mcp-memory sidecar on this machine. Switching between gateway and local rebuilds the project indexes; going back to a model used before reuses its vector cache.</p>
+        <fieldset class="choice" id="local-models-choice"><legend>When to use the local model</legend></fieldset>
+      </div>
+    </section>
 
-      <section id="local-models-section">
-        <h2>Local models</h2>
-        <p class="lede">Embedding from the mcp-memory sidecar on this machine. Switching between gateway and local rebuilds the project indexes; going back to a model used before reuses the vector cache.</p>
-        <div class="field"><label for="sel-local-models">Usage</label>
-          <select id="sel-local-models">
-            <option value="fallback">Fallback: only when the gateway lacks the model</option>
-            <option value="prefer">Prefer local: even when the gateway has the model</option>
-            <option value="off">Off: never use local</option>
-          </select>
-          <span class="hint" id="local-models-hint">Checking the sidecar</span></div>
-        <div class="actions"><button type="button" id="btn-save-local-models">Save</button></div>
-        <div class="msg" id="local-models-msg" role="status"></div>
-      </section>
+    <section class="page" data-page="web" aria-labelledby="h-web" hidden>
+      <header class="page-head"><h2 id="h-web" tabindex="-1">Web search</h2>
+        <p>web_search asks several providers at once. All of them work without a key on their public free tier; add your own key only if you need more volume.</p></header>
+      <div class="card">
+        <h3>Providers</h3>
+        <p class="lede">A key is tested with a real search before it is saved, and is protected by DPAPI in this Windows profile.</p>
+        <div id="provider-list"><p class="lede">Loading…</p></div>
+      </div>
+      <div class="card">
+        <h3>Your contact (optional)</h3>
+        <p class="lede">Wikimedia asks tools to name a contact in their User-Agent. It stays on this machine and is sent only to the search APIs.</p>
+        <div class="field"><label for="contact-input">Email or website</label>
+          <input id="contact-input" autocomplete="off" spellcheck="false" placeholder="you@example.com or https://your.site">
+          <span class="hint mono" id="contact-hint"></span></div>
+        <div class="actions"><button type="button" class="primary" id="btn-save-contact">Save contact</button></div>
+        <div class="msg" id="contact-msg" role="status"></div>
+      </div>
+    </section>
 
-      <section id="agents-section">
-        <h2>Agents</h2>
-        <p class="lede">The Smart Tool MCP server and the hook that redirects Grep/Read/Bash to smart_search and WebSearch/WebFetch to web_search/web_fetch. In Claude Code the hook is a direct HTTP call to the daemon; in Codex, a thin command that forwards to the daemon. If the port changes, the daemon rewrites these URLs on its own.</p>
-        <div class="field"><label for="sel-hook-mode">Hook behavior</label>
-          <select id="sel-hook-mode">
-            <option value="redirect">Redirect: block the native tool and point to Smart Tool (default)</option>
-            <option value="advise">Advise only: let the native tool run and tell the agent what Smart Tool would do</option>
-            <option value="off">Off: no routing</option>
-          </select>
-          <span class="hint" id="hook-mode-hint">Applies to every client on the next tool call; nothing is reinstalled.</span></div>
-        <div class="actions"><button type="button" id="btn-save-hook-mode">Save behavior</button></div>
-        <div class="field" style="margin-top:16px"><label for="sel-doc-mode">Documentation on edit</label>
-          <select id="sel-doc-mode">
-            <option value="remind">Remind: the edit runs; the agent is told which touched functions lack a docstring (default)</option>
-            <option value="require">Require: an edit that leaves a touched function without a docstring is blocked until it adds one</option>
-            <option value="off">Off: no documentation checks</option>
-          </select>
-          <span class="hint">Only public functions the edit touches (private, nested and override functions are exempt, as in pydocstyle, eslint-plugin-jsdoc and Checkstyle). A documented function is mentioned again only when its signature changes; body-only edits stay silent.</span></div>
-        <div class="actions"><button type="button" id="btn-save-doc-mode">Save documentation</button></div>
-        <div class="field" style="margin-top:16px"><label for="sel-duplicate-mode">Duplicate functions on edit</label>
-          <select id="sel-duplicate-mode">
-            <option value="warn">Warn: the edit runs; the agent is told when a written function copies one already in the project (default)</option>
-            <option value="off">Off: no duplicate checks on edit</option>
-          </select>
-          <span class="hint">Compares functions the edit writes with the indexed code: identical bodies, and near-identical ones with only local names changed. Never blocks.</span></div>
-        <div class="actions"><button type="button" id="btn-save-duplicate-mode">Save duplicates</button></div>
-        <div class="field" style="margin-top:16px"><label for="sel-pattern-proposals">Block patterns proposed by a model</label>
-          <select id="sel-pattern-proposals">
-            <option value="on">On: searches the rule lets run are reviewed in the background and may become proposals (default)</option>
-            <option value="off">Off: no review</option>
-          </select>
-          <span class="hint">The hook decides with a fixed rule: content searches over a project folder go to smart_search. The scope model (else the router model) never delays a call: it reviews, afterwards, bulk reads the rule could not measure and proposes patterns, each checked against the logged calls. Nothing blocks until you accept it here.</span></div>
-        <div class="actions"><button type="button" id="btn-save-pattern-proposals">Save proposals setting</button></div>
-        <div id="patterns-list"></div>
-        <div id="redirects-panel" class="pattern-panel"></div>
-        <div class="msg" id="agents-msg" role="status"></div>
-        <div id="agents-list"></div>
-      </section>
-
-      <section id="audit-section">
-        <h2>Setup audit</h2>
-        <p class="lede">What Claude Code and Codex load for a project, and where they collide: hooks deciding on the same tool at once, hooks or MCP servers that do not work, tools offered twice, skills and instructions one agent never sees. It runs on its own every 30 minutes for the registered projects; nothing is changed.</p>
+    <section class="page" data-page="audit" aria-labelledby="h-audit" hidden>
+      <header class="page-head"><h2 id="h-audit" tabindex="-1">Setup audit</h2>
+        <p>What Claude Code and Codex load for a project, and where they collide: hooks deciding on the same tool at once, hooks or MCP servers that do not work, tools offered twice, skills and instructions one agent never sees. It runs on its own for the registered projects and never changes anything.</p></header>
+      <div class="card">
         <div class="field"><label for="sel-audit-project">Project</label>
           <select id="sel-audit-project"></select>
           <span class="hint" id="audit-hint"></span></div>
-        <div class="actions"><button type="button" id="btn-audit-run">Run now</button></div>
+        <div class="actions"><button type="button" class="primary" id="btn-audit-run">Run now</button></div>
         <div class="msg" id="audit-msg" role="status"></div>
         <div id="audit-report"></div>
-      </section>
+      </div>
+    </section>
 
-      <section id="providers-section">
-        <h2>Web search providers</h2>
-        <p class="lede">All of them work without a key, on each provider's public free tier. Add your own key only if you need more volume: it is tested with a real search before being saved and is protected by DPAPI on this Windows machine.</p>
-        <div class="field"><label for="contact-input">Your contact for public APIs (optional)</label>
-          <input id="contact-input" autocomplete="off" spellcheck="false" placeholder="you@example.com or https://your.site">
-          <span class="hint" id="contact-hint">Wikimedia asks tools to identify a contact in the User-Agent. It stays on this machine and is sent only to the search APIs.</span></div>
-        <div class="actions"><button type="button" id="btn-save-contact">Save contact</button></div>
-        <div class="msg" id="contact-msg" role="status"></div>
-        <div class="field" style="margin-top:18px"><label for="provider-select">Provider</label>
-          <select id="provider-select"></select>
-          <span class="hint">Pick a provider to see its free tier and set or remove your key for it.</span></div>
-        <div id="provider-panel"></div>
-      </section>
-    </div>
-  </div>
-</main>
+    <section class="page" data-page="startup" aria-labelledby="h-startup" hidden>
+      <header class="page-head"><h2 id="h-startup" tabindex="-1">Startup</h2>
+        <p>The Smart Tool service runs in the background on this machine. Your agents talk to it at the address below.</p></header>
+      <div class="card">
+        <div class="card-head"><h3>Start with Windows</h3><span class="pill" id="autostart-pill" data-tone="busy">Checking</span></div>
+        <p class="lede">Starts Smart Tool when you sign in, so agents find it without you starting it by hand.</p>
+        <div class="actions"><button type="button" id="btn-autostart-toggle" disabled>Checking</button></div>
+        <div class="msg" id="autostart-msg" role="status"></div>
+      </div>
+      <div class="card">
+        <h3>This installation</h3>
+        <dl class="facts">
+          <div><dt>Version</dt><dd id="fact-version"></dd></div>
+          <div><dt>Service address</dt><dd class="mono">__SETUP_ORIGIN__</dd></div>
+          <div><dt>MCP endpoint</dt><dd class="mono">__SETUP_ORIGIN__/mcp</dd></div>
+        </dl>
+      </div>
+    </section>
+  </main>
+</div>
 <script>
 const TOKEN = __SETUP_TOKEN__;
 let status = __STATUS_JSON__;
 const $ = (id) => document.getElementById(id);
+const loaded = { integration: null, autostart: null, providers: null, audit: null };
+const failed = {};
+let serviceDown = false;
 
-function setMsg(id, kind, text) { const el = $(id); el.className = "msg" + (kind ? " " + kind : ""); el.textContent = text; }
-
+function node(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+function button(label, className, onClick) {
+  const el = node("button", className, label);
+  el.type = "button";
+  if (onClick) el.addEventListener("click", onClick);
+  return el;
+}
+function pill(tone, label) {
+  const el = node("span", "pill", label);
+  el.dataset.tone = tone;
+  return el;
+}
+function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
+function setPill(id, tone, label) { const el = $(id); el.dataset.tone = tone; el.textContent = label; }
+function setMsg(target, kind, text) {
+  const el = typeof target === "string" ? $(target) : target;
+  el.className = (el.dataset.base || "msg") + (kind ? " " + kind : "");
+  el.textContent = text;
+}
 async function post(path, body) {
   const resp = await fetch(path, { method: "POST", headers: { "X-Setup-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok || data.error) throw new Error(data.error || `HTTP error ${resp.status}.`);
   return data;
 }
-
-function station(id, state, live, broken) {
-  const el = $(id);
-  el.dataset.state = state;
-  el.dataset.live = live ? "1" : "0";
-  el.dataset.break = broken ? "1" : "0";
+async function getJSON(path) {
+  const resp = await fetch(path);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || data.error) throw new Error(data.error || `HTTP error ${resp.status}.`);
+  return data;
 }
 
-function renderPath() {
+const PAGES = [...document.querySelectorAll("section.page")].map((section) => section.dataset.page);
+function showPage(name, focus) {
+  if (!PAGES.includes(name)) name = "overview";
+  for (const section of document.querySelectorAll("section.page")) section.hidden = section.dataset.page !== name;
+  for (const link of document.querySelectorAll(".side a")) {
+    if (link.dataset.page === name) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
+  }
+  if (focus) $("h-" + name).focus();
+}
+function go(page) {
+  if (location.hash === "#" + page) showPage(page, true); else location.hash = page;
+}
+window.addEventListener("hashchange", () => showPage(location.hash.slice(1), true));
+showPage(location.hash.slice(1), false);
+$("app-version").textContent = status.version;
+$("fact-version").textContent = status.version;
+
+function agentState(item) {
+  if (!item.mcp_url) return { tone: "bad", label: "Not connected", action: "Connect",
+    text: "The smart-tool MCP server is not registered in " + item.label + ", so it has no smart_search, web_search or web_fetch." };
+  if (item.hook_error) return { tone: "bad", label: "Hook unreadable", action: "Open",
+    text: "Could not read " + item.file + ": " + item.hook_error };
+  if (item.hook_state === "outdated") return { tone: "warn", label: "Hook outdated", action: "Update hook", hook: true,
+    text: "The redirect hook was written by an older Smart Tool. " + item.hook_changes.join(" ") };
+  if (item.hook_state === "missing") return { tone: "warn", label: "No hook", action: "Install hook", hook: true,
+    text: "Connected, but its folder searches and web lookups are not redirected to Smart Tool." };
+  return { tone: "ok", label: "Connected", action: "Open", text: "Connection and redirect hook are up to date." };
+}
+
+function overviewItems() {
+  const items = [];
   const gw = status.gateway;
-  const gwReady = gw.status === "ready";
-  const modelsReady = status.models_status === "ready";
-  const source = gw.label || "Not configured";
-  $("st-gateway-detail").textContent = gw.label || "no adapter";
-  $("st-gateway-verdict").textContent = gwReady ? source : (gw.error || "Unavailable");
-  $("st-models-detail").textContent = [status.embedding_model, status.rerank_model].filter(Boolean).join(" · ") || "none chosen";
-  $("st-models-verdict").textContent = status.models_message || (modelsReady ? "Ready" : "Choose the models");
-  station("st-agent", "ok", true, false);
-  station("st-daemon", "ok", gwReady, !gwReady);
-  station("st-gateway", gwReady ? "ok" : "bad", gwReady && modelsReady, gwReady && !modelsReady);
-  station("st-models", gwReady ? (modelsReady ? "ok" : "warn") : "idle", false, false);
-  ["st-agent", "st-daemon", "st-gateway"].forEach((id, i) => $(id).style.setProperty("--delay", (i * 0.35) + "s"));
+  items.push(serviceDown
+    ? { tone: "bad", label: "Not responding", title: "Smart Tool service", page: "startup", action: "Open", text: "The service stopped answering this page. Start Smart Tool again and reload." }
+    : { tone: "ok", label: "Running", title: "Smart Tool service", page: "startup", action: "Open",
+        text: "Answering at " + location.origin + "." + (loaded.autostart ? (loaded.autostart.installed ? " Starts with Windows." : " Not started with Windows.") : "") });
+  items.push(gw.status === "ready"
+    ? { tone: "ok", label: "Connected", title: "Model gateway", page: "models", action: "Open", text: "Model calls go through " + gw.label + "." }
+    : { tone: "bad", label: "Not connected", title: "Model gateway", page: "models", action: "Connect", text: (gw.error || "No gateway configured.") + " Code search and routing need it." });
+  if (gw.status === "ready") items.push(status.models_status === "ready"
+    ? { tone: "ok", label: "Ready", title: "Models", page: "models", action: "Open", text: [status.embedding_model, status.rerank_model].filter(Boolean).join(" · ") || "Ready." }
+    : { tone: "warn", label: "Choose models", title: "Models", page: "models", action: "Choose", text: status.models_message || "Some models are not chosen yet." });
+  const integration = loaded.integration;
+  if (failed.integration) items.push({ tone: "bad", label: "Unavailable", title: "Agents", page: "agents", action: "Open", text: failed.integration });
+  else if (!integration) items.push({ tone: "busy", label: "Checking", title: "Agents", page: "agents", action: "Open", text: "Reading Claude Code and Codex settings…" });
+  else {
+    for (const item of integration.clients) {
+      const state = agentState(item);
+      items.push({ ...state, title: item.label, page: "agents", run: state.hook ? () => { go("agents"); hookControls[item.client](); } : null });
+    }
+    for (const rule of RULES) {
+      if (integration[rule.key + "_error"]) items.push({ tone: "bad", label: "Unreadable", title: rule.title, page: "rules", action: "Open", text: integration[rule.key + "_error"] });
+    }
+    if (integration.hook_mode === "off") items.push({ tone: "warn", label: "Off", title: "Redirects", page: "rules", action: "Turn on", text: "The hook lets every native search run; agents are not sent to Smart Tool." });
+    const waiting = integration.block_patterns.proposals.length;
+    if (integration.block_patterns.error) items.push({ tone: "bad", label: "Unreadable", title: "Block patterns", page: "redirects", action: "Open", text: integration.block_patterns.error });
+    else if (waiting) items.push({ tone: "warn", label: waiting + " waiting", title: "Block patterns", page: "redirects", action: "Review", text: "A model proposed " + plural(waiting, "pattern") + " to block. Nothing blocks until you accept." });
+  }
+  if (failed.providers) items.push({ tone: "bad", label: "Unavailable", title: "Web search", page: "web", action: "Open", text: failed.providers });
+  else if (loaded.providers) {
+    const list = Object.values(loaded.providers.providers);
+    const unreadable = list.filter((info) => info.status === "unreadable");
+    const keyed = list.filter((info) => info.status === "configured").length;
+    items.push(unreadable.length
+      ? { tone: "bad", label: "Key unreadable", title: "Web search", page: "web", action: "Fix", text: unreadable.map((info) => info.label).join(", ") + ": the saved key cannot be opened in this Windows profile. Paste it again." }
+      : { tone: "ok", label: "Ready", title: "Web search", page: "web", action: "Open", text: plural(list.length, "provider") + " on their free tier" + (keyed ? ", " + keyed + " with your key." : "; no key needed.") });
+  }
+  if (failed.audit) items.push({ tone: "bad", label: "Unavailable", title: "Setup audit", page: "audit", action: "Open", text: failed.audit });
+  else if (loaded.audit && loaded.audit.projects.length) {
+    const errors = Object.values(loaded.audit.index).reduce((sum, entry) => sum + entry.summary.error, 0);
+    items.push(errors
+      ? { tone: "warn", label: plural(errors, "problem"), title: "Setup audit", page: "audit", action: "See report", text: "Hooks or MCP servers that collide or do not work in your registered projects." }
+      : { tone: "ok", label: "Clean", title: "Setup audit", page: "audit", action: "Open", text: "No collision or broken piece in the audited projects." });
+  }
+  const rank = { bad: 0, warn: 1, busy: 2, idle: 3, ok: 4 };
+  return items.map((item, index) => ({ ...item, index })).sort((a, b) => rank[a.tone] - rank[b.tone] || a.index - b.index);
 }
 
+function renderOverview() {
+  const items = overviewItems();
+  const list = $("overview-list");
+  list.replaceChildren();
+  for (const item of items) {
+    const row = node("li", "check");
+    const title = node("div", "check-title");
+    title.append(pill(item.tone, item.label), node("span", "", item.title));
+    const action = button(item.action, item.tone === "bad" || item.tone === "warn" ? "primary" : "", item.run || (() => go(item.page)));
+    action.setAttribute("aria-label", item.action + ": " + item.title);
+    const side = node("div", "check-action");
+    side.appendChild(action);
+    row.append(title, side, node("div", "check-text", item.text));
+    list.appendChild(row);
+  }
+  const problems = items.filter((item) => item.tone === "bad" || item.tone === "warn");
+  const pending = items.some((item) => item.tone === "busy");
+  const banner = $("overview-banner");
+  banner.dataset.tone = problems.some((item) => item.tone === "bad") ? "bad" : problems.length ? "warn" : pending ? "busy" : "ok";
+  banner.textContent = problems.length ? problems.length + (problems.length === 1 ? " thing needs" : " things need") + " your attention."
+    : pending ? "Checking…" : "Everything is working.";
+  const counts = {};
+  for (const item of problems) {
+    const entry = counts[item.page] || (counts[item.page] = { count: 0, bad: false });
+    entry.count += 1;
+    entry.bad = entry.bad || item.tone === "bad";
+  }
+  counts.overview = { count: problems.length, bad: problems.some((item) => item.tone === "bad") };
+  for (const badge of document.querySelectorAll(".side .count")) {
+    const entry = counts[badge.dataset.count];
+    badge.hidden = !entry;
+    badge.textContent = entry ? entry.count : "";
+    badge.dataset.tone = entry && entry.bad ? "bad" : "warn";
+    badge.title = entry ? plural(entry.count, "item") + (entry.count === 1 ? " needs" : " need") + " attention" : "";
+  }
+}
+
+let gatewaySignature = null;
 function renderGateway() {
   const gw = status.gateway;
   const ready = gw.status === "ready";
-  const el = $("gateway-state");
-  el.dataset.state = ready ? "ok" : "bad";
-  el.textContent = ready ? "Connected through " + gw.label : (gw.error || "Gateway unavailable");
+  setPill("gateway-pill", ready ? "ok" : "bad", ready ? "Connected through " + gw.label : "Not connected");
+  if (!ready) setMsg("gateway-msg", "error", gw.error || "Gateway unavailable.");
   $("gateway-dir").textContent = "Your adapters: " + gw.dir;
   $("gateway-errors").hidden = !gw.errors.length;
   $("gateway-errors").textContent = gw.errors.length ? "Adapters that failed to load: " + gw.errors.join(" · ") : "";
   const select = $("gateway-adapter");
-  // Redraw only when the adapters or their stored state change: the 15 s refresh must not wipe what is being typed.
   const signature = JSON.stringify([gw.selected, gw.adapters]);
   if (signature !== gatewaySignature && document.activeElement !== select && !select.dataset.touched) {
     gatewaySignature = signature;
@@ -782,39 +924,40 @@ function renderGateway() {
   $("gateway-clear").disabled = !gw.selected;
   $("models-blocked").hidden = ready;
   $("models-form").hidden = !ready;
+  if (!ready) setPill("models-pill", "idle", "Waiting for the gateway");
+  else if (status.models_status === "ready") setPill("models-pill", "ok", "Ready");
+  else setPill("models-pill", "warn", "Choose models");
 }
-
-let gatewaySignature = null;
 function renderGatewayFields() {
   const adapter = status.gateway.adapters.find((a) => a.name === $("gateway-adapter").value);
   const box = $("gateway-fields");
   box.replaceChildren();
   for (const field of (adapter || { fields: [] }).fields) {
-    const wrap = document.createElement("div");
-    wrap.className = "field";
-    wrap.innerHTML = `<label></label><input type="text" autocomplete="off" spellcheck="false"><span class="hint"></span>`;
-    const input = wrap.querySelector("input");
+    const wrap = node("div", "field");
+    const input = node("input");
+    input.type = "text";
+    input.autocomplete = "off";
+    input.spellcheck = false;
     input.id = "gateway-field-" + field.name;
-    wrap.querySelector("label").htmlFor = input.id;
-    wrap.querySelector("label").textContent = field.label + (field.required ? "" : " (optional)");
+    const label = node("label", "", field.label + (field.required ? "" : " (optional)"));
+    label.htmlFor = input.id;
+    const hint = node("span", "hint");
     input.dataset.field = field.name;
     input.dataset.secret = field.secret ? "1" : "";
     if (field.secret) {
       input.type = "password";
       input.autocomplete = "new-password";
       input.placeholder = field.state === "configured" ? "Saved · paste another to replace" : "";
-      const hint = field.state === "unreadable" ? "The saved value cannot be opened in this Windows profile; paste it again. " : "";
-      wrap.querySelector(".hint").textContent = hint + (field.hint || "") + " Protected by DPAPI.";
-      if (field.state === "configured") {
-        const remove = document.createElement("button");
-        remove.type = "button"; remove.className = "quiet"; remove.textContent = "Remove";
-        remove.addEventListener("click", () => saveGateway({ adapter: adapter.name, remove_secret: field.name }));
-        wrap.appendChild(remove);
-      }
+      hint.textContent = (field.state === "unreadable" ? "The saved value cannot be opened in this Windows profile; paste it again. " : "")
+        + (field.hint || "") + " Protected by DPAPI.";
     } else {
       input.value = field.value || "";
       input.placeholder = field.placeholder || "";
-      wrap.querySelector(".hint").textContent = field.hint || "";
+      hint.textContent = field.hint || "";
+    }
+    wrap.append(label, input, hint);
+    if (field.secret && field.state === "configured") {
+      wrap.appendChild(button("Remove saved value", "small", () => saveGateway({ adapter: adapter.name, remove_secret: field.name })));
     }
     box.appendChild(wrap);
   }
@@ -828,22 +971,18 @@ function gatewayValues() {
   return values;
 }
 $("gateway-adapter").addEventListener("change", () => { $("gateway-adapter").dataset.touched = "1"; renderGatewayFields(); });
-
-function render() { renderPath(); renderGateway(); }
-render();
-requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.add("ready")));
-
 async function saveGateway(body) {
   const buttons = [$("gateway-save"), $("gateway-clear")];
   buttons.forEach((b) => b.disabled = true);
-  setMsg("gateway-msg", "", body.adapter ? "Testing…" : "Disconnecting…");
+  setMsg("gateway-msg", "", body.adapter ? "Testing the connection…" : "Disconnecting…");
   try {
     const data = await post("/setup/gateway", body);
     status.gateway = data.gateway;
     delete $("gateway-adapter").dataset.touched;
     gatewaySignature = null;
     setMsg("gateway-msg", data.gateway.status === "ready" ? "ok" : "warn",
-      body.adapter ? "Gateway saved and responding." : "Gateway disconnected.");
+      body.adapter ? (data.gateway.status === "ready" ? "Saved. The gateway answered." : "Saved, but the gateway does not answer: " + (data.gateway.error || "no reason given."))
+        : "Gateway disconnected.");
     await refreshStatus(true);
   } catch (error) {
     setMsg("gateway-msg", "error", error.message);
@@ -855,44 +994,7 @@ async function saveGateway(body) {
 $("gateway-save").addEventListener("click", () => saveGateway({ adapter: $("gateway-adapter").value, values: gatewayValues() }));
 $("gateway-clear").addEventListener("click", () => saveGateway({ adapter: "" }));
 
-let autostartState = { installed: false, method: null };
-function renderAutostart() {
-  const el = $("autostart-status");
-  el.dataset.state = autostartState.installed ? "ok" : "warn";
-  el.textContent = autostartState.installed ? `On via ${autostartState.method === "task" ? "Scheduled Task" : "Startup folder"}` : "Off";
-  $("st-daemon-verdict").textContent = autostartState.installed ? "Responding · starts with Windows" : "Responding · manual start";
-  const btn = $("btn-autostart-toggle");
-  btn.disabled = false;
-  btn.textContent = autostartState.installed ? "Turn off automatic start" : "Turn on automatic start";
-}
-async function loadAutostart() {
-  try {
-    const resp = await fetch("/setup/autostart");
-    autostartState = await resp.json();
-    renderAutostart();
-  } catch (error) {
-    $("autostart-status").dataset.state = "bad";
-    $("autostart-status").textContent = "Status unavailable";
-  }
-}
-loadAutostart();
-$("btn-autostart-toggle").addEventListener("click", async () => {
-  const action = autostartState.installed ? "remove" : "install";
-  $("btn-autostart-toggle").disabled = true;
-  setMsg("autostart-msg", "", action === "install" ? "Turning on…" : "Turning off…");
-  try {
-    const data = await post("/setup/autostart", { action });
-    setMsg("autostart-msg", "ok", action === "install"
-      ? (data.method === "task" ? "Turned on via Scheduled Task." : `Turned on via the Startup folder; the Scheduled Task was refused: ${data.fallback_reason || "no reason given"}.`)
-      : "Turned off.");
-    await loadAutostart();
-  } catch (error) {
-    setMsg("autostart-msg", "error", error.message);
-    $("btn-autostart-toggle").disabled = false;
-  }
-});
-
-function fillSelect(input, options, current) {
+function fillSuggestions(input, options, current) {
   $(input.getAttribute("list")).replaceChildren(...options.map((opt) => new Option(opt, opt)));
   input.value = current || "";
 }
@@ -905,14 +1007,12 @@ function fillNumber(id, hintId, range, current, recommended, unit) {
 let modelsLoaded = false;
 async function loadModels() {
   try {
-    const resp = await fetch("/setup/models");
-    const data = await resp.json();
-    if (!resp.ok || data.error) throw new Error(data.error || "The catalog did not respond.");
-    fillSelect($("sel-router"), data.chat_lightweight.length ? data.chat_lightweight : data.chat, data.current.router_model);
-    fillSelect($("sel-scope"), data.chat, data.current.scope_model);
-    fillSelect($("sel-research"), data.chat, data.current.research_model);
-    fillSelect($("sel-embedding"), data.embedding, data.current.embedding_model);
-    fillSelect($("sel-rerank"), data.rerank, data.current.rerank_model);
+    const data = await getJSON("/setup/models");
+    fillSuggestions($("sel-router"), data.chat_lightweight.length ? data.chat_lightweight : data.chat, data.current.router_model);
+    fillSuggestions($("sel-scope"), data.chat, data.current.scope_model);
+    fillSuggestions($("sel-research"), data.chat, data.current.research_model);
+    fillSuggestions($("sel-embedding"), data.embedding, data.current.embedding_model);
+    fillSuggestions($("sel-rerank"), data.rerank, data.current.rerank_model);
     fillNumber("num-research-iterations", "research-iterations-hint", data.ranges.research_max_iterations, data.current.research_max_iterations, data.recommended.research_max_iterations, "");
     fillNumber("num-quick-timeout", "quick-timeout-hint", data.ranges.quick_search_timeout_s, data.current.quick_search_timeout_s, data.recommended.quick_search_timeout_s, " s");
     fillNumber("num-site-memory-threshold", "site-memory-threshold-hint", data.ranges.site_memory_similarity_threshold, data.current.site_memory_similarity_threshold, data.recommended.site_memory_similarity_threshold, "");
@@ -922,8 +1022,6 @@ async function loadModels() {
     setMsg("models-msg", "error", "Could not read the gateway catalog: " + error.message);
   }
 }
-if (status.gateway.status === "ready") loadModels();
-
 $("btn-save-models").addEventListener("click", async () => {
   if (!modelsLoaded) { setMsg("models-msg", "error", "The catalog has not loaded yet; nothing was saved."); return; }
   setMsg("models-msg", "", "Saving…");
@@ -948,141 +1046,318 @@ async function refreshStatus(force) {
     const next = await resp.json();
     const reload = next.gateway.status === "ready" && (force || status.gateway.status !== "ready");
     status = next;
-    render();
+    serviceDown = false;
+    renderGateway();
     if (reload && !modelsLoaded) loadModels();
   } catch (error) {
-    $("st-daemon-verdict").textContent = "No response from the daemon";
-    station("st-daemon", "bad", false, true);
+    serviceDown = true;
   }
+  renderOverview();
 }
-setInterval(refreshStatus, 15000);
 
-async function loadLocalModels() {
-  try {
-    const resp = await fetch("/setup/local-models");
-    const data = await resp.json();
-    if (!resp.ok || data.error) throw new Error(data.error);
-    $("sel-local-models").value = data.mode;
-    $("local-models-hint").textContent = !data.sidecar.configured ? "mcp-memory sidecar not configured on this machine."
-      : data.sidecar.embedding_model ? "Sidecar responding: " + data.sidecar.embedding_model
-      : "Sidecar configured (" + data.sidecar.url + ") but not responding right now.";
-  } catch (error) {
-    $("local-models-hint").textContent = "Status unavailable: " + error.message;
+function choiceGroup(fieldset, name, options, current, onPick) {
+  for (const [value, title, text, recommended] of options) {
+    const option = node("label", "option");
+    const radio = node("input");
+    radio.type = "radio";
+    radio.name = name;
+    radio.value = value;
+    radio.checked = value === current;
+    radio.addEventListener("change", () => { if (radio.checked) onPick(value); });
+    const head = node("span", "option-title", title);
+    if (recommended) head.appendChild(node("span", "tag", "Recommended"));
+    option.append(radio, head, node("span", "option-text", text));
+    fieldset.appendChild(option);
   }
+  const saved = node("div", "saved msg");
+  saved.dataset.base = "saved msg";
+  saved.setAttribute("role", "status");
+  fieldset.appendChild(saved);
+  return saved;
 }
-loadLocalModels();
-$("btn-save-local-models").addEventListener("click", async () => {
-  setMsg("local-models-msg", "", "Saving…");
+function checkRadio(name, value) {
+  for (const radio of document.querySelectorAll(`input[name="${name}"]`)) radio.checked = radio.value === value;
+}
+
+const LOCAL_OPTIONS = [
+  ["fallback", "Only as a fallback", "Use the local model only when the gateway does not have the embedding model.", true],
+  ["prefer", "Prefer local", "Use the local model even when the gateway has it; your code vectors stay on this machine."],
+  ["off", "Never", "Always use the gateway."],
+];
+let localMode = null;
+const localSaved = choiceGroup($("local-models-choice"), "local_models", LOCAL_OPTIONS, null, async (mode) => {
+  setMsg(localSaved, "", "Saving…");
   try {
-    await post("/setup/local-models", { mode: $("sel-local-models").value });
-    setMsg("local-models-msg", "ok", "Mode saved; the indexes adjust on the next search or check.");
-    await loadLocalModels();
+    await post("/setup/local-models", { mode });
+    localMode = mode;
+    setMsg(localSaved, "ok", "Saved. The indexes adjust on the next search or check.");
   } catch (error) {
-    setMsg("local-models-msg", "error", error.message);
+    checkRadio("local_models", localMode);
+    setMsg(localSaved, "error", error.message);
   }
 });
-
-function browserText(item) {
-  if (item.browser_control_error) return "Browser control status unreadable: " + item.browser_control_error;
-  const state = item.browser_control || {};
-  if (state.state === "registered") return "Browser control on: Playwright MCP drives an isolated, headless Chromium";
-  if (state.state === "kept") return "Browser control: your own playwright MCP server is kept";
-  if (state.state === "undenied") return "Browser control is registered without its safety rule: " + state.reason;
-  if (state.state === "unavailable") return "Browser control unavailable on this machine (" + state.reason + "); pages are still read by web_fetch";
-  return "Browser control is set up when the MCP is registered";
-}
-async function loadAgents() {
+async function loadLocalModels() {
   try {
-    const resp = await fetch("/setup/integration");
-    const data = await resp.json();
-    if (!resp.ok || data.error) throw new Error(data.error);
-    if (document.activeElement !== $("sel-hook-mode")) $("sel-hook-mode").value = data.hook_mode;
-    if (document.activeElement !== $("sel-doc-mode")) $("sel-doc-mode").value = data.doc_mode;
-    if (document.activeElement !== $("sel-duplicate-mode")) $("sel-duplicate-mode").value = data.duplicate_mode;
-    if (data.hook_mode_error) setMsg("agents-msg", "error", data.hook_mode_error);
-    if (data.doc_mode_error) setMsg("agents-msg", "error", data.doc_mode_error);
-    if (data.duplicate_mode_error) setMsg("agents-msg", "error", data.duplicate_mode_error);
-    if (document.activeElement !== $("sel-pattern-proposals")) $("sel-pattern-proposals").value = data.pattern_proposals;
-    if (data.pattern_proposals_error) setMsg("agents-msg", "error", data.pattern_proposals_error);
-    renderPatterns(data.block_patterns);
-    renderRedirects(data.redirects);
-    const list = $("agents-list");
-    list.textContent = "";
-    for (const item of data.clients) {
-      const row = document.createElement("div");
-      row.className = "provider";
-      const mcp = item.mcp_url ? "MCP registered: " + item.mcp_url : "smart-tool MCP not registered in this client";
-      const hook = item.hook_error ? "Hook unreadable: " + item.hook_error : item.hook ? "Hook installed and up to date" : "Hook missing or outdated";
-      row.innerHTML = `<div class="provider-head"><strong></strong><span class="state"></span></div><p class="hint mcp"></p><p class="hint browser"></p><p class="hint mono cmd"></p><p class="hint file"></p>
-        <div class="actions"><button type="button" class="register">Register MCP</button><button type="button" class="hook">Install or update hook</button><button type="button" class="quiet browser-retry">Set up browser control</button></div>
-        <div class="plan" hidden><span class="hint plan-file"></span><pre class="code-preview"></pre>
-          <div class="actions"><button type="button" class="confirm">Confirm and write</button><button type="button" class="quiet cancel">Cancel</button></div></div>`;
-      row.querySelector("strong").textContent = item.label;
-      row.querySelector(".state").textContent = hook;
-      row.querySelector(".mcp").textContent = mcp;
-      row.querySelector(".browser").textContent = browserText(item);
-      const retry = row.querySelector(".browser-retry");
-      retry.hidden = !item.mcp_url || ["registered", "kept"].includes((item.browser_control || {}).state);
-      retry.addEventListener("click", async () => {
-        retry.disabled = true;
-        setMsg("agents-msg", "", "Checking whether agents can drive a browser here…");
-        try {
-          const result = await post("/setup/integration", { client: item.client, action: "browser_control" });
-          setMsg("agents-msg", "ok", item.label + ": " + browserText({ browser_control: result.browser_control }));
-          await loadAgents();
-        } catch (error) {
-          setMsg("agents-msg", "error", error.message);
-          retry.disabled = false;
-        }
-      });
-      row.querySelector(".file").textContent = item.file;
-      row.querySelector(".cmd").textContent = item.mcp_url ? "" : "Or in a terminal: " + item.register_command;
-      const register = row.querySelector(".register");
-      register.hidden = Boolean(item.mcp_url);
-      register.addEventListener("click", async () => {
-        register.disabled = true;
-        setMsg("agents-msg", "", "Registering the MCP in " + item.label + "…");
-        try {
-          const result = await post("/setup/integration", { client: item.client, action: "register_mcp" });
-          setMsg("agents-msg", "ok", "MCP registered with: " + result.command + ". " + browserText({ browser_control: result.browser_control }) + ". Reconnect open sessions (/mcp).");
-          await loadAgents();
-        } catch (error) {
-          setMsg("agents-msg", "error", error.message);
-          register.disabled = false;
-        }
-      });
-      const button = row.querySelector(".hook");
-      const plan = row.querySelector(".plan");
-      button.hidden = Boolean(item.hook);
-      button.addEventListener("click", async () => {
-        setMsg("agents-msg", "", "Preparing the change…");
-        try {
-          const preview = await post("/setup/integration", { client: item.client, action: "preview" });
-          row.querySelector(".plan-file").textContent = "Entry added to " + preview.file + " (the file is backed up first):";
-          row.querySelector(".code-preview").textContent = JSON.stringify(preview.change, null, 2);
-          plan.hidden = false;
-          button.hidden = true;
-          setMsg("agents-msg", "", "");
-          row.querySelector(".confirm").onclick = async () => {
-            try {
-              const result = await post("/setup/integration", { client: item.client, action: "install", token: preview.token });
-              setMsg("agents-msg", "ok", item.label + ": hook written. Backup: " + (result.backup || "new file") + (result.after_install ? ". " + result.after_install : ""));
-              await loadAgents();
-            } catch (error) {
-              setMsg("agents-msg", "error", error.message);
-            }
-          };
-        } catch (error) {
-          setMsg("agents-msg", "error", error.message);
-        }
-      });
-      row.querySelector(".cancel").addEventListener("click", () => { plan.hidden = true; button.hidden = false; });
-      list.appendChild(row);
-    }
+    const data = await getJSON("/setup/local-models");
+    localMode = data.mode;
+    checkRadio("local_models", data.mode);
+    if (!data.sidecar.configured) setPill("local-pill", "idle", "No sidecar on this machine");
+    else if (data.sidecar.embedding_model) setPill("local-pill", "ok", "Sidecar answering: " + data.sidecar.embedding_model);
+    else setPill("local-pill", "warn", "Sidecar not answering (" + data.sidecar.url + ")");
   } catch (error) {
-    setMsg("agents-msg", "error", "Agent status unavailable: " + error.message);
+    setPill("local-pill", "bad", "Status unavailable");
+    setMsg(localSaved, "error", error.message);
   }
 }
+
+const RULES = [
+  { key: "hook_mode", title: "Redirect behavior", applies: "Applies on the next tool call.",
+    intro: "What the hook does when an agent reaches for a native search or web tool that Smart Tool covers.",
+    options: [["redirect", "Redirect", "Stop the native tool and tell the agent which Smart Tool call to make instead.", true],
+              ["advise", "Advise only", "Let the native tool run and tell the agent what Smart Tool would have done."],
+              ["off", "Off", "No routing; agents use their native tools as usual."]] },
+  { key: "doc_mode", title: "Documentation on edit", applies: "Applies on the next edit.",
+    intro: "Checks the public functions an edit touches. Private, nested and override functions are exempt, as in pydocstyle, eslint-plugin-jsdoc and Checkstyle. A documented function comes up again only when its signature changes.",
+    options: [["remind", "Remind", "The edit runs; the agent is told which touched functions lack a docstring.", true],
+              ["require", "Require", "An edit that leaves a touched function without a docstring is blocked until it adds one."],
+              ["off", "Off", "No documentation checks."]] },
+  { key: "duplicate_mode", title: "Duplicate functions on edit", applies: "Applies on the next edit.",
+    intro: "Compares the functions an edit writes with the indexed code: identical bodies, and near-identical ones with only local names changed. It never blocks.",
+    options: [["warn", "Warn", "The edit runs; the agent is told when a function copies one already in the project.", true],
+              ["off", "Off", "No duplicate checks."]] },
+  { key: "pattern_proposals", title: "Block patterns proposed by a model", applies: "Applies to the next review.",
+    intro: "Afterwards, never delaying a call, the scope model (else the router model) reviews searches the fixed rule let through and may propose block patterns. Nothing blocks until you accept it on the Redirects page.",
+    options: [["on", "On", "Review in the background and list proposals for you.", true],
+              ["off", "Off", "No review and no proposals."]] },
+];
+function renderRules() {
+  const card = $("rules-card");
+  if (card.dataset.built) {
+    for (const rule of RULES) checkRadio(rule.key, loaded.integration[rule.key]);
+    return;
+  }
+  card.dataset.built = "1";
+  card.replaceChildren();
+  for (const rule of RULES) {
+    const fieldset = node("fieldset", "choice");
+    fieldset.appendChild(node("legend", "", rule.title));
+    fieldset.appendChild(node("p", "choice-intro", rule.intro));
+    const saved = choiceGroup(fieldset, rule.key, rule.options, loaded.integration[rule.key], async (mode) => {
+      setMsg(saved, "", "Saving…");
+      try {
+        await post("/setup/integration", { action: rule.key, mode });
+        loaded.integration[rule.key] = mode;
+        loaded.integration[rule.key + "_error"] = "";
+        setMsg(saved, "ok", "Saved. " + rule.applies);
+        renderOverview();
+      } catch (error) {
+        checkRadio(rule.key, loaded.integration[rule.key]);
+        setMsg(saved, "error", error.message);
+      }
+    });
+    if (loaded.integration[rule.key + "_error"]) setMsg(saved, "error", loaded.integration[rule.key + "_error"]);
+    card.appendChild(fieldset);
+  }
+}
+
+function browserState(item) {
+  if (item.browser_control_error) return ["bad", "Unreadable", "Browser control status unreadable: " + item.browser_control_error];
+  const state = item.browser_control || {};
+  if (state.state === "registered") return ["ok", "On", "Agents can open pages in an isolated, headless Chromium through the Playwright MCP server."];
+  if (state.state === "kept") return ["ok", "Your own server", "Your own playwright MCP server is kept as it is."];
+  if (state.state === "undenied") return ["bad", "Safety rule missing", "Browser control is registered without its safety rule: " + state.reason];
+  if (state.state === "unavailable") return ["idle", "Unavailable", "Not available on this machine (" + state.reason + "). Pages are still read by web_fetch."];
+  return ["idle", "Not set up", "Set up together with the connection."];
+}
+const hookControls = {};
+function row(titleText, pillEl, text) {
+  const el = node("div", "row");
+  const title = node("div", "row-title");
+  title.append(node("span", "", titleText), pillEl);
+  const side = node("div", "row-side");
+  const body = node("div", "row-text", text);
+  el.append(title, side, body);
+  return { el, side, body };
+}
+function agentCard(item) {
+  const card = node("article", "card");
+  const state = agentState(item);
+  const head = node("div", "card-head");
+  head.append(node("h3", "", item.label), pill(state.tone, state.label));
+  const msg = node("div", "msg");
+  msg.setAttribute("role", "status");
+
+  const mcp = row("Connection (MCP server)", item.mcp_url ? pill("ok", "Registered") : pill("bad", "Not registered"),
+    item.mcp_url ? "Registered at " + item.mcp_url + ". Gives the agent smart_search, web_search and web_fetch."
+      : "Not registered. Without it the agent has no smart_search, web_search or web_fetch.");
+  if (!item.mcp_url) {
+    const register = button("Connect", "primary", async () => {
+      register.disabled = true;
+      setMsg(msg, "", "Registering the MCP server in " + item.label + "…");
+      try {
+        const result = await post("/setup/integration", { client: item.client, action: "register_mcp" });
+        await loadIntegration();
+        setMsg(agentMsg(item.client), "ok", "Registered with: " + result.command + ". " + browserState({ browser_control: result.browser_control })[2]
+          + " Reconnect open " + item.label + " sessions (/mcp) to see the tools.");
+      } catch (error) {
+        setMsg(msg, "error", error.message);
+        register.disabled = false;
+      }
+    });
+    mcp.side.appendChild(register);
+    const manual = node("details", "more row-more");
+    manual.append(node("summary", "", "Or run it yourself in a terminal"), node("pre", "code", item.register_command));
+    mcp.el.appendChild(manual);
+  }
+
+  const hookPill = item.hook_error ? pill("bad", "Unreadable") : item.hook_state === "current" ? pill("ok", "Up to date")
+    : item.hook_state === "outdated" ? pill("warn", "Outdated") : pill("warn", "Not installed");
+  const hook = row("Redirect hook", hookPill, item.hook_error ? "Could not read " + item.file + ": " + item.hook_error
+    : "Runs before the agent's own search and web tools: folder searches go to smart_search, web lookups to web_search and web_fetch, so the agent reads less. It lives in " + item.file + ".");
+  if (item.hook_state === "outdated") {
+    const why = node("div", "callout");
+    why.append(node("strong", "", "Why update: "), document.createTextNode("this entry was written by an older Smart Tool version."));
+    const list = node("ul");
+    for (const change of item.hook_changes) list.appendChild(node("li", "", change));
+    why.append(list, node("div", "", "Updating rewrites only Smart Tool's entry. Your other hooks stay as they are, and the file is backed up first."));
+    hook.body.appendChild(why);
+  } else if (item.hook_state === "missing" && !item.hook_error) {
+    hook.body.appendChild(node("div", "callout info", "Installing adds one entry to this file. Your other hooks stay as they are, and the file is backed up first."));
+  }
+  const docs = node("a", "", "How " + item.label + " hooks work");
+  docs.href = item.docs;
+  docs.target = "_blank";
+  docs.rel = "noopener noreferrer";
+  const docsLine = node("div", "hint");
+  docsLine.style.marginTop = "6px";
+  docsLine.appendChild(docs);
+  hook.body.appendChild(docsLine);
+
+  const confirm = node("div", "confirm-box row-more");
+  confirm.hidden = true;
+  const confirmFile = node("p", "mono");
+  const preview = node("pre", "code");
+  const exact = node("details", "more");
+  exact.append(node("summary", "", "Show the exact entry that will be written"), preview);
+  const confirmMsg = node("div", "msg");
+  confirmMsg.setAttribute("role", "status");
+  const write = button("Confirm and write", "primary");
+  const cancel = button("Cancel", "");
+  const confirmActions = node("div", "actions");
+  confirmActions.append(write, cancel);
+  confirm.append(node("p", "", "Review the change, then confirm. The preview is valid for 10 minutes."), confirmFile, exact, confirmMsg, confirmActions);
+  if (item.after_install) confirm.appendChild(node("p", "callout info", "After writing: " + item.after_install));
+  hook.el.appendChild(confirm);
+
+  const hookLabel = item.hook_state === "outdated" ? "Update hook" : "Install hook";
+  const start = button(hookLabel, "primary");
+  start.hidden = item.hook_state === "current" || Boolean(item.hook_error) || item.hook_state === null;
+  hook.side.appendChild(start);
+  async function openPreview() {
+    start.disabled = true;
+    setMsg(msg, "", "Preparing the change…");
+    try {
+      const plan = await post("/setup/integration", { client: item.client, action: "preview" });
+      setMsg(msg, "", "");
+      if (plan.installed) { await loadIntegration(); return; }
+      confirmFile.textContent = (item.hook_state === "outdated" ? "Replaces Smart Tool's entry with this one under " : "Adds this entry under ") + plan.event + " in " + plan.file;
+      preview.textContent = JSON.stringify(plan.change, null, 2);
+      confirm.hidden = false;
+      start.hidden = true;
+      setMsg(confirmMsg, "", "");
+      write.disabled = false;
+      write.onclick = async () => {
+        write.disabled = true;
+        setMsg(confirmMsg, "", "Writing…");
+        try {
+          const result = await post("/setup/integration", { client: item.client, action: "install", token: plan.token });
+          await loadIntegration();
+          setMsg(agentMsg(item.client), "ok", "Hook written. Backup: " + (result.backup || "none, the file was new") + "."
+            + (result.after_install ? " " + result.after_install : ""));
+        } catch (error) {
+          setMsg(confirmMsg, "error", error.message);
+          write.disabled = false;
+        }
+      };
+      write.focus();
+    } catch (error) {
+      setMsg(msg, "error", error.message);
+    } finally {
+      start.disabled = false;
+    }
+  }
+  start.addEventListener("click", openPreview);
+  cancel.addEventListener("click", () => { confirm.hidden = true; start.hidden = false; start.focus(); });
+  hookControls[item.client] = () => { card.scrollIntoView({ block: "start" }); if (!start.hidden) openPreview(); };
+
+  const [browserTone, browserLabel, browserText] = browserState(item);
+  const browser = row("Browser control", pill(browserTone, browserLabel), browserText);
+  if (item.mcp_url && !["registered", "kept"].includes((item.browser_control || {}).state)) {
+    const retry = button("Set up", "", async () => {
+      retry.disabled = true;
+      setMsg(msg, "", "Checking whether agents can drive a browser here…");
+      try {
+        const result = await post("/setup/integration", { client: item.client, action: "browser_control" });
+        await loadIntegration();
+        setMsg(agentMsg(item.client), "ok", browserState({ browser_control: result.browser_control })[2]);
+      } catch (error) {
+        setMsg(msg, "error", error.message);
+        retry.disabled = false;
+      }
+    });
+    browser.side.appendChild(retry);
+  }
+  msg.dataset.client = item.client;
+  card.append(head, msg, mcp.el, hook.el, browser.el);
+  return card;
+}
+function agentMsg(client) { return document.querySelector(`#agents-list .msg[data-client="${client}"]`); }
+
+function renderAgents() {
+  const list = $("agents-list");
+  list.replaceChildren(...loaded.integration.clients.map(agentCard));
+}
+
+function bars(entries) {
+  const list = node("ul", "bars");
+  const top = Math.max(1, ...entries.map(([, count]) => count));
+  for (const [name, count] of entries) {
+    const item = node("li");
+    const bar = node("span", "bar");
+    const fill = node("span");
+    fill.style.width = Math.round(count / top * 100) + "%";
+    bar.appendChild(fill);
+    item.append(node("span", "name", name), bar, node("span", "num", String(count)));
+    list.appendChild(item);
+  }
+  return list;
+}
+function tile(value, label) {
+  const el = node("div", "tile");
+  el.append(node("div", "value", String(value)), node("div", "label", label));
+  return el;
+}
+function renderRedirects(stats) {
+  const card = $("redirects-card");
+  card.replaceChildren(node("h3", "", "Native searches redirected"),
+    node("p", "lede", "Last " + stats.days + " days. After each redirect, Smart Tool looks at the same session's next call to see whether the agent followed it."));
+  if (!stats.total) { card.appendChild(node("p", "", "No native search was redirected in the last " + stats.days + " days.")); return; }
+  const out = stats.outcomes, tokens = stats.tokens_per_call;
+  const tiles = node("div", "tiles");
+  tiles.append(tile(stats.total, "redirected"), tile(out.followed || 0, "then used smart_search"),
+    tile(out.native || 0, "then ran an allowed native call"), tile(out.blocked_again || 0, "blocked again"),
+    tile(out.no_other_call || 0, "no other call within 15 min"));
+  card.appendChild(tiles);
+  if (out.unknown) card.appendChild(node("p", "hint", plural(out.unknown, "redirect") + " had no session logged, so their next call is unknown."));
+  const byTool = Object.entries(stats.by_tool).sort((a, b) => b[1] - a[1]);
+  if (byTool.length) card.append(node("h4", "", "By tool"), bars(byTool));
+  const byReason = Object.entries(stats.by_reason).sort((a, b) => b[1] - a[1]);
+  if (byReason.length) card.append(node("h4", "", "By reason"), bars(byReason));
+  card.appendChild(node("p", "hint", "Context per call, measured over " + plural(tokens.measured, "call") + ": a native call of the kinds redirected costs about "
+    + tokens.native_redirected + " tokens; a smart_search round trip about " + tokens.smart_search
+    + " tokens. A redirect saves context only when one smart_search replaces several native searches and reads; that part is not measured yet."));
+}
+
 const PATTERN_PAGE_SIZE = 8;
 const patternView = { page: 0, filter: "", sort: "impact", selected: new Set(), open: false };
 let lastPatterns = null;
@@ -1099,26 +1374,22 @@ function patternPage(items, view) {
            matched: sorted.length, total: items.length,
            calls: items.reduce((sum, item) => sum + (item.history_matches || 0), 0) };
 }
-function patternEl(tag, className, text) {
-  const el = document.createElement(tag);
-  if (className) el.className = className;
-  if (text !== undefined) el.textContent = text;
-  return el;
-}
 async function decidePatterns(ids, decision, label) {
   try {
     const result = await post("/setup/integration", { action: "block_patterns", ids, decision });
     for (const id of ids) patternView.selected.delete(id);
+    loaded.integration = result;
     renderPatterns(result.block_patterns);
-    setMsg("agents-msg", "ok", label + ": " + ids.length + " pattern(s).");
+    renderOverview();
+    setMsg("patterns-msg", "ok", label + ": " + plural(ids.length, "pattern") + ".");
   } catch (error) {
-    setMsg("agents-msg", "error", error.message);
+    setMsg("patterns-msg", "error", error.message);
   }
 }
 function patternRow(item, actions, selectable) {
-  const row = patternEl("li", "pattern-row");
+  const entry = node("li", "pattern-row" + (selectable ? "" : " plain"));
   if (selectable) {
-    const check = patternEl("input");
+    const check = node("input");
     check.type = "checkbox";
     check.checked = patternView.selected.has(item.id);
     check.setAttribute("aria-label", "Select " + item.pattern);
@@ -1126,67 +1397,42 @@ function patternRow(item, actions, selectable) {
       if (check.checked) patternView.selected.add(item.id); else patternView.selected.delete(item.id);
       renderPatterns(lastPatterns);
     });
-    row.appendChild(check);
+    entry.appendChild(check);
   }
-  const body = patternEl("details", "pattern-body");
-  const summary = patternEl("summary");
-  const code = patternEl("code", "pattern-code", item.pattern);
+  const body = node("details", "pattern-body");
+  const summary = node("summary");
+  const code = node("code", "pattern-code", item.pattern);
   code.title = item.pattern;
-  summary.append(patternEl("span", "pattern-tool", item.tool), code);
-  const detail = patternEl("div", "pattern-detail");
-  detail.append(patternEl("p", "", item.reason), patternEl("p", "hint mono", "Example: " + item.example),
-                patternEl("p", "hint mono", item.pattern));
+  summary.append(node("span", "pattern-tool", item.tool), code);
+  const detail = node("div", "pattern-detail");
+  detail.append(node("p", "", item.reason), node("p", "hint mono", "Example: " + item.example), node("p", "hint mono", item.pattern));
   body.append(summary, detail);
-  const reach = patternEl("span", "pattern-reach", item.history_total ? item.history_matches + " / " + item.history_total : "–");
-  reach.title = item.history_total ? "Would have blocked " + item.history_matches + " of " + item.history_total + " logged " + item.tool + " calls" : "No logged calls to compare";
-  const buttons = patternEl("span", "pattern-actions");
-  for (const [decision, label] of actions) {
-    const button = patternEl("button", "quiet", label);
-    button.type = "button";
-    button.addEventListener("click", () => decidePatterns([item.id], decision, label));
-    buttons.appendChild(button);
-  }
-  const meta = patternEl("div", "pattern-meta");
+  const reach = node("span", "pattern-reach", item.history_total ? "would block " + item.history_matches + " of " + item.history_total + " logged " + item.tool + " calls" : "no logged calls to compare");
+  const buttons = node("span", "actions");
+  buttons.style.marginTop = "0";
+  for (const [decision, label] of actions) buttons.appendChild(button(label, "small", () => decidePatterns([item.id], decision, label)));
+  const meta = node("div", "pattern-meta");
   meta.append(reach, buttons);
-  const main = patternEl("div", "pattern-main");
+  const main = node("div");
   main.append(body, meta);
-  row.appendChild(main);
-  return row;
-}
-function renderRedirects(stats) {
-  const panel = $("redirects-panel");
-  panel.textContent = "";
-  panel.append(patternEl("h3", "", "Native searches redirected (last " + stats.days + " days): " + stats.total));
-  const out = stats.outcomes, tokens = stats.tokens_per_call;
-  const lines = [
-    "By tool: " + (Object.entries(stats.by_tool).map(([k, v]) => k + " " + v).join(", ") || "none"),
-    "Next call of the same session: smart_search " + (out.followed || 0) + ", allowed native call " + (out.native || 0)
-      + ", blocked again " + (out.blocked_again || 0) + ", none within 15 min " + (out.no_other_call || 0)
-      + ", unknown (no session logged) " + (out.unknown || 0),
-    "Context per call (measured " + tokens.measured + "): a native call of the kinds redirected ~" + tokens.native_redirected
-      + " tokens; a smart_search round trip ~" + tokens.smart_search + " tokens. A redirect saves context only when one"
-      + " smart_search replaces several native searches and reads; that part is not measured yet.",
-  ];
-  for (const line of lines) panel.append(patternEl("p", "hint", line));
-  for (const [reason, count] of Object.entries(stats.by_reason)) panel.append(patternEl("p", "hint mono", count + " × " + reason));
+  entry.appendChild(main);
+  return entry;
 }
 function renderPatterns(patterns) {
   lastPatterns = patterns;
   const box = $("patterns-list");
-  box.textContent = "";
-  if (patterns.error) { box.appendChild(patternEl("p", "msg error", patterns.error)); return; }
+  box.replaceChildren();
+  if (patterns.error) { box.appendChild(node("p", "msg error", patterns.error)); return; }
   const proposals = patterns.proposals;
   const live = new Set(proposals.map((item) => item.id));
   for (const id of [...patternView.selected]) if (!live.has(id)) patternView.selected.delete(id);
-  if (proposals.length) {
+  if (!proposals.length) box.appendChild(node("p", "", "No proposal waiting for you."));
+  else {
     const view = patternPage(proposals, patternView);
     patternView.page = view.page;
-    const panel = patternEl("div", "pattern-panel");
-    const head = patternEl("div", "pattern-head");
-    head.append(patternEl("strong", "", proposals.length + " proposed pattern(s) waiting"),
-                patternEl("span", "hint", "Together they would have blocked " + view.calls + " logged call(s). Open a row for its reason and example."));
-    const tools = patternEl("div", "pattern-tools");
-    const filter = patternEl("input");
+    box.appendChild(node("p", "", plural(proposals.length, "proposal") + " waiting. Together they would have blocked " + plural(view.calls, "logged call") + ". Open a row for its reason and an example."));
+    const tools = node("div", "pattern-tools");
+    const filter = node("input");
     filter.type = "text";
     filter.placeholder = "Filter by pattern, reason or example";
     filter.value = patternView.filter;
@@ -1198,103 +1444,189 @@ function renderPatterns(patterns) {
       const again = document.querySelector(".pattern-tools input[type=text]");
       if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
     });
-    const sort = patternEl("select");
+    const sort = node("select");
     sort.setAttribute("aria-label", "Order of proposed patterns");
-    for (const [value, label] of [["impact", "Most blocked calls first"], ["newest", "Newest first"]]) {
-      const option = patternEl("option", "", label);
-      option.value = value;
-      sort.appendChild(option);
-    }
+    for (const [value, label] of [["impact", "Most blocked calls first"], ["newest", "Newest first"]]) sort.appendChild(new Option(label, value));
     sort.value = patternView.sort;
     sort.addEventListener("change", () => { patternView.sort = sort.value; patternView.page = 0; renderPatterns(lastPatterns); });
     tools.append(filter, sort);
-    const bulk = patternEl("div", "actions pattern-bulk");
+    const bulk = node("div", "actions");
     const pageIds = view.rows.map((item) => item.id);
     const allOnPage = pageIds.length > 0 && pageIds.every((id) => patternView.selected.has(id));
-    const selectPage = patternEl("button", "quiet", allOnPage ? "Clear this page" : "Select this page");
-    selectPage.type = "button";
-    selectPage.disabled = !pageIds.length;
-    selectPage.addEventListener("click", () => {
+    const selectPage = button(allOnPage ? "Clear this page" : "Select this page", "", () => {
       for (const id of pageIds) if (allOnPage) patternView.selected.delete(id); else patternView.selected.add(id);
       renderPatterns(lastPatterns);
     });
+    selectPage.disabled = !pageIds.length;
     const count = patternView.selected.size;
-    const accept = patternEl("button", "", "Accept selected (" + count + ")");
-    const reject = patternEl("button", "quiet", "Reject selected (" + count + ")");
-    for (const [button, decision, label] of [[accept, "accept", "Accepted"], [reject, "reject", "Rejected"]]) {
-      button.type = "button";
-      button.disabled = !count;
-      button.addEventListener("click", () => decidePatterns([...patternView.selected], decision, label));
-    }
+    const accept = button("Accept selected (" + count + ")", "primary", () => decidePatterns([...patternView.selected], "accept", "Accepted"));
+    const reject = button("Reject selected (" + count + ")", "", () => decidePatterns([...patternView.selected], "reject", "Rejected"));
+    accept.disabled = reject.disabled = !count;
     bulk.append(selectPage, accept, reject);
-    const list = patternEl("ul", "pattern-list");
+    const list = node("ul", "pattern-list");
     for (const item of view.rows) list.appendChild(patternRow(item, [["accept", "Accept"], ["reject", "Reject"]], true));
-    if (!view.rows.length) list.appendChild(patternEl("li", "hint", "No proposal matches the filter."));
-    const pager = patternEl("div", "actions pattern-pager");
-    const prev = patternEl("button", "quiet", "Previous");
-    const next = patternEl("button", "quiet", "Next");
-    prev.type = "button";
-    next.type = "button";
+    if (!view.rows.length) list.appendChild(node("li", "hint", "No proposal matches the filter."));
+    const pager = node("div", "actions pager");
+    const prev = button("Previous", "", () => { patternView.page -= 1; renderPatterns(lastPatterns); });
+    const next = button("Next", "", () => { patternView.page += 1; renderPatterns(lastPatterns); });
     prev.disabled = view.page === 0;
     next.disabled = view.page >= view.pages - 1;
-    prev.addEventListener("click", () => { patternView.page -= 1; renderPatterns(lastPatterns); });
-    next.addEventListener("click", () => { patternView.page += 1; renderPatterns(lastPatterns); });
     const first = view.page * PATTERN_PAGE_SIZE;
     const shown = view.matched ? (first + 1) + "–" + (first + view.rows.length) : "0";
     const filtered = view.matched < view.total ? " (filtered from " + view.total + ")" : "";
-    pager.append(prev, patternEl("span", "hint", shown + " of " + view.matched + filtered + " · page " + (view.page + 1) + " of " + view.pages), next);
-    panel.append(head, tools, bulk, list, pager);
-    box.appendChild(panel);
+    pager.append(prev, node("span", "hint", shown + " of " + view.matched + filtered + " · page " + (view.page + 1) + " of " + view.pages), next);
+    box.append(tools, bulk, list, pager);
   }
   if (patterns.accepted.length) {
-    const blocking = patternEl("details", "pattern-blocking");
+    const blocking = node("details", "more");
     blocking.open = patternView.open;
     blocking.addEventListener("toggle", () => { patternView.open = blocking.open; });
-    blocking.appendChild(patternEl("summary", "", "Blocking patterns (" + patterns.accepted.length + ")"));
-    const list = patternEl("ul", "pattern-list");
+    blocking.appendChild(node("summary", "", "Patterns you accepted, blocking now (" + patterns.accepted.length + ")"));
+    const list = node("ul", "pattern-list");
     for (const item of patterns.accepted) list.appendChild(patternRow(item, [["remove", "Remove"]], false));
     blocking.appendChild(list);
     box.appendChild(blocking);
   }
-  if (patterns.rejected) box.appendChild(patternEl("p", "hint", patterns.rejected + " rejected proposal(s) are not offered again."));
+  if (patterns.rejected) box.appendChild(node("p", "hint", plural(patterns.rejected, "rejected proposal") + " not offered again."));
 }
-loadAgents();
-$("btn-save-pattern-proposals").addEventListener("click", async () => {
+
+async function loadIntegration() {
   try {
-    await post("/setup/integration", { action: "pattern_proposals", mode: $("sel-pattern-proposals").value });
-    setMsg("agents-msg", "ok", "Proposals setting saved.");
+    loaded.integration = await getJSON("/setup/integration");
+    delete failed.integration;
+    renderAgents();
+    renderRules();
+    renderRedirects(loaded.integration.redirects);
+    renderPatterns(loaded.integration.block_patterns);
   } catch (error) {
-    setMsg("agents-msg", "error", error.message);
+    failed.integration = "Agent status unavailable: " + error.message;
+    setMsg("agents-msg", "error", failed.integration);
+    $("rules-card").replaceChildren(node("p", "msg error", failed.integration));
+    $("redirects-card").replaceChildren(node("p", "msg error", failed.integration));
   }
-});
-$("btn-save-doc-mode").addEventListener("click", async () => {
+  renderOverview();
+}
+
+async function loadAutostart() {
   try {
-    await post("/setup/integration", { action: "doc_mode", mode: $("sel-doc-mode").value });
-    setMsg("agents-msg", "ok", "Documentation setting saved; it applies on the next edit.");
+    loaded.autostart = await getJSON("/setup/autostart");
+    const on = loaded.autostart.installed;
+    setPill("autostart-pill", on ? "ok" : "idle", on ? "On, via " + (loaded.autostart.method === "task" ? "Scheduled Task" : "Startup folder") : "Off");
+    const toggle = $("btn-autostart-toggle");
+    toggle.disabled = false;
+    toggle.className = on ? "" : "primary";
+    toggle.textContent = on ? "Turn off" : "Turn on";
   } catch (error) {
-    setMsg("agents-msg", "error", error.message);
+    setPill("autostart-pill", "bad", "Status unavailable");
+    setMsg("autostart-msg", "error", error.message);
   }
-});
-$("btn-save-duplicate-mode").addEventListener("click", async () => {
+  renderOverview();
+}
+$("btn-autostart-toggle").addEventListener("click", async () => {
+  const action = loaded.autostart.installed ? "remove" : "install";
+  $("btn-autostart-toggle").disabled = true;
+  setMsg("autostart-msg", "", action === "install" ? "Turning on…" : "Turning off…");
   try {
-    await post("/setup/integration", { action: "duplicate_mode", mode: $("sel-duplicate-mode").value });
-    setMsg("agents-msg", "ok", "Duplicate setting saved; it applies on the next edit.");
+    const data = await post("/setup/autostart", { action });
+    setMsg("autostart-msg", "ok", action === "install"
+      ? (data.method === "task" ? "Turned on via Scheduled Task." : `Turned on via the Startup folder; the Scheduled Task was refused: ${data.fallback_reason || "no reason given"}.`)
+      : "Turned off.");
+    await loadAutostart();
   } catch (error) {
-    setMsg("agents-msg", "error", error.message);
-  }
-});
-$("btn-save-hook-mode").addEventListener("click", async () => {
-  try {
-    await post("/setup/integration", { action: "hook_mode", mode: $("sel-hook-mode").value });
-    setMsg("agents-msg", "ok", "Hook behavior saved; it applies on the next tool call.");
-    await loadAgents();
-  } catch (error) {
-    setMsg("agents-msg", "error", error.message);
+    setMsg("autostart-msg", "error", error.message);
+    $("btn-autostart-toggle").disabled = false;
   }
 });
 
-const AUDIT_SEVERITY = { error: "Error", warn: "Warning", info: "Note" };
-let auditProjects = [];
+const PROVIDER_STATES = { keyless: ["ok", "Free tier, no key"], configured: ["ok", "Your key"], unreadable: ["bad", "Key unreadable"] };
+function providerRow(name, info) {
+  const entry = node("div", "provider-row");
+  const [tone, label] = PROVIDER_STATES[info.status] || ["bad", info.status];
+  const title = node("div", "row-title");
+  title.append(node("span", "", info.label), pill(tone, label));
+  const text = node("div", "row-text");
+  text.append(node("div", "", "Without a key: " + info.free), node("div", "", "With your key: " + info.keyed));
+  if (info.status === "unreadable") text.appendChild(node("div", "msg error", "The saved key cannot be opened in this Windows profile; paste it again."));
+  const side = node("div", "row-side");
+  const form = node("div", "key-form");
+  form.hidden = true;
+  const field = node("div", "field");
+  const input = node("input");
+  input.type = "password";
+  input.autocomplete = "new-password";
+  input.id = name + "-key";
+  input.placeholder = info.key_prefix ? `Paste the key (starts with ${info.key_prefix})` : "Paste the key from your account";
+  const fieldLabel = node("label", "", info.label + " API key");
+  fieldLabel.htmlFor = input.id;
+  const signup = node("a", "", "Create a key in your " + info.label + " account");
+  signup.href = info.signup;
+  signup.target = "_blank";
+  signup.rel = "noopener noreferrer";
+  const hint = node("span", "hint");
+  hint.appendChild(signup);
+  field.append(fieldLabel, input, hint);
+  const msg = node("div", "msg");
+  msg.setAttribute("role", "status");
+  const save = button("Test and save", "primary", async () => {
+    if (!input.value.trim()) { setMsg(msg, "error", "Paste the API key before saving."); return; }
+    save.disabled = true;
+    setMsg(msg, "", "Testing the key with a real search…");
+    try {
+      const data = await post("/setup/providers", { provider: name, action: "save", api_key: input.value.trim() });
+      await loadProviders(name, `Key accepted (${plural(data.validated_results, "result")} in the test) and protected on this Windows machine.`);
+    } catch (error) {
+      setMsg(msg, "error", error.message);
+      save.disabled = false;
+    }
+  });
+  const formActions = node("div", "actions");
+  formActions.append(save, button("Cancel", "", () => { form.hidden = true; open.hidden = false; }));
+  form.append(field, formActions);
+  const open = button(info.status === "keyless" ? "Add key" : "Replace key", "", () => { form.hidden = false; open.hidden = true; input.focus(); });
+  side.appendChild(open);
+  if (info.status !== "keyless") {
+    const remove = button("Remove key", "", async () => {
+      remove.disabled = true;
+      setMsg(msg, "", "Removing…");
+      try {
+        await post("/setup/providers", { provider: name, action: "remove" });
+        await loadProviders(name, "Key removed; the free tier is active.");
+      } catch (error) {
+        setMsg(msg, "error", error.message);
+        remove.disabled = false;
+      }
+    });
+    side.appendChild(remove);
+  }
+  msg.dataset.provider = name;
+  entry.append(title, side, text, form, msg);
+  return entry;
+}
+async function loadProviders(provider, message) {
+  try {
+    loaded.providers = await getJSON("/setup/providers");
+    delete failed.providers;
+    $("provider-list").replaceChildren(...Object.entries(loaded.providers.providers).map(([name, info]) => providerRow(name, info)));
+    if (provider) setMsg(document.querySelector(`#provider-list .msg[data-provider="${provider}"]`), "ok", message);
+    if (document.activeElement !== $("contact-input")) $("contact-input").value = loaded.providers.contact;
+    $("contact-hint").textContent = "Sent as: " + loaded.providers.user_agent;
+  } catch (error) {
+    failed.providers = "Provider status unavailable: " + error.message;
+    $("provider-list").replaceChildren(node("p", "msg error", failed.providers));
+  }
+  renderOverview();
+}
+$("btn-save-contact").addEventListener("click", async () => {
+  try {
+    const data = await post("/setup/contact", { contact: $("contact-input").value.trim() });
+    $("contact-hint").textContent = "Sent as: " + data.user_agent;
+    setMsg("contact-msg", "ok", "Contact saved.");
+  } catch (error) {
+    setMsg("contact-msg", "error", error.message);
+  }
+});
+
+const AUDIT_SEVERITY = { error: ["bad", "Error"], warn: ["warn", "Warning"], info: ["idle", "Note"] };
 function auditWhen(seconds) {
   return seconds ? new Date(seconds * 1000).toLocaleString() : "never";
 }
@@ -1302,40 +1634,40 @@ function renderAudit(report) {
   const box = $("audit-report");
   box.replaceChildren();
   if (!report) {
-    box.appendChild(patternEl("p", "hint", "Not audited yet: the next scheduled run covers it, or press Run now."));
+    box.appendChild(node("p", "hint", "Not audited yet: the next scheduled run covers it, or press Run now."));
     return;
   }
   const s = report.summary;
-  box.appendChild(patternEl("p", "", s.error + " error(s), " + s.warn + " warning(s), " + s.info + " note(s) · "
+  box.appendChild(node("p", "", plural(s.error, "error") + ", " + plural(s.warn, "warning") + ", " + plural(s.info, "note") + " · "
     + (report.trigger === "schedule" ? "scheduled run" : "run on request") + " at " + auditWhen(report.checked_at)));
   const changes = report.changes;
-  if (changes) box.appendChild(patternEl("p", "hint", "Since the previous run: " + changes.new.length + " new, "
+  if (changes) box.appendChild(node("p", "hint", "Since the previous run: " + changes.new.length + " new, "
     + changes.resolved.length + " resolved" + (changes.snapshot_changed ? " (configuration changed)." : ".")));
-  const list = patternEl("ul", "audit-list");
+  const list = node("ul", "audit-list");
   for (const finding of report.findings) {
-    const row = patternEl("li", "audit-row");
-    const head = patternEl("div", "audit-head");
-    head.append(patternEl("span", "audit-sev audit-" + finding.severity, AUDIT_SEVERITY[finding.severity] || finding.severity),
-                patternEl("span", "pattern-tool", finding.harness), patternEl("strong", "", finding.subject));
-    if (finding.new) head.appendChild(patternEl("span", "audit-new", "new"));
-    const detail = patternEl("p", "audit-detail", finding.detail + " ");
+    const entry = node("li", "audit-row");
+    const head = node("div", "audit-head");
+    const [tone, label] = AUDIT_SEVERITY[finding.severity] || ["idle", finding.severity];
+    head.append(pill(tone, label), node("span", "pattern-tool", finding.harness), node("strong", "", finding.subject));
+    if (finding.new) head.appendChild(node("span", "new-tag", "new"));
+    const detail = node("p", "audit-detail", finding.detail + " ");
     if ((finding.source || "").startsWith("https://")) {
-      const link = patternEl("a", "", "documentation");
+      const link = node("a", "", "documentation");
       link.setAttribute("href", finding.source);
       link.setAttribute("target", "_blank");
       link.setAttribute("rel", "noopener noreferrer");
       detail.appendChild(link);
     }
-    row.append(head, detail);
-    list.appendChild(row);
+    entry.append(head, detail);
+    list.appendChild(entry);
   }
   if (report.findings.length) box.appendChild(list);
-  else box.appendChild(patternEl("p", "msg ok", "No collision or broken piece found."));
+  else box.appendChild(node("p", "msg ok", "No collision or broken piece found."));
   if (changes && changes.resolved.length) {
-    const resolved = patternEl("details", "");
-    resolved.appendChild(patternEl("summary", "", "Resolved since the previous run (" + changes.resolved.length + ")"));
-    const items = patternEl("ul", "audit-list");
-    for (const finding of changes.resolved) items.appendChild(patternEl("li", "audit-detail", finding.subject + ": " + finding.detail));
+    const resolved = node("details", "more");
+    resolved.appendChild(node("summary", "", "Resolved since the previous run (" + changes.resolved.length + ")"));
+    const items = node("ul", "audit-list");
+    for (const finding of changes.resolved) items.appendChild(node("li", "audit-detail", finding.subject + ": " + finding.detail));
     resolved.appendChild(items);
     box.appendChild(resolved);
   }
@@ -1345,11 +1677,11 @@ function renderAudit(report) {
     if (servers.length) costs.push(side + ": " + servers.map((m) => m.name + " " + m.tools + " tools (~"
       + Math.round(m.tool_chars / 4).toLocaleString() + " tokens)").join(", "));
   }
-  if (costs.length) box.appendChild(patternEl("p", "hint", "MCP tools offered — " + costs.join(" · ")));
-  const unverified = patternEl("details", "");
-  unverified.appendChild(patternEl("summary", "", "Not verified (" + report.unverified.length + ")"));
-  const items = patternEl("ul", "audit-list");
-  for (const item of report.unverified) items.appendChild(patternEl("li", "audit-detail", item));
+  if (costs.length) box.appendChild(node("p", "hint", "MCP tools offered — " + costs.join(" · ")));
+  const unverified = node("details", "more");
+  unverified.appendChild(node("summary", "", "Not verified (" + report.unverified.length + ")"));
+  const items = node("ul", "audit-list");
+  for (const item of report.unverified) items.appendChild(node("li", "audit-detail", item));
   unverified.appendChild(items);
   box.appendChild(unverified);
 }
@@ -1363,32 +1695,31 @@ async function showAudit(root) {
 async function loadAudit() {
   try {
     const data = await post("/setup/audit", { action: "index" });
-    auditProjects = data.projects;
+    loaded.audit = data;
+    delete failed.audit;
     const select = $("sel-audit-project");
-    select.replaceChildren();
-    for (const root of data.projects) {
+    select.replaceChildren(...data.projects.map((root) => {
       const entry = data.index[root];
-      const label = root + (entry ? " — " + entry.summary.error + " error(s), " + entry.summary.warn + " warning(s)" : " — not audited yet");
-      const option = patternEl("option", "", label);
-      option.value = root;
-      select.appendChild(option);
-    }
-    $("audit-hint").textContent = data.projects.length ? "Runs every " + Math.round(data.schedule_s / 60) + " minutes." : "Register a project to audit it.";
+      return new Option(root + (entry ? " — " + plural(entry.summary.error, "error") + ", " + plural(entry.summary.warn, "warning") : " — not audited yet"), root);
+    }));
+    $("audit-hint").textContent = data.projects.length ? "Runs on its own every " + Math.round(data.schedule_s / 60) + " minutes." : "Register a project on the Projects page to audit it.";
     $("btn-audit-run").disabled = !data.projects.length;
     if (data.projects.length) {
-      const worst = data.projects.slice().sort((a, b) => ((data.index[b] || {summary: {error: -1}}).summary.error)
-        - ((data.index[a] || {summary: {error: -1}}).summary.error))[0];
+      const worst = data.projects.slice().sort((a, b) => ((data.index[b] || { summary: { error: -1 } }).summary.error)
+        - ((data.index[a] || { summary: { error: -1 } }).summary.error))[0];
       select.value = worst;
       await showAudit(worst);
     }
   } catch (error) {
-    setMsg("audit-msg", "error", "Setup audit unavailable: " + error.message);
+    failed.audit = "Setup audit unavailable: " + error.message;
+    setMsg("audit-msg", "error", failed.audit);
   }
+  renderOverview();
 }
 $("sel-audit-project").addEventListener("change", () => showAudit($("sel-audit-project").value));
 $("btn-audit-run").addEventListener("click", async () => {
-  const button = $("btn-audit-run");
-  button.disabled = true;
+  const run = $("btn-audit-run");
+  run.disabled = true;
   setMsg("audit-msg", "", "Auditing; MCP servers are being contacted…");
   try {
     renderAudit((await post("/setup/audit", { action: "run", project_root: $("sel-audit-project").value })).report);
@@ -1396,93 +1727,19 @@ $("btn-audit-run").addEventListener("click", async () => {
   } catch (error) {
     setMsg("audit-msg", "error", error.message);
   } finally {
-    button.disabled = false;
-  }
-});
-loadAudit();
-
-const providerLabels = { keyless: ["warn", "No key · free tier"], configured: ["ok", "Key configured"], unreadable: ["bad", "Key unreadable in this Windows profile"] };
-function providerCard(name, info) {
-  const card = document.createElement("div");
-  card.className = "provider";
-  card.innerHTML = `
-    <div class="provider-head"><strong></strong><span class="state" aria-live="polite"></span></div>
-    <p class="hint free"></p><p class="hint keyed"></p>
-    <p class="hint"><a target="_blank" rel="noopener noreferrer">Create a key in your provider account</a></p>
-    <label>API key</label>
-    <input type="password" autocomplete="new-password">
-    <div class="actions"><button type="button" data-action="save">Validate and save</button><button type="button" class="quiet" data-action="remove">Remove key</button></div>
-    <div class="msg" role="status"></div>`;
-  card.querySelector("strong").textContent = info.label;
-  card.querySelector(".free").textContent = info.free;
-  card.querySelector(".keyed").textContent = info.keyed;
-  const link = card.querySelector("a");
-  link.href = info.signup;
-  const input = card.querySelector("input");
-  input.id = name + "-key";
-  card.querySelector("label").htmlFor = input.id;
-  input.placeholder = info.key_prefix ? `Paste the key (starts with ${info.key_prefix})` : "Paste the key from your account";
-  const [kind, label] = providerLabels[info.status] || ["bad", info.status];
-  Object.assign(card.querySelector(".state"), { textContent: label }).dataset.state = kind;
-  const msg = card.querySelector(".msg");
-  msg.id = name + "-msg";
-  card.querySelector('[data-action="remove"]').disabled = info.status === "keyless";
-  for (const button of card.querySelectorAll("button")) {
-    button.addEventListener("click", async () => {
-      const action = button.dataset.action;
-      if (action === "save" && !input.value.trim()) { setMsg(msg.id, "error", "Paste the API key before saving."); return; }
-      button.disabled = true;
-      setMsg(msg.id, "", action === "save" ? "Testing the key with a real search…" : "Removing…");
-      try {
-        const data = await post("/setup/providers", { provider: name, action, ...(action === "save" ? { api_key: input.value.trim() } : {}) });
-        input.value = "";
-        await loadProviders(action === "save" ? `Key accepted by the provider (${data.validated_results} result(s) in the test) and protected on this Windows machine.` : "Key removed; free tier active.");
-      } catch (error) {
-        setMsg(msg.id, "error", error.message);
-        button.disabled = false;
-      }
-    });
-  }
-  return card;
-}
-$("btn-save-contact").addEventListener("click", async () => {
-  try {
-    const data = await post("/setup/contact", { contact: $("contact-input").value.trim() });
-    $("contact-hint").textContent = "Sent as: " + data.user_agent;
-    setMsg("contact-msg", "ok", "Contact saved.");
-  } catch (error) {
-    setMsg("contact-msg", "error", error.message);
+    run.disabled = false;
   }
 });
 
-let providers = {};
-function showProvider(message) {
-  const name = $("provider-select").value;
-  $("provider-panel").replaceChildren(...(providers[name] ? [providerCard(name, providers[name])] : []));
-  if (message) setMsg(name + "-msg", "ok", message);
-}
-$("provider-select").addEventListener("change", () => showProvider());
-
-async function loadProviders(message) {
-  const list = $("provider-panel");
-  try {
-    const resp = await fetch("/setup/providers");
-    const data = await resp.json();
-    if (!resp.ok || data.error) throw new Error(data.error);
-    providers = data.providers;
-    const select = $("provider-select");
-    const chosen = select.value;
-    select.replaceChildren(...Object.entries(providers).map(([name, info]) =>
-      new Option(info.label + " · " + ((providerLabels[info.status] || [null, info.status])[1]), name)));
-    if (chosen && providers[chosen]) select.value = chosen;
-    showProvider(message);
-    if (document.activeElement !== $("contact-input")) $("contact-input").value = data.contact;
-    $("contact-hint").textContent = "Sent as: " + data.user_agent;
-  } catch (error) {
-    list.replaceChildren(Object.assign(document.createElement("p"), { className: "msg error", textContent: "Provider status unavailable: " + error.message }));
-  }
-}
+renderGateway();
+renderOverview();
+if (status.gateway.status === "ready") loadModels();
+loadLocalModels();
+loadIntegration();
+loadAutostart();
 loadProviders();
+loadAudit();
+setInterval(refreshStatus, 15000);
 </script>
 </body>
 </html>

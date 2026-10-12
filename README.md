@@ -15,7 +15,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.15 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.16 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -89,7 +89,10 @@ State lives in `~/.smart-tool`: `config.json`, your model adapters in `adapters/
 
 ## Set up
 
-Open the setup screen from the tray icon ("Open settings") or at `http://127.0.0.1:8765/setup`.
+Open the setup screen from the tray icon ("Open settings") or at `http://127.0.0.1:8765/setup`. It opens on
+**Overview**: everything Smart Tool needs, checked on this machine, with what needs you first and a button that takes
+you to the fix. The side menu groups the rest under Connect (Agents, Models, Web search), Behavior (Agent rules,
+Redirects) and Maintenance (Setup audit, Startup).
 
 1. **Model gateway**: pick an adapter and fill its fields. The built-in **OpenAI-compatible** adapter takes a base
    URL ending where the API starts, like the OpenAI SDK `base_url` (`https://api.openai.com/v1`,
@@ -98,7 +101,8 @@ Open the setup screen from the tray icon ("Open settings") or at `http://127.0.0
    reasoning: web search tier order and result checks), the index classification model (also reviews block patterns) and the research model. Any id the gateway
    accepts works; the catalog is shown as suggestions.
 3. **Agents**: register the MCP server in Claude Code or Codex (runs their official `mcp add` command), install the
-   hook and choose its behavior.
+   hook and choose its behavior under **Agent rules**. A hook written by an older Smart Tool shows as outdated, with
+   what an update changes; updating previews the entry and rewrites only Smart Tool's, after a backup.
 
    **Browser control** comes with the registration, and with every update for clients where smart-tool is registered:
    the official Playwright MCP (pinned in `web_adapters/node`) is registered as the `playwright` server, driving the

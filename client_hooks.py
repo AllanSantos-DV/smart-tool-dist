@@ -55,8 +55,13 @@ def _without_ours(groups):
     return kept
 
 
-def installed(client):
-    """Our hook is present with the current matcher; an entry with an older matcher counts as missing."""
+def _target(handler):
+    return handler.get("url") or handler.get("command") or ""
+
+
+def inspect(client):
+    """Our hook in the client's config: `current`, `missing`, or `outdated` (an older entry of ours) with `changes`,
+    plain sentences saying what an update rewrites (tools the old matcher leaves out, an old address or timeout)."""
     spec = CLIENTS[client]
     for path in spec["files"]:
         try:
@@ -67,30 +72,56 @@ def installed(client):
         if MARKER not in text and HTTP_PATH not in text:
             continue
         if not path.endswith(".json"):
-            return True
+            return {"state": "current", "changes": []}
         data = json.loads(text)
         hooks = data.get("hooks") if isinstance(data, dict) else None
         groups = hooks.get(spec["event"]) if isinstance(hooks, dict) else None
+        ours = [group for group in groups if _ours(group)] if isinstance(groups, list) else []
+        if not ours:
+            return {"state": "outdated", "changes": [f"Smart Tool's entry is not under {spec['event']}."]}
         expected = _handler(client)
-        return isinstance(groups, list) and any(
-            group.get("matcher") == spec["matcher"] and expected in group["hooks"] for group in groups if _ours(group))
-    return False
+        if any(group.get("matcher") == spec["matcher"] and expected in group["hooks"] for group in ours):
+            return {"state": "current", "changes": []}
+        group = ours[0]
+        changes = []
+        covered = str(group.get("matcher") or "").split("|")
+        left_out = [tool for tool in spec["matcher"].split("|") if tool not in covered]
+        if left_out:
+            changes.append("It does not cover " + ", ".join(left_out) + ".")
+        found = next(hook for hook in group["hooks"] if _our_hook(hook))
+        if _target(found) != _target(expected):
+            changes.append(f"It calls {_target(found)} instead of {_target(expected)}.")
+        elif found != expected:
+            changes.append("Its timeout or type is older than the current one.")
+        if not changes:
+            changes.append("Its tool list is ordered or written differently from the current one.")
+        return {"state": "outdated", "changes": changes}
+    return {"state": "missing", "changes": []}
+
+
+def installed(client):
+    """Our hook is present and current; an older entry of ours counts as not installed."""
+    return inspect(client)["state"] == "current"
 
 
 def status(client_info):
+    """Hook state for an MCP client's clientInfo: `installed` (bool, None when unreadable or unknown client), `state`
+    (current/outdated/missing), `changes` an update would make, `error`, the config `files` and `docs`."""
     client = identify(client_info)
     if client is None:
         return {"client": None, "name": (client_info or {}).get("name"), "installed": None, "error": None}
     spec = CLIENTS[client]
     try:
-        state, error = installed(client), None
+        found, error = inspect(client), None
     except (OSError, ValueError) as exc:
-        state, error = None, f"{type(exc).__name__}: {exc}"[:200]
-    return {"client": client, "name": client_info.get("name"), "installed": state, "error": error,
-            "files": spec["files"], "docs": spec["docs"]}
+        found, error = {"state": None, "changes": []}, f"{type(exc).__name__}: {exc}"[:200]
+    return {"client": client, "name": client_info.get("name"),
+            "installed": None if found["state"] is None else found["state"] == "current", "state": found["state"],
+            "changes": found["changes"], "error": error, "files": spec["files"], "docs": spec["docs"]}
 
 
 def notice(state):
+    """Sentence for the agent when the hook is not current (from `status`), or None when nothing needs saying."""
     if state["client"] is None:
         return (f"Unrecognized MCP client ({state['name'] or 'no clientInfo'}): Smart Tool does not check the hook "
                 "that redirects Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this client.")
@@ -101,7 +132,10 @@ def notice(state):
         return None
     action = spec.get("blocked") or ("If the user asks, use project_manage action=install_hook_preview, show the "
                                      "change and confirm with action=install_hook (makes a backup).")
-    return (f"Smart Tool hook missing or outdated in {spec['label']} ({spec['files'][0]}): Grep/Read/Bash are not "
+    if state.get("state") == "outdated":
+        return (f"Smart Tool hook outdated in {spec['label']} ({spec['files'][0]}): {' '.join(state['changes'])} "
+                f"{action} Docs: {spec['docs']}")
+    return (f"Smart Tool hook missing in {spec['label']} ({spec['files'][0]}): Grep/Read/Bash are not "
             f"redirected to smart_search, nor WebSearch/WebFetch to web_search/web_fetch. {action} Docs: {spec['docs']}")
 
 

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.16 - beta
+
+- New setup screen. It opens on an **Overview** that checks everything Smart Tool needs on this machine (model
+  gateway, each agent's connection and hook, block patterns waiting, the service, web search, the setup audit) and
+  lists what needs you first, each with a button that takes you to the fix. A side menu replaces the long scroll:
+  Connect (Agents, Models, Web search), Behavior (Agent rules, Redirects) and Maintenance (Setup audit, Startup),
+  with a count of open items next to each. Every section says what it is for; choices apply as soon as they are
+  picked, and typed values keep a save button next to them. Light and dark follow the system; under 860 px the menu
+  becomes a row of tabs.
+- An outdated hook says so. The setup screen compares each agent's Smart Tool hook entry with the one this version
+  writes and lists what the old one misses (tools not covered, an old address or timeout). **Update hook** shows the
+  exact entry first and, after you confirm, rewrites only Smart Tool's entry (other hooks stay, the file is backed up).
+  The tray notice also names an outdated hook.
+- Agent rules (redirect behavior, documentation and duplicate checks on edit, block pattern proposals) moved off the
+  Agents section into their own, with the recommended choice marked.
+
 ## 0.9.15 - beta
 
 - The hook redirects the folder searches that slipped past it in a shell: wrapped (`bash -c`, `sh -lc`,
