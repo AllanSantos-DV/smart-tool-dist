@@ -15,7 +15,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.16 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.17 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -173,6 +173,16 @@ Redirects) and Maintenance (Setup audit, Startup).
    and their result reused for 6 hours; Run now always contacts them again), and the setup screen's **Setup audit**
    panel shows each project's last report: findings by severity, what is new, what was resolved, the tokens each MCP
    server's tools cost and what was not verified.
+
+   The agent hears about it without asking for it. `setup_audit` with `mode=last` returns the stored report for the
+   folder (or the nearest audited parent) without auditing again, and fails with what to do when none is stored. On
+   its first `smart_search` of a session, and once per folder, the agent also gets one short line (under 100 tokens)
+   when the stored report holds errors or warnings; a clean report adds nothing. Optionally, **Report at session
+   start (Claude Code)** on the Setup audit page moves that line to the start of every new session: it previews the
+   exact SessionStart entry, adds it to `~/.claude/settings.json` only after you confirm (backup first), and **Turn
+   off** removes only that entry. It is off by default; while it is on, the search no longer repeats the line. The
+   hook script (`hooks/session_audit.py`) only reads the stored report from the running service and prints nothing
+   when the service is down.
 4. **Local models** (optional): if the mcp-memory embedding sidecar is installed on the machine, its local embedder
    can serve as a fallback (or preferred) embedding model.
 5. **Web search providers** work without keys on their free public tiers; add your own key for more volume. Set your

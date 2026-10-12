@@ -327,7 +327,7 @@ SERVER_INSTRUCTIONS = (
 TOOLS = [
     {
         "name": "project_manage",
-        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project; status shows storage, scope and jobs. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified. Jobs via smart_search_result.",
+        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project; status shows storage, scope and jobs. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; mode=last returns the stored report instead of auditing again. Jobs via smart_search_result.",
         "inputSchema": {
             "type": "object", "properties": {
                 "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "affected_tests", "setup_audit"]},
@@ -349,6 +349,7 @@ TOOLS = [
                 "left_view":{"type":"string"},"right_view":{"type":"string"},"relations":{"type":"boolean"},
                 "update_mode": {"type": "string", "enum": ["on_search", "eager"]},
                 "view_id": {"type": "string"}, "file_path": {"type": "string"},
+                "mode": {"type": "string", "enum": ["run", "last"], "default": "run", "description": "setup_audit: run audits now; last reads the stored report (the service audits registered projects every 30 minutes) without running anything, and fails when none is stored"},
                 "probe": {"type": "boolean", "default": True, "description": "setup_audit: start/call each MCP server (initialize + tools/list); false reads configs only"},
                 "base": {"type": "string", "default": "HEAD", "description": "affected_tests: git revision the changes are compared with (HEAD = uncommitted work; main or origin/main for a branch)"},
                 "symbol": {"type": "string", "description": "graph: function, Class.method, class name or path::name to get its callers, calls, tests and importers"},
@@ -1299,8 +1300,25 @@ def _mark_notice_delivered(job_id):
     session, _client = _session_client()
     with _JOBS_LOCK:
         job = _jobs.get(job_id) or {}
-    if session and job.get("status") == "done" and (job.get("arguments") or {}).get("setup_notice"):
-        session["notice_delivered"] = True
+    keys = (job.get("arguments") or {}).get("setup_notice_keys")
+    if session and job.get("status") == "done" and keys:
+        session.setdefault("notices_delivered", set()).update(keys)
+
+
+def _pending_notices(session, client, project_root):
+    """[(key, text)] the session has not been told yet: the hook state (once) and the stored setup audit of the
+    searched folder (once per folder, only with errors or warnings, and not when the SessionStart audit hook already
+    reports it at the start of the session)."""
+    delivered = session.get("notices_delivered") or set()
+    pending = []
+    if session["hook_notice"] and "hook" not in delivered:
+        pending.append(("hook", session["hook_notice"]))
+    key = "audit:" + setup_audit.index_key(project_root)
+    if key not in delivered and not client_hooks.audit_hook_installed(client):
+        text = setup_audit.session_notice(project_root)
+        if text:
+            pending.append((key, text))
+    return pending
 
 
 def _smart_search_arguments(arguments):
@@ -1348,8 +1366,11 @@ def _smart_search_arguments(arguments):
         state = client_hooks.status(client)
         _metric("hook_status", installed=state["installed"], client_name=state["name"], error=state["error"])
         session["hook_notice"] = client_hooks.notice(state) or ""
-    if session is not None and session["hook_notice"] and not session.get("notice_delivered"):
-        arguments["setup_notice"] = session["hook_notice"]
+    if session is not None:
+        notices = _pending_notices(session, client, project_root)
+        if notices:
+            arguments["setup_notice"] = " ".join(text for _key, text in notices)
+            arguments["setup_notice_keys"] = [key for key, _text in notices]
     _metric("search", group=group, top_k=limits, query_comments=bool(comments), single_language_reason=reason)
     return arguments
 
@@ -1493,6 +1514,16 @@ def _project_action(arguments):
         root = arguments.get("project_root")
         if not isinstance(root, str) or not os.path.isdir(root):
             raise ValueError("setup_audit needs project_root: the folder whose Claude Code and Codex setup to audit.")
+        mode = arguments.get("mode", "run")
+        if mode not in ("run", "last"):
+            raise ValueError("setup_audit mode must be run (audit now) or last (read the stored report).")
+        if mode == "last":
+            report = setup_audit.stored_for(root)
+            if report is None:
+                raise ValueError(f"No stored setup audit covers {root}: call setup_audit with mode=run once "
+                                 "(the service also audits registered projects every 30 minutes).")
+            return {"summary": report["summary"], "snapshot_key": report["snapshot_key"],
+                    "checked_at": report["checked_at"], "stored": True, "report": setup_audit.markdown(report)}
         report = setup_audit.run(root, probe=arguments.get("probe", True) is not False)
         return {"summary": report["summary"], "snapshot_key": report["snapshot_key"],
                 "report": setup_audit.markdown(report)}
@@ -3355,6 +3386,21 @@ def _pretool_hook(handler):
     return output
 
 
+def _session_audit_hook(handler):
+    """SessionStart output for the audit report hook: the stored audit notice of the session's folder as
+    additionalContext, or `{}` when nothing is stored or it holds no error or warning. Never runs an audit."""
+    try:
+        payload = json.loads(handler._read_body(HOOK_MAX_BODY_BYTES) or b"{}")
+        cwd = payload.get("cwd")
+        text = setup_audit.session_notice(cwd) if isinstance(cwd, str) and os.path.isdir(cwd) else ""
+    except Exception as exc:
+        _log(f"SessionStart audit hook without a report: {type(exc).__name__}: {exc}")
+        return {}
+    if not text:
+        return {}
+    return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}
+
+
 _TOOL_HANDLERS = {
     "web_fetch": _handle_web_fetch,
     "project_manage": _handle_project_manage,
@@ -3662,6 +3708,9 @@ class MCPHandler(BaseHTTPRequestHandler):
             return
         if urllib.parse.urlsplit(self.path).path == "/hooks/pretool":
             self._write_json(200, _pretool_hook(self))
+            return
+        if urllib.parse.urlsplit(self.path).path == "/hooks/session-audit":
+            self._write_json(200, _session_audit_hook(self))
             return
         save = _SETUP_SAVES.get(self.path)
         if save:

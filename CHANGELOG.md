@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.17 - beta
+
+- The agent learns the setup audit result without asking for it. On its first `smart_search` of a session, once per
+  folder, it gets one short line when the stored audit has errors or warnings (nothing when clean, nothing is run).
+  `project_manage action=setup_audit mode=last` returns the stored report without auditing again.
+- Optional **Report at session start (Claude Code)** on the Setup audit page: off by default; it previews the exact
+  SessionStart entry, writes it to Claude Code's settings after you confirm (backup first), and **Turn off** removes
+  only that entry. While it is on, the search no longer repeats the line.
+
 ## 0.9.16 - beta
 
 - New setup screen. It opens on an **Overview** that checks everything Smart Tool needs on this machine (model

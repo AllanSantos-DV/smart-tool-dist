@@ -671,6 +671,35 @@ def last_report(project):
         return None
 
 
+def stored_for(path):
+    """The last stored report of path or of its nearest audited ancestor folder, or None when none was audited."""
+    folder = os.path.abspath(path)
+    while True:
+        report = last_report(folder)
+        if report is not None:
+            return report
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            return None
+        folder = parent
+
+
+def session_notice(path):
+    """One short line for the agent about the stored audit of path (nothing is run), or "" when there is no stored
+    report or it holds no error or warning."""
+    report = stored_for(path)
+    if report is None:
+        return ""
+    summary = report["summary"]
+    if not summary["error"] and not summary["warn"]:
+        return ""
+    new = sum(1 for f in report["findings"] if f.get("new") and f["severity"] in ("error", "warn"))
+    age = max(0, int((time.time() - report["checked_at"]) // 60))
+    return (f"Setup audit of {report['project']} ({age} min ago): {summary['error']} errors, {summary['warn']} "
+            f"warnings" + (f", {new} new" if new else "") + " in the agent configuration. Details without rerunning: "
+            "project_manage action=setup_audit mode=last.")
+
+
 def index():
     """{project: {summary, new, resolved, checked_at, trigger}} of every audited project (the periodic summary)."""
     try:

@@ -17,7 +17,8 @@ import paths
 SOURCE = Path(__file__).resolve().parent
 DEFAULT_TARGET = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "Programs" / "SmartTool"
 TASK_NAME = "SmartTool-Tray"
-ENTRY_SCRIPTS = ("tray.py", "smart_tool_daemon.py", "pretool_router.py")
+ENTRY_SCRIPTS = ("tray.py", "smart_tool_daemon.py", "pretool_router.py", "session_audit.py")
+HOOK_SCRIPTS = ("pretool_router.py", "session_audit.py")
 STARTUP_SCRIPT = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "Microsoft" / "Windows" / \
     "Start Menu" / "Programs" / "Startup" / "SmartTool-Tray.vbs"
 MANIFEST = ".install-manifest.json"
@@ -65,7 +66,7 @@ def _processes():
 
 def _script_folder(script):
     path = Path(script)
-    return path.parent.parent if path.name == "pretool_router.py" else path.parent
+    return path.parent.parent if path.name in HOOK_SCRIPTS else path.parent
 
 
 def _same_folder(path, folder):
@@ -79,7 +80,7 @@ def _same_folder(path, folder):
 def stop_processes(target):
     def running():
         return [pid for pid, line in _processes() for script in _script_paths(line)
-                if Path(script).name != "pretool_router.py" and _same_folder(_script_folder(script), target)]
+                if Path(script).name not in HOOK_SCRIPTS and _same_folder(_script_folder(script), target)]
 
     for pid in running():
         powershell(f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue")
@@ -169,7 +170,7 @@ def other_installs(target):
 def _repointed(text, folder, target):
     """text with each spelling of folder found in front of an entry script (long, 8.3 or mixed) replaced by target."""
     for script in set(_script_paths(text)):
-        cut = len(Path(script).name) + 1 + (len("hooks") + 1 if Path(script).name == "pretool_router.py" else 0)
+        cut = len(Path(script).name) + 1 + (len("hooks") + 1 if Path(script).name in HOOK_SCRIPTS else 0)
         spelled = script[:-cut]
         if _same_folder(Path(spelled), folder):
             text = text.replace(spelled, target.as_posix() if "/" in spelled else str(target))

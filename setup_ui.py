@@ -261,11 +261,21 @@ def handle_integration_save(body):
 def handle_audit(body):
     """Setup audit panel: `index` lists the registered projects with their last audit summary; `report` returns the
     last stored report of one of them; `run` audits it now (MCP servers contacted unless probe is false). Only
-    registered project folders are accepted."""
+    registered project folders are accepted. The opt-in session-start report in Claude Code: `hook_state`,
+    `hook_preview` (the exact entry and a token), `hook_install` (with that token, after a backup) and `hook_remove`
+    (only Smart Tool's entry, after a backup)."""
     if not isinstance(body, dict):
         raise SetupError("Invalid request.")
     roots = sorted({p["root"] for p in project_store.all_projects() if p.get("root")}, key=str.casefold)
     try:
+        if body.get("action") == "hook_state":
+            return {"state": client_hooks.audit_state(), "file": client_hooks.CLIENTS["claude"]["files"][0]}
+        if body.get("action") == "hook_preview":
+            return client_hooks.audit_preview()
+        if body.get("action") == "hook_install":
+            return client_hooks.audit_install(body.get("token"), True)
+        if body.get("action") == "hook_remove":
+            return client_hooks.audit_remove()
         if body.get("action") == "index":
             stored = setup_audit.index()
             found = {root: stored[setup_audit.index_key(root)] for root in roots if setup_audit.index_key(root) in stored}
@@ -714,6 +724,17 @@ _PAGE_TEMPLATE = """<!doctype html>
     <section class="page" data-page="audit" aria-labelledby="h-audit" hidden>
       <header class="page-head"><h2 id="h-audit" tabindex="-1">Setup audit</h2>
         <p>What Claude Code and Codex load for a project, and where they collide: hooks deciding on the same tool at once, hooks or MCP servers that do not work, tools offered twice, skills and instructions one agent never sees. It runs on its own for the registered projects and never changes anything.</p></header>
+      <div class="card">
+        <div class="card-head"><h3>Report at session start (Claude Code)</h3><span class="pill" id="audit-hook-pill" data-tone="busy">Checking</span></div>
+        <p class="lede">Off by default. When on, every new Claude Code session starts with one short line about the stored audit of its folder (errors and warnings only, nothing runs). It adds a SessionStart entry to <span class="mono" id="audit-hook-file"></span>, written after a backup, and turning it off removes only that entry. Without it, the agent gets the same line once, on its first search.</p>
+        <div class="actions"><button type="button" class="primary" id="btn-audit-hook-on" hidden>Turn on</button><button type="button" id="btn-audit-hook-off" hidden>Turn off</button></div>
+        <div id="audit-hook-confirm" hidden>
+          <p class="hint" id="audit-hook-where"></p>
+          <pre class="mono" id="audit-hook-preview"></pre>
+          <div class="actions"><button type="button" class="primary" id="btn-audit-hook-write">Write it</button><button type="button" id="btn-audit-hook-cancel">Cancel</button></div>
+        </div>
+        <div class="msg" id="audit-hook-msg" role="status"></div>
+      </div>
       <div class="card">
         <div class="field"><label for="sel-audit-project">Project</label>
           <select id="sel-audit-project"></select>
@@ -1716,6 +1737,56 @@ async function loadAudit() {
   }
   renderOverview();
 }
+async function loadAuditHook() {
+  try {
+    const hook = await post("/setup/audit", { action: "hook_state" });
+    $("audit-hook-file").textContent = hook.file;
+    const on = hook.state === "current";
+    const pillEl = $("audit-hook-pill");
+    pillEl.textContent = on ? "On" : hook.state === "outdated" ? "Outdated" : "Off";
+    pillEl.dataset.tone = on ? "ok" : hook.state === "outdated" ? "warn" : "idle";
+    $("btn-audit-hook-on").hidden = on;
+    $("btn-audit-hook-on").textContent = hook.state === "outdated" ? "Update" : "Turn on";
+    $("btn-audit-hook-off").hidden = hook.state === "missing";
+  } catch (error) {
+    setMsg("audit-hook-msg", "error", "Session-start report state unavailable: " + error.message);
+  }
+}
+$("btn-audit-hook-on").addEventListener("click", async () => {
+  setMsg("audit-hook-msg", "", "Preparing the change…");
+  try {
+    const plan = await post("/setup/audit", { action: "hook_preview" });
+    setMsg("audit-hook-msg", "", "");
+    $("audit-hook-where").textContent = "Adds this entry under " + plan.event + " in " + plan.file + ".";
+    $("audit-hook-preview").textContent = JSON.stringify(plan.change, null, 2);
+    $("audit-hook-confirm").hidden = false;
+    $("btn-audit-hook-write").onclick = async () => {
+      $("btn-audit-hook-write").disabled = true;
+      try {
+        const result = await post("/setup/audit", { action: "hook_install", token: plan.token });
+        $("audit-hook-confirm").hidden = true;
+        await loadAuditHook();
+        setMsg("audit-hook-msg", "ok", "Turned on. Backup: " + (result.backup || "none, the file was new") + ".");
+      } catch (error) {
+        setMsg("audit-hook-msg", "error", error.message);
+      } finally {
+        $("btn-audit-hook-write").disabled = false;
+      }
+    };
+  } catch (error) {
+    setMsg("audit-hook-msg", "error", error.message);
+  }
+});
+$("btn-audit-hook-cancel").addEventListener("click", () => { $("audit-hook-confirm").hidden = true; });
+$("btn-audit-hook-off").addEventListener("click", async () => {
+  try {
+    const result = await post("/setup/audit", { action: "hook_remove" });
+    await loadAuditHook();
+    setMsg("audit-hook-msg", "ok", "Turned off. Backup: " + (result.backup || "none") + ".");
+  } catch (error) {
+    setMsg("audit-hook-msg", "error", error.message);
+  }
+});
 $("sel-audit-project").addEventListener("change", () => showAudit($("sel-audit-project").value));
 $("btn-audit-run").addEventListener("click", async () => {
   const run = $("btn-audit-run");
@@ -1739,6 +1810,7 @@ loadIntegration();
 loadAutostart();
 loadProviders();
 loadAudit();
+loadAuditHook();
 setInterval(refreshStatus, 15000);
 </script>
 </body>

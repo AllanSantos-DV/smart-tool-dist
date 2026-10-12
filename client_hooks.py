@@ -10,6 +10,10 @@ import endpoint_sync
 
 HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "pretool_router.py")
 MARKER = "pretool_router.py"
+AUDIT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "session_audit.py")
+AUDIT_MARKER = "session_audit.py"
+AUDIT_MATCHER = "startup|resume|clear"
+AUDIT_TIMEOUT_S = 10
 HTTP_PATH = "/hooks/pretool"
 HTTP_TIMEOUT_S = 15
 HOME = os.path.expanduser("~")
@@ -202,6 +206,8 @@ def preview(client_info):
 
 
 def install(client_info, token, confirm):
+    """Writes the redirect hook for client_info's client with a backup; needs the `preview` token of this session
+    (10 min) and confirm=True. Returns {client, installed, changed, file, backup}."""
     planned = _PREVIEWS.pop(token or "", None)
     client, spec, path, data, groups, entry = _plan(client_info)
     if confirm is not True or not planned or planned["client"] != client or time.time() - planned["at"] > PREVIEW_TTL_S:
@@ -209,6 +215,14 @@ def install(client_info, token, confirm):
     if installed(client):
         return {"client": client, "installed": True, "changed": False, "file": path}
     groups.append(entry)
+    backup = _write_checked(path, data, lambda: installed(client), "The hook")
+    return {"client": client, "installed": True, "changed": True, "file": path, "backup": backup,
+            "after_install": spec.get("after_install")}
+
+
+def _write_checked(path, data, verify, what):
+    """Writes data as JSON to path through a temp file after a timestamped backup; when verify() fails on the written
+    file, restores the backup (or removes the new file) and raises. Returns the backup path (None for a new file)."""
     backup = None
     if os.path.exists(path):
         backup = f"{path}.smart-tool-backup-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -218,9 +232,113 @@ def install(client_info, token, confirm):
     with open(temporary, "w", encoding="utf-8") as stream:
         json.dump(data, stream, indent=2, ensure_ascii=False)
     os.replace(temporary, path)
-    if not installed(client):
+    if not verify():
         if backup:
             shutil.copy2(backup, path)
-        raise RuntimeError(f"The hook does not appear in {path} after writing; the file was restored.")
-    return {"client": client, "installed": True, "changed": True, "file": path, "backup": backup,
-            "after_install": spec.get("after_install")}
+        else:
+            os.remove(path)
+        raise RuntimeError(f"{what} does not appear in {path} after writing; the file was restored.")
+    return backup
+
+
+def _audit_hook(hook):
+    return isinstance(hook, dict) and AUDIT_MARKER in str(hook.get("command", ""))
+
+
+def _audit_ours(group):
+    return isinstance(group, dict) and isinstance(group.get("hooks"), list) and any(map(_audit_hook, group["hooks"]))
+
+
+def _audit_entry():
+    return {"matcher": AUDIT_MATCHER,
+            "hooks": [{"type": "command", "command": f"{_shell_safe(sys.executable)} {_shell_safe(AUDIT_SCRIPT)}",
+                       "timeout": AUDIT_TIMEOUT_S}]}
+
+
+def _audit_plan():
+    """(path, data, groups) of Claude Code's settings with our SessionStart entry already removed from groups."""
+    path = os.path.realpath(CLIENTS["claude"]["files"][0])
+    try:
+        with open(path, encoding="utf-8") as stream:
+            data = json.load(stream)
+    except FileNotFoundError:
+        data = {}
+    if not isinstance(data, dict) or not isinstance(data.setdefault("hooks", {}), dict):
+        raise ValueError(f"{path} does not have the expected format (object with 'hooks'); nothing was changed.")
+    groups = data["hooks"].setdefault("SessionStart", [])
+    if not isinstance(groups, list):
+        raise ValueError(f"{path}: hooks.SessionStart is not a list; nothing was changed.")
+    kept = []
+    for group in groups:
+        if not _audit_ours(group):
+            kept.append(group)
+            continue
+        others = [hook for hook in group["hooks"] if not _audit_hook(hook)]
+        if others:
+            kept.append({**group, "hooks": others})
+    groups[:] = kept
+    return path, data, groups
+
+
+def audit_state():
+    """The SessionStart audit hook in Claude Code's settings: `current` (our entry equals this version's), `outdated`
+    (an entry of ours that differs) or `missing`."""
+    path = CLIENTS["claude"]["files"][0]
+    try:
+        with open(path, encoding="utf-8") as stream:
+            data = json.load(stream)
+    except FileNotFoundError:
+        return "missing"
+    groups = ((data.get("hooks") or {}).get("SessionStart") or []) if isinstance(data, dict) else []
+    found = [group for group in groups if _audit_ours(group)] if isinstance(groups, list) else []
+    if not found:
+        return "missing"
+    return "current" if _audit_entry() in found else "outdated"
+
+
+def audit_hook_installed(client):
+    """The Claude Code session-start audit report is on, so a search need not repeat it. An unreadable settings file
+    counts as off here; `audit_state` raises for it on the setup screen."""
+    if client != "claude":
+        return False
+    try:
+        return audit_state() == "current"
+    except (OSError, ValueError):
+        return False
+
+
+def audit_preview():
+    """The change that turns the SessionStart audit report on in Claude Code, with a token for `audit_install`."""
+    path, _data, _groups = _audit_plan()
+    entry = _audit_entry()
+    if audit_state() == "current":
+        return {"installed": True, "file": path, "change": None}
+    token = secrets.token_urlsafe(12)
+    _PREVIEWS[token] = {"client": "audit", "at": time.time()}
+    return {"installed": False, "file": path, "event": "SessionStart", "change": entry, "token": token,
+            "expires_s": PREVIEW_TTL_S}
+
+
+def audit_install(token, confirm):
+    """Writes the SessionStart audit entry into Claude Code's settings with a backup; needs the `audit_preview` token
+    (10 min) and confirm=True. Returns {installed, changed, file, backup}."""
+    planned = _PREVIEWS.pop(token or "", None)
+    if confirm is not True or not planned or planned["client"] != "audit" or time.time() - planned["at"] > PREVIEW_TTL_S:
+        raise ValueError("Turning the audit report on requires the preview token (valid for 10 min) and confirm=true.")
+    path, data, groups = _audit_plan()
+    if audit_state() == "current":
+        return {"installed": True, "changed": False, "file": path}
+    groups.append(_audit_entry())
+    backup = _write_checked(path, data, lambda: audit_state() == "current", "The audit hook")
+    return {"installed": True, "changed": True, "file": path, "backup": backup}
+
+
+def audit_remove():
+    """Takes only our SessionStart entry out of Claude Code's settings (after a backup); nothing else is touched."""
+    path, data, groups = _audit_plan()
+    if audit_state() == "missing":
+        return {"installed": False, "changed": False, "file": path}
+    if not groups:
+        del data["hooks"]["SessionStart"]
+    backup = _write_checked(path, data, lambda: audit_state() == "missing", "The removal")
+    return {"installed": False, "changed": True, "file": path, "backup": backup}
