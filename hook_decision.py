@@ -27,6 +27,7 @@ EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "apply_patch")
 MAX_DOC_FINDINGS = 5
 MAX_DUPLICATE_FINDINGS = 3
 SMART_TOOL_SERVER = "smart-tool"
+SMART_SEARCH_TOOL = f"mcp__{SMART_TOOL_SERVER}__smart_search"
 REASON_MAX_CHARS = 200
 
 
@@ -260,6 +261,12 @@ def decide(payload, client, web_route):
         if doc_mode == "off" and duplicate_mode == "off":
             return {}
         return _edit_review(payload, doc_mode, duplicate_mode)
+    if isinstance(payload, dict) and str(payload.get("tool_name")).startswith(f"mcp__{SMART_TOOL_SERVER}__"):
+        if payload["tool_name"] == SMART_SEARCH_TOOL:
+            router.CLIENT.set(client)
+            router.SESSION.set(payload.get("session_id"))
+            router._log_decision(SMART_SEARCH_TOOL, {}, "allow", "Smart Tool search, logged to measure followed redirects")
+        return {}
     mode = config.hook_mode(cfg)
     if mode == "off" or not isinstance(payload, dict):
         return {}
@@ -288,6 +295,7 @@ def _route(payload, client, web_route, cfg):
         decision = web_route(tool_name, url)
         return deny(web_message(client, tool_name, url, clean_reason(decision.get("reason")))) if decision.get("redirect") else {}
     router.CLIENT.set(client)
+    router.SESSION.set(payload.get("session_id"))
     try:
         decision, reason, target = router.decide(tool_name, tool_input, cwd=cwd)
     except Exception as exc:

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.15 - beta
+
+- The hook redirects the folder searches that slipped past it in a shell: wrapped (`bash -c`, `sh -lc`,
+  `powershell -Command`, `cmd /c`, `timeout 60`, `env X=1`, `time`, `nice`, a `( ... )` subshell), looped
+  (`for f in src/*.py; do grep x "$f"`), fed by a listing (`find -exec grep|cat`, `find | xargs -0 grep`,
+  `grep x $(find src -name '*.py')`, `find | while read f`, `Get-ChildItem -Recurse | Select-String` or
+  `| % { Get-Content $_ }`), `git --no-pager grep`, `cat` over more than 20 files, and inline python/node scripts
+  (`-c`, `-e`, heredoc) that walk a project folder, read the files and match their text. A listing capped by `head`,
+  `find -name` of one exact file and scripts that write files still run. Replayed over 3 days of real transcripts
+  (14,580 Grep and shell calls), 37 more calls are redirected, all folder searches; none of the previous redirects
+  changed.
+- Claude Code's PowerShell tool goes through the same rule as Bash; it was not in the hook matcher. Reinstall the
+  hook from the setup screen (it shows as outdated): the matcher now has `PowerShell` and `smart_search`.
+- Setup screen, Agents: the redirects of the last 7 days by tool and reason, and what the same session did next
+  (called `smart_search`, ran an allowed native call, was blocked again, or nothing within 15 minutes). The hook log
+  now records the session, and `smart_search` calls pass through the hook only to be counted. Next to it, the
+  measured context per call: a native call of the kinds redirected ~510 tokens, a `smart_search` round trip ~2,160
+  tokens; a redirect saves context only when one search replaces several native ones, which is not measured yet.
+
 ## 0.9.14 - beta
 
 - The setup audit runs on its own: the daemon audits every registered project two minutes after it starts and then

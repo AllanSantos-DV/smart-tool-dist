@@ -20,6 +20,7 @@ import web_search_adapters
 
 # Per request: the daemon serves each hook call on its own thread, so a module global mixed up clients.
 CLIENT = contextvars.ContextVar("router_client", default=None)
+SESSION = contextvars.ContextVar("router_session", default=None)
 METRICS_PATH = os.path.join(paths.DATA_DIR, "router-metrics.jsonl")
 
 METRICS_MAX_BYTES = 4 * 1024 * 1024
@@ -61,6 +62,7 @@ def _log_decision(tool_name, tool_input, decision, reason, extra=None):
         "decision": decision,
         "reason": reason,
         **({"client": CLIENT.get()} if CLIENT.get() else {}),
+        **({"session": SESSION.get()} if SESSION.get() else {}),
     }
     record.update(extra or {})
     try:
@@ -85,21 +87,25 @@ def log_unavailable(tool_name, tool_input, exc):
 
 
 # Search/read verbs count only where they start a command: at the beginning, after `;`, `&&`, `||`, `$(`, a backtick,
-# a loop/if keyword or a shell invoker (`bash -c`, `powershell -Command`, `cmd /c`). After a single `|` they filter the
+# a loop/if keyword, a subshell bracket, a wrapper (`timeout 60`, `env X=1`, `nice`) or a shell invoker (`bash -c`,
+# `powershell -Command`, `cmd /c`). After a single `|` they filter the
 # output of the command before them (`python x.py | tail -5`), which reads no source code.
 _SEARCH_VERB_RE = re.compile(
-    r"(?:^|[;&]|\|\||\$\(|`|-c\s|-Command\s|/c\s|/k\s)\s*[\"']?\s*(?:(?:do|then|else)\s+)?(?:sudo\s+|command\s+)?"
-    r"(grep|egrep|fgrep|rg|ripgrep|find|findstr|fd|cat|type|head|tail|less|more|"
+    r"(?:^|[;&\n({]|\|\||\$\(|`|-c\s|-Command\s|/c\s|/k\s)\s*[\"']?\s*(?:(?:do|then|else)\s+)?"
+    r"(?:(?:sudo|command|time|nice|nohup|exec|env|timeout|stdbuf)(?:\s+-\S+)*(?:\s+\d\S*)?\s+|\w+=\S*\s+)*"
+    r"(grep|egrep|fgrep|rg|ripgrep|find|findstr|fd|cat|type|head|tail|less|more|bat|nl|"
     r"ls|dir|awk|sed|ack|ag|select-string|sls|get-content|gc|get-childitem|gci)\b",
     re.IGNORECASE,
 )
 # Commands that read code or pages without a search verb at their start: their pipe filters still search content.
 _READ_PRODUCER_RE = re.compile(
-    r"\bgit\s+(?:-C\s+\S+\s+)?(grep|ls-files|show|log\s+-p|diff)\b|\b(curl|wget|iwr|invoke-webrequest)\b|\bgh\s+api\b|"
-    r"readFileSync|read_text\(|open\(",
+    r"\bgit\s+(?:(?:-C|-c)\s+\S+\s+|--no-pager\s+|-P\s+)*(grep|ls-files|show|log\s+-p|diff)\b|"
+    r"\b(curl|wget|iwr|invoke-webrequest)\b|\bgh\s+api\b|"
+    r"readFileSync|read_text\(|open\(|os\.walk\(|\.rglob\(|readdirSync|globSync\(",
     re.IGNORECASE,
 )
 _READ_TOOLS = frozenset({"Read", "NotebookRead"})
+SHELL_TOOLS = frozenset({"Bash", "PowerShell"})
 # Commands that change files, the repository or dependencies are never redirected (smart_search cannot do the change).
 # Verbs are matched outside quoted strings, so a grep pattern like "pip install" is not one; file writes inside an
 # inline script (node -e, python -c) are matched anywhere.
@@ -132,7 +138,7 @@ def _mechanical_decision(tool_name, tool_input):
     errados: o agente contornava o bloqueio) e 566 liberações."""
     if tool_name in _READ_TOOLS:
         return "allow", "Reading a specific file is never replaced by semantic search."
-    if tool_name == "Bash":
+    if tool_name in SHELL_TOOLS:
         command = tool_input.get("command")
         if not isinstance(command, str) or not command.strip():
             return "allow", "Bash without a readable command."
@@ -158,8 +164,9 @@ def decide(tool_name, tool_input, cwd=None):
         _log_decision(tool_name, tool_input, decision, reason, extra={"mechanical": True})
         return decision, reason, None
     decision, target, reason = redirect_rule.decide(tool_name, safe_input, cwd)
-    learned = (block_patterns.matching(tool_name, safe_input)
-               if decision == "allow" and block_patterns.reviewable(tool_name, safe_input, reason) else None)
+    pattern_tool = "Bash" if tool_name in SHELL_TOOLS else tool_name
+    learned = (block_patterns.matching(pattern_tool, safe_input)
+               if decision == "allow" and block_patterns.reviewable(pattern_tool, safe_input, reason) else None)
     if learned:
         reason = f"accepted block pattern {learned['id']} (approved by the user in Smart Tool's setup screen)"
         _log_decision(tool_name, tool_input, "redirect", reason, extra={"pattern": learned["id"]})
@@ -167,7 +174,7 @@ def decide(tool_name, tool_input, cwd=None):
     _log_decision(tool_name, tool_input, decision, reason, extra={"rule": True})
     if decision == "allow":
         try:
-            block_patterns.review_later(tool_name, safe_input, reason, METRICS_PATH, _redacted_input, _log_error)
+            block_patterns.review_later(pattern_tool, safe_input, reason, METRICS_PATH, _redacted_input, _log_error)
         except (OSError, ValueError) as exc:
             _log_error(f"block pattern review not queued: {exc}")
     return decision, reason, target

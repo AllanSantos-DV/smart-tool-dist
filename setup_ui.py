@@ -32,6 +32,7 @@ import local_embedder
 import project_store
 import secret_store
 import setup_audit
+import integration_metrics
 import version
 import web_search_external
 
@@ -208,7 +209,8 @@ def handle_integration_get():
             "duplicate_mode_error": duplicate_error, "duplicate_modes": list(config.DUPLICATE_MODES),
             "pattern_proposals": proposals_mode, "pattern_proposals_error": proposals_error,
             "block_patterns": {"proposals": stored["proposals"], "accepted": stored["accepted"],
-                               "rejected": len(stored["rejected"]), "error": patterns_error}}
+                               "rejected": len(stored["rejected"]), "error": patterns_error},
+            "redirects": integration_metrics.redirects()}
 
 
 def handle_integration_save(body):
@@ -690,6 +692,7 @@ _PAGE_TEMPLATE = """<!doctype html>
           <span class="hint">The hook decides with a fixed rule: content searches over a project folder go to smart_search. The scope model (else the router model) never delays a call: it reviews, afterwards, bulk reads the rule could not measure and proposes patterns, each checked against the logged calls. Nothing blocks until you accept it here.</span></div>
         <div class="actions"><button type="button" id="btn-save-pattern-proposals">Save proposals setting</button></div>
         <div id="patterns-list"></div>
+        <div id="redirects-panel" class="pattern-panel"></div>
         <div class="msg" id="agents-msg" role="status"></div>
         <div id="agents-list"></div>
       </section>
@@ -1002,6 +1005,7 @@ async function loadAgents() {
     if (document.activeElement !== $("sel-pattern-proposals")) $("sel-pattern-proposals").value = data.pattern_proposals;
     if (data.pattern_proposals_error) setMsg("agents-msg", "error", data.pattern_proposals_error);
     renderPatterns(data.block_patterns);
+    renderRedirects(data.redirects);
     const list = $("agents-list");
     list.textContent = "";
     for (const item of data.clients) {
@@ -1148,6 +1152,23 @@ function patternRow(item, actions, selectable) {
   main.append(body, meta);
   row.appendChild(main);
   return row;
+}
+function renderRedirects(stats) {
+  const panel = $("redirects-panel");
+  panel.textContent = "";
+  panel.append(patternEl("h3", "", "Native searches redirected (last " + stats.days + " days): " + stats.total));
+  const out = stats.outcomes, tokens = stats.tokens_per_call;
+  const lines = [
+    "By tool: " + (Object.entries(stats.by_tool).map(([k, v]) => k + " " + v).join(", ") || "none"),
+    "Next call of the same session: smart_search " + (out.followed || 0) + ", allowed native call " + (out.native || 0)
+      + ", blocked again " + (out.blocked_again || 0) + ", none within 15 min " + (out.no_other_call || 0)
+      + ", unknown (no session logged) " + (out.unknown || 0),
+    "Context per call (measured " + tokens.measured + "): a native call of the kinds redirected ~" + tokens.native_redirected
+      + " tokens; a smart_search round trip ~" + tokens.smart_search + " tokens. A redirect saves context only when one"
+      + " smart_search replaces several native searches and reads; that part is not measured yet.",
+  ];
+  for (const line of lines) panel.append(patternEl("p", "hint", line));
+  for (const [reason, count] of Object.entries(stats.by_reason)) panel.append(patternEl("p", "hint mono", count + " × " + reason));
 }
 function renderPatterns(patterns) {
   lastPatterns = patterns;

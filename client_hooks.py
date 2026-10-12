@@ -16,7 +16,7 @@ HOME = os.path.expanduser("~")
 PREVIEW_TTL_S = 600
 CLIENTS = {
     "claude": {"label": "Claude Code", "names": {"claude-code"}, "files": [os.path.join(endpoint_sync.claude_dir(), "settings.json")],
-               "docs": "https://code.claude.com/docs/en/hooks", "event": "PreToolUse", "matcher": "Grep|Glob|Read|Bash|WebSearch|WebFetch|Edit|MultiEdit|Write", "http": True},
+               "docs": "https://code.claude.com/docs/en/hooks", "event": "PreToolUse", "matcher": "Grep|Glob|Read|Bash|PowerShell|WebSearch|WebFetch|Edit|MultiEdit|Write|mcp__smart-tool__smart_search", "http": True},
     "codex": {"label": "Codex", "prefix": "codex", "files": [os.path.join(HOME, ".codex", "hooks.json"), os.path.join(HOME, ".codex", "config.toml")],
               "docs": "https://learn.chatgpt.com/docs/hooks", "event": "PreToolUse", "matcher": "Bash|apply_patch",
               "after_install": "Codex only runs new hooks after the user approves the definition in /hooks."},

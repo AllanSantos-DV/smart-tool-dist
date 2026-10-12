@@ -2,6 +2,7 @@ import collections
 import json
 import os
 import paths
+import re
 import threading
 import time
 
@@ -11,6 +12,12 @@ import router
 PATH = os.path.join(paths.DATA_DIR, "integration-metrics.jsonl")
 MAX_BYTES = 20 * 1024 * 1024
 _LOCK = threading.Lock()
+FOLLOW_WINDOW_S = 900
+# Measured on 2026-10-12 with docs/spikes/bash_bypass_replay.py over 3 days of Claude Code transcripts (14,580 Grep and
+# shell calls), at ~4 characters per token: the 310 calls the rule redirects put 2,031 characters on average in the
+# context when they ran; a smart_search round trip (pending reply 716 + result 7,924) puts 8,640.
+NATIVE_REDIRECTED_TOKENS = 510
+SMART_SEARCH_TOKENS = 2160
 
 
 def record(event, **fields):
@@ -78,5 +85,48 @@ def summary(days=7):
     return {"days": days, "events_by_client": {k: dict(v) for k, v in by_client.items()},
             "rejects_by_kind": dict(rejects), "single_language_reasons": dict(reasons.most_common(20)),
             "hook_decisions_by_client": {k: dict(v) for k, v in decisions.items()},
+            "redirects": redirects(days),
             "web_search_cache": web_cache,
             "files": {"integration": PATH, "router": router.METRICS_PATH}}
+
+
+def _next_in_session(rows, index):
+    """The session's next logged call within FOLLOW_WINDOW_S of rows[index], or None."""
+    start = rows[index]["ts"]
+    return next((row for row in rows[index + 1:] if row["ts"] - start <= FOLLOW_WINDOW_S), None)
+
+
+def redirects(days=7):
+    """Redirects of native searches in the last days and what the same session did next: called smart_search
+    (followed), ran an allowed native call such as reading a file it found (native), was blocked again, or made no other
+    call within FOLLOW_WINDOW_S. Redirects logged without a session (before 0.9.15, or a client that sends none) count
+    as unknown. tokens_per_call holds the measured context of each side, so the panel never claims a saving it did
+    not measure."""
+    rows = sorted(_read(router.METRICS_PATH, time.time() - days * 86400), key=lambda row: row["ts"])
+    sessions = collections.defaultdict(list)
+    for row in rows:
+        if row.get("session"):
+            sessions[row["session"]].append(row)
+    by_tool, by_reason, outcomes = collections.Counter(), collections.Counter(), collections.Counter()
+    for row in rows:
+        if row.get("decision") != "redirect":
+            continue
+        by_tool[row.get("tool_name") or "?"] += 1
+        by_reason[re.sub(r"\d+", "N", str(row.get("reason") or "?"))[:80]] += 1
+        own = sessions.get(row.get("session"))
+        if not own:
+            outcomes["unknown"] += 1
+            continue
+        after = _next_in_session(own, own.index(row))
+        if after is None:
+            outcomes["no_other_call"] += 1
+        elif str(after.get("tool_name", "")).startswith("mcp__smart-tool__"):
+            outcomes["followed"] += 1
+        elif after.get("decision") == "redirect":
+            outcomes["blocked_again"] += 1
+        else:
+            outcomes["native"] += 1
+    return {"days": days, "total": sum(by_tool.values()), "by_tool": dict(by_tool),
+            "by_reason": dict(by_reason.most_common(8)), "outcomes": dict(outcomes),
+            "tokens_per_call": {"native_redirected": NATIVE_REDIRECTED_TOKENS, "smart_search": SMART_SEARCH_TOKENS,
+                                "measured": "2026-10-12, 3 days of Claude Code transcripts"}}

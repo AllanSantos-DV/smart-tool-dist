@@ -15,7 +15,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.14 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.15 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -116,8 +116,12 @@ Open the setup screen from the tray icon ("Open settings") or at `http://127.0.0
    The hook behaviors:
    - **Redirect** (default): the native tool is denied with the reason and the Smart Tool tool to use. The decision
      is a fixed rule, under a millisecond and the same every time: a content search over a project folder (`grep -r`,
-     `rg`, `git grep`, the Grep tool on a folder) or over more than 20 listed files goes to `smart_search`; reading or
-     searching known files, listings, Glob and commands that change files run. With **Block patterns proposed by a
+     `rg`, `git grep`, the Grep tool on a folder) or over more than 20 listed files goes to `smart_search`, in Bash and
+     PowerShell alike and also when it is wrapped (`bash -c`, `powershell -Command`, `timeout`, a subshell), looped
+     (`for f in src/*.py`), fed by a listing (`find -exec grep`, `xargs`, `Get-ChildItem | Select-String`) or written
+     as an inline python/node script that walks a folder and matches text; reading or searching known files,
+     listings, Glob and commands that change files run. The setup screen counts the redirects and what each session
+     did next. With **Block patterns proposed by a
      model** on (default), the scope model reviews, in the background, bulk reads the rule could not measure and
      proposes regex patterns, each checked against the logged calls; a pattern blocks only after you accept it.
    - **Advise only**: the native tool runs; the agent receives the same advice next to the result and decides.
