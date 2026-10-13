@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.18 - beta
+
+- Updates are no longer applied only at logon. The tray checks npm at start and every 24 h and installs a newer
+  version as soon as it sees it (on by default); a version that failed to install is tried again 24 h later instead of
+  never. `SMART_TOOL_AUTO_UPDATE=off` turns automatic updates off, like the tray switch.
+- Nothing about updates is hidden. The tray notifies when a newer version is available, when it starts updating, when
+  Smart Tool was updated (from which version to which) and when an update failed. Agent sessions get the same line once
+  on their first `smart_search`, with the link to the changes, and the SessionStart report (when on) shows it to you
+  at session start.
+
 ## 0.9.17 - beta
 
 - The agent learns the setup audit result without asking for it. On its first `smart_search` of a session, once per

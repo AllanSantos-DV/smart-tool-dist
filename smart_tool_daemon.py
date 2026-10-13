@@ -68,6 +68,7 @@ import local_embedder
 import web_search_health
 import web_fetch
 import version
+import update_check
 import gateway
 import hook_decision
 import endpoint_sync
@@ -1313,12 +1314,23 @@ def _pending_notices(session, client, project_root):
     pending = []
     if session["hook_notice"] and "hook" not in delivered:
         pending.append(("hook", session["hook_notice"]))
+    pending += [(key, f"{text} Tell the user.") for key, text in _update_notices() if key not in delivered]
     key = "audit:" + setup_audit.index_key(project_root)
     if key not in delivered and not client_hooks.audit_hook_installed(client):
         text = setup_audit.session_notice(project_root)
         if text:
             pending.append((key, text))
     return pending
+
+
+def _update_notices():
+    """Update notices (updated, failed, newer version on npm); an unreadable state file is logged, not raised, so a
+    search never fails over it."""
+    try:
+        return update_check.notices()
+    except Exception as exc:
+        _log(f"update notices unavailable: {type(exc).__name__}: {exc}")
+        return []
 
 
 def _smart_search_arguments(arguments):
@@ -3388,17 +3400,23 @@ def _pretool_hook(handler):
 
 def _session_audit_hook(handler):
     """SessionStart output for the audit report hook: the stored audit notice of the session's folder as
-    additionalContext, or `{}` when nothing is stored or it holds no error or warning. Never runs an audit."""
+    additionalContext, and the update notices both as systemMessage (shown to the user) and as context; `{}` when
+    there is nothing to say. Never runs an audit."""
     try:
         payload = json.loads(handler._read_body(HOOK_MAX_BODY_BYTES) or b"{}")
         cwd = payload.get("cwd")
         text = setup_audit.session_notice(cwd) if isinstance(cwd, str) and os.path.isdir(cwd) else ""
     except Exception as exc:
         _log(f"SessionStart audit hook without a report: {type(exc).__name__}: {exc}")
+        text = ""
+    updates = " ".join(notice for _key, notice in _update_notices())
+    context = " ".join(part for part in (updates, text) if part)
+    if not context:
         return {}
-    if not text:
-        return {}
-    return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}
+    output = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}
+    if updates:
+        output["systemMessage"] = updates
+    return output
 
 
 _TOOL_HANDLERS = {
@@ -3823,6 +3841,10 @@ def main():
     server = _bind_server()
     _BOUND_PORT = server.server_address[1]
     threading.Thread(target=_probe_capabilities, daemon=True).start()
+    try:
+        update_check.note_running_version()
+    except Exception as exc:
+        _log(f"running version not recorded: {type(exc).__name__}: {exc}")
     _write_registry(_BOUND_PORT)
     atexit.register(_remove_registry)
     try:

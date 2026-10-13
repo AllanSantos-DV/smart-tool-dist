@@ -111,24 +111,48 @@ def _poll_loop(icon):
         time.sleep(POLL_INTERVAL_S)
 
 
+def _announce_start(icon):
+    """Tells the user, once per start, that Smart Tool was just updated or that the last automatic update failed."""
+    updated = update_check.note_running_version()
+    if updated:
+        icon.notify(f"Smart Tool updated from {updated['from']} to {updated['to']}.", "Smart Tool")
+    failed = update_check.failed_update()
+    if failed:
+        icon.notify(f"The update to {failed} failed; Smart Tool {version.VERSION} is still installed. "
+                    "It is tried again in 24 h, or now from this menu.", "Smart Tool")
+
+
 def _update_loop(icon):
-    """Checks npm at start and every 24 h. At start (logon, before agent sessions use the daemon) a newer version is
-    installed right away when auto_update is on; later checks only notify and offer it in the menu."""
-    first = True
+    """Checks npm at start and every 24 h. A newer version is installed right away when automatic updates are on (once
+    per version, again 24 h after a failed try); otherwise the user is told and the menu offers it."""
+    try:
+        _announce_start(icon)
+    except Exception as exc:
+        icon.notify(f"Could not read the update state: {exc}", "Smart Tool")
     while True:
         try:
             latest = update_check.newer_version()
         except Exception:
             latest = None
-        if latest and latest != _state["update"]:
+        else:
+            try:
+                update_check.record_check(latest)
+            except Exception as exc:
+                icon.notify(f"Could not save the update check: {exc}", "Smart Tool")
+        if latest:
+            known = latest == _state["update"]
             _state["update"] = latest
             icon.update_menu()
-            if first and config.auto_update() and update_check.should_auto_update(latest):
-                icon.notify(f"Updating Smart Tool to {latest}...", "Smart Tool")
+            try:
+                automatic = update_check.automatic_enabled() and update_check.should_auto_update(latest)
+            except Exception as exc:
+                automatic = False
+                icon.notify(f"Automatic update skipped: {exc}", "Smart Tool")
+            if automatic:
+                icon.notify(f"Updating Smart Tool from {version.VERSION} to {latest}...", "Smart Tool")
                 update_check.run_update(latest, automatic=True)
-            else:
+            elif not known:
                 icon.notify(f"Smart Tool {latest} is available: use \"Update to {latest}\" in this menu.", "Smart Tool")
-        first = False
         time.sleep(UPDATE_CHECK_INTERVAL_S)
 
 
@@ -162,12 +186,16 @@ def _update_now(icon, item):
 
 def _auto_update_checked(item):
     try:
-        return config.auto_update()
+        return update_check.automatic_enabled()
     except Exception:
         return False
 
 
 def _toggle_auto_update(icon, item):
+    if update_check.env_opted_out():
+        icon.notify(f"{update_check.ENV_OPT_OUT}=off is set: automatic updates stay off until it is removed.",
+                    "Smart Tool")
+        return
     try:
         config.update_config(lambda cfg: cfg.__setitem__("auto_update", not config.auto_update(cfg)))
     except Exception as exc:
