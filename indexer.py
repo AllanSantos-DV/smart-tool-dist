@@ -779,9 +779,14 @@ def _vector_rows(root, path):
     return rows, meta, norms
 
 
+def _query_terms(query):
+    """Up to 24 distinct word terms of the query, in order."""
+    return list(dict.fromkeys(re.findall(r"[\w]{2,}", query or "", re.UNICODE)))[:24]
+
+
 def _lexical_scored(path, query, rows, limit, offset=0):
     """(chunk_id, score) best first; higher score is a better lexical match."""
-    terms = list(dict.fromkeys(re.findall(r"[\w]{2,}", query or "", re.UNICODE)))[:24]
+    terms = _query_terms(query)
     if not terms:
         return []
     expression = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
@@ -808,11 +813,72 @@ def _min_max(pairs):
     return {key: (value - low) / (high - low) if high > low else 1.0 for key, value in pairs}
 
 
-def search(root, query_vector=None, top_k=20, query=None, model_id=None, include=None):
-    """Recuperação vetorial + lexical por fusão de notas relativas, sem rede."""
+def stale_files(root, included_paths):
+    """`(changed, removed)` against the indexed state: `changed` lists in-scope files whose `(mtime_ns, size)` differs
+    from the stored one (or that were never indexed), `removed` lists indexed files that left the scope. It only
+    stats files, so it is the cheap answer to "what would a reindex have to touch"."""
+    snapshot = manifest_snapshot(root)
+    changed, removed = [], set(snapshot)
+    for rel in sorted(set(included_paths)):
+        stat, _reason = _stat_candidate(root, rel)
+        if stat is None:
+            continue
+        removed.discard(rel)
+        if snapshot.get(rel) != stat:
+            changed.append(rel)
+    return changed, sorted(removed)
+
+
+def overlay_chunks(root, rel_paths):
+    """`[(path, start_line, end_line, text)]` read from disk right now for the given files, chunked like the index.
+    Files that cannot be read consistently are skipped: the overlay only complements the index, it never fails a
+    search."""
+    chunks = []
+    for rel in rel_paths:
+        data, encoding, _stat = _stable_read(root, rel)
+        if data is None:
+            continue
+        pieces = chunk_file(root, rel, CHUNK_LINES, data=data, encoding=encoding)
+        chunks.extend((rel, start, end, text) for start, end, text in pieces or [])
+    return chunks
+
+
+def _overlay_scored(chunks, query, alpha):
+    """`[(score, path, start, end, text)]` for overlay chunks matching the query terms by keyword. A chunk that holds
+    every term scores 1.0, the top of the fused index scores (`search` ranks it first on a tie): the edited file is read
+    from disk, so it is the current answer for an exact match. A partial match stays on the 0-1 scale of the lexical
+    share of the fused score."""
+    terms = _query_terms(query)
+    scored = []
+    for path, start, end, text in chunks:
+        haystack = (path + " " + text).casefold()
+        matched = sum(term.casefold() in haystack for term in terms)
+        if matched:
+            score = 1.0 if matched == len(terms) else (1 - alpha) * matched / len(terms)
+            scored.append((score, path, start, end, text))
+    return scored
+
+
+def overlay_exact_keys(overlay, query):
+    """`{(path, start, end)}` of the overlay chunks that hold every query term. A reranker must not push them below
+    indexed chunks: they come from the file as it is on disk now."""
+    if not overlay or not overlay["chunks"] or not query:
+        return set()
+    return {(path, start, end) for score, path, start, end, _text in _overlay_scored(overlay["chunks"], query, 0.0)
+            if score == 1.0}
+
+
+def search(root, query_vector=None, top_k=20, query=None, model_id=None, include=None, overlay=None):
+    """Vector plus lexical retrieval by fusion of relative scores, without network. `overlay` is
+    `{"drop": paths, "chunks": overlay_chunks(...)}`: the indexed chunks of the `drop` paths (stale or removed
+    files) are ignored and the overlay chunks, read from disk, take part by keyword instead."""
     path = existing_db_path(root)
     if not path:
         return []
+    kind_filter = include
+    if overlay and overlay["drop"]:
+        dropped = set(overlay["drop"])
+        include = lambda rel: rel not in dropped and (kind_filter is None or kind_filter(rel))
     rows, meta, norms = _vector_rows(root, path)
     if include is not None:
         rows = [row for row in rows if include(row[1])]
@@ -854,7 +920,14 @@ def search(root, query_vector=None, top_k=20, query=None, model_id=None, include
     else:
         scores, ids = vector_scores, vector_ids
     by_id = {row[0]: row for row in rows}
-    return [(scores[chunk_id], *by_id[chunk_id][1:5]) for chunk_id in ids[:top_k]]
+    found = [(scores[chunk_id], *by_id[chunk_id][1:5]) for chunk_id in ids[:top_k]]
+    if overlay and overlay["chunks"]:
+        extra = _overlay_scored([chunk for chunk in overlay["chunks"] if kind_filter is None or kind_filter(chunk[0])],
+                                query, FUSION_ALPHA if query_vector is not None else 0.0)
+        found = [item for _score, item in sorted(
+            [((item[0], 1), item) for item in extra] + [((item[0], 0), item) for item in found],
+            key=lambda pair: pair[0], reverse=True)][:top_k]
+    return found
 
 
 def graph_cache_path(view_path):

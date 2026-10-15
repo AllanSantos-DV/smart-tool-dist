@@ -172,7 +172,11 @@ _capabilities_cache = None
 _jobs = {}
 _JOBS_LOCK = threading.Lock()
 _MAX_JOBS_RETAINED = 200
-SMART_SEARCH_SYNC_WAIT_S = 3
+# A warm search never took less than 3.3 s at its fastest 5% and the median is 8.6 s: waiting less answers pending to
+# nearly every call and costs the agent extra smart_search_result round trips. Codex gives an MCP call 60 s by default.
+SMART_SEARCH_SYNC_WAIT_S = 25
+OVERLAY_MAX_FILES = 40
+EDIT_INDEX_DELAY_S = 8
 # smart_search_result waits for the job this long before answering pending: answering at once had an agent poll the
 # same job 7 times in 16 s and then give up on Smart Tool (claude -p session, 2026-10-09; job durations median 6 s,
 # p75 10.7 s).
@@ -232,6 +236,8 @@ def _update_job(job_id, **fields):
         current = _jobs.get(job_id)
         if current is not None and current.get("status") == "pending":
             updated = {**current, **fields, "updated_at": time.time()}
+            if fields.get("phase") and fields["phase"] != current.get("phase"):
+                updated["phases"] = [*current.get("phases", []), [fields["phase"], time.time()]]
             _jobs[job_id] = updated
             if (fields.get("phase") != current.get("phase") or
                     time.monotonic() - _PERSIST_LAST.get(job_id, 0) > .5 or fields.get("cancel_requested")):
@@ -239,6 +245,20 @@ def _update_job(job_id, **fields):
                 persistent = updated
         if persistent:
             _persist_project_job(job_id, persistent)
+
+
+def _phase_timings(job):
+    """"phase:seconds" for each phase of a job in the order it ran; the last phase lasts until the job finished."""
+    marks = [("queued", job.get("created_at") or 0), *[tuple(mark) for mark in job.get("phases", [])]]
+    end = job.get("finished_at") or time.time()
+    spans = {}
+    for (name, start), following in zip(marks, [*marks[1:], ("", end)]):
+        spans[name] = spans.get(name, 0.0) + max(following[1] - start, 0.0)
+    return ",".join(f"{name}:{seconds:.2f}" for name, seconds in spans.items())
+
+
+_EDIT_PENDING = {}
+_EDIT_LOCK = threading.Lock()
 
 
 def _project_lock(root):
@@ -322,7 +342,10 @@ SERVER_INSTRUCTIONS = (
     "with query). Never retry the same search or download through Bash, python, node, PowerShell, curl or wget: that "
     "bypasses the rule the user set. Reading one known file, or searching inside one known file, is never blocked. "
     "Before changing a function, project_manage action=graph with symbol lists its callers and tests; after editing, "
-    "project_manage action=affected_tests lists the tests to run."
+    "project_manage action=affected_tests lists the tests to run. When smart_search returns nothing, retry smart_search with "
+    "other terms; do not switch to Grep, Read of folders or shell search. A helper agent (smart-scout, a cheap model) is "
+    "optional: use it only for a task that chains several Smart Tool calls or while the index is still loading; a plain "
+    "search is faster called directly. A helper that returns empty means retry with the tool or report not found."
 )
 
 TOOLS = [
@@ -377,7 +400,10 @@ TOOLS = [
             "query_comments with the same request in the comments' language; when the profile shows two "
             "languages both are required, or explain in single_language_reason. Put documentation searches in "
             "doc_query. Code and test results list the likeliest functions as name:line in symbols. Tune top_k per block for the project (project_manage search_limits). Fast searches return results directly. If work takes longer than a few seconds, "
-            "a pending job_id is returned; call smart_search_result with that ID until done."
+            "a pending job_id is returned; call smart_search_result with that ID until done. A warning that starts "
+            "with 'Indexing in progress' means the files named there changed after the last index: they were "
+            "searched by keyword from disk and the rest of the answer is current; repeat the search later for their "
+            "semantic ranking."
         ),
         "inputSchema": {
             "type": "object",
@@ -814,6 +840,110 @@ def _agent_scope_request(root, scope, problem):
             "(always included unless listed in exclude).")
 
 
+def _profile_due(scope, scope_model):
+    """Whether the saved scope lacks a current language profile and the model may be asked for one now, that is, a
+    scope model is configured and the pause after a failed attempt has passed."""
+    failed_at = (scope.get("profile_error") or {}).get("at", 0)
+    return bool(scope_model and (scope.get("profile") or {}).get("version") != index_profile.PROFILE_VERSION
+                and time.time() - failed_at >= index_profile.RETRY_AFTER_S)
+
+
+def _index_lag(root, model, cfg, problem, job_id):
+    """What a search can serve without waiting for the index. `None` when the existing index cannot be used as it is
+    (missing, built by another model, chunker or view, no saved scope, or a scope that needs the model while it is
+    unavailable): the caller then updates it before searching. Otherwise `{"changed", "removed", "refresh"}` with the
+    in-scope files that differ from the indexed state, the indexed files that left the scope, and whether a
+    background update is due (stale files, or a scope or profile the model has to refresh)."""
+    project = project_store.get(project_identity.project_id(root)) or {}
+    info = indexer.info(root)
+    view = index_views.describe(root)
+    scope = index_scope.load_scope(root)
+    if (not info.get("chunks") or info.get("model_id") != model or not index_scope.valid_scope(scope)
+            or info.get("chunker_version") != indexer.CHUNKER_VERSION
+            or info.get("schema_version") != indexer.SCHEMA_VERSION
+            or info.get("chunk_lines") != indexer.CHUNK_LINES
+            or (view.get("git") and info.get("view_id") != view.get("view_id"))
+            or project.get("scope_dirty")):
+        return None
+    scope_model = cfg.get("scope_model") or cfg.get("router_model")
+    rescan = index_scope.needs_rescan(root, scope)
+    if rescan and (not scope_model or problem):
+        return None
+    _update_job(job_id, phase="listing")
+    changed, removed = indexer.stale_files(root, index_scope.resolve_included_files(root, scope))
+    return {"changed": changed, "removed": removed,
+            "refresh": bool(changed or removed or rescan or _profile_due(scope, scope_model))}
+
+
+def _lag_overlay(root, lag):
+    """`(overlay, warning)` for `indexer.search`: the stale files read from disk, searched by keyword in place of their
+    outdated chunks, and the notice telling the agent that indexing is in progress. `(None, "")` when the index is
+    current."""
+    stale = lag["changed"] + lag["removed"]
+    if not stale:
+        return None, ""
+    shown = lag["changed"][:OVERLAY_MAX_FILES]
+    skipped = len(lag["changed"]) - len(shown)
+    names = ", ".join(stale[:3]) + (f" (+{len(stale) - 3})" if len(stale) > 3 else "")
+    warning = (f"Indexing in progress: {len(stale)} file(s) changed after the last index ({names}). Results come from "
+               "the existing index; those files were searched by keyword straight from disk, without semantic "
+               "ranking" + (f", and {skipped} of them were not searched" if skipped else "") +
+               ". The index updates in the background: repeat the search later for the updated ranking.")
+    return {"drop": stale, "chunks": indexer.overlay_chunks(root, shown)}, warning
+
+
+def _refresh_in_background(root, lag):
+    """Queues the index update that the search did not wait for. Returns the notice to show when it could not be
+    queued, `""` when it was queued or none was due."""
+    if not lag["refresh"]:
+        return ""
+    try:
+        _submit_project_job("project_index", {"project_root": root, "_origin": "search"})
+    except RuntimeError as exc:
+        return f"The background index update could not start ({exc}); the next search tries again."
+    return ""
+
+
+def _note_edit(payload):
+    """Queues a debounced background index update for a file an agent is about to write, in an eager project whose
+    watcher is not running. The PreToolUse hook sees the edit before it lands, so the update waits
+    `EDIT_INDEX_DELAY_S` and groups the edits of a burst into one job with `changed_paths`."""
+    if not isinstance(payload, dict) or payload.get("tool_name") not in ("Edit", "MultiEdit", "Write"):
+        return
+    target = (payload.get("tool_input") or {}).get("file_path")
+    if not isinstance(target, str) or not os.path.isabs(target):
+        return
+    project = project_store.containing(target)
+    if (not project or not project.get("enabled") or project.get("paused") or project.get("update_mode") != "eager"
+            or project.get("watch_backend", "off") != "off"):
+        return
+    rel = os.path.relpath(project_identity.display_root(target), project["root"]).replace(os.sep, "/")
+    with _EDIT_LOCK:
+        pending = _EDIT_PENDING.get(project["id"])
+        if pending is not None:
+            pending.add(rel)
+            return
+        _EDIT_PENDING[project["id"]] = {rel}
+    timer = threading.Timer(EDIT_INDEX_DELAY_S, _flush_edits, args=(project["id"],))
+    timer.daemon = True
+    timer.start()
+
+
+def _flush_edits(project_id):
+    """Submits the index update for the files `_note_edit` collected; a failure is logged because it runs on a timer
+    thread nobody waits for."""
+    with _EDIT_LOCK:
+        paths = _EDIT_PENDING.pop(project_id, set())
+    project = project_store.get(project_id)
+    if not paths or not project or project.get("paused") or not project.get("enabled"):
+        return
+    try:
+        _submit_project_job("project_index", {"project_root": project["root"], "changed_paths": sorted(paths),
+                                              "_origin": "edit"})
+    except Exception as exc:
+        _log(f"edit index update not queued: {type(exc).__name__}: {exc}")
+
+
 def _prepare_project_index(arguments, job_id, cfg, token, query_vector=None, preview=False, model=None):
     root = arguments["project_root"]
     project = project_store.get(project_identity.project_id(root)) or {}
@@ -835,9 +965,7 @@ def _prepare_project_index(arguments, job_id, cfg, token, query_vector=None, pre
                                         deadline=_job_deadline(job_id), cancel_check=checkpoint)
     _update_job(job_id, phase="listing")
     included = index_scope.resolve_included_files(root, scope, cancel_check=checkpoint)
-    failed_at = (scope.get("profile_error") or {}).get("at", 0)
-    if ((scope.get("profile") or {}).get("version") != index_profile.PROFILE_VERSION
-            and time.time() - failed_at >= index_profile.RETRY_AFTER_S and scope_model):
+    if _profile_due(scope, scope_model):
         _update_job(job_id, phase="profile")
         try:
             profile = index_profile.decide(root, included, scope_model, deadline=_job_deadline(job_id))
@@ -918,6 +1046,8 @@ def _grouped_yaml(profile, blocks, warning):
 
 LOCAL_EMBEDDER_DOWN_WARNING = ("The mcp-memory local embedder is configured but not responding: index and search are lexical only "
                                "until it is back (check the mcp-memory embedding service).")
+EMPTY_RESULT_NOTICE = ("No matches. Do not fall back to Grep, Read of folders or shell search: retry smart_search with other "
+                       "identifier terms, another group, or a wider top_k, and if it stays empty report that the code was not found.")
 LEXICAL_WARNING = ("No embedding model: index and search are lexical only (exact words, no synonyms or cross-language matches). "
                    "Configure an embedding_model for semantic search.")
 
@@ -939,6 +1069,7 @@ def _perform_smart_search_isolated(arguments, job_id):
     model = local_embedder.resolve(cfg.get("embedding_model"), indexer.info(root).get("model_id"))
     warnings = []
     vectors = {}
+    overlay = None
     search_model = model
     if problem:
         model_client.OFFLINE.set(problem)
@@ -975,18 +1106,23 @@ def _perform_smart_search_isolated(arguments, job_id):
             warnings.append("Embedding unavailable; lexical results from the last ready index. The update was not confirmed. " + _project_error(exc))
             search_model = None
         if vectors:
-            try:
-                _prepare_project_index(arguments, job_id, cfg, token, query_vector=next(iter(vectors.values())),
-                                       model=model)
-            except ProjectJobCancelled:
-                raise
-            except Exception as exc:
-                if not indexer.info(root).get("chunks"):
+            lag = _index_lag(root, model, cfg, problem, job_id)
+            if lag is not None:
+                overlay, notice = _lag_overlay(root, lag)
+                warnings += [text for text in (notice, _refresh_in_background(root, lag)) if text]
+            else:
+                try:
+                    _prepare_project_index(arguments, job_id, cfg, token, query_vector=next(iter(vectors.values())),
+                                           model=model)
+                except ProjectJobCancelled:
                     raise
-                warnings.append("Index update failed; results from the last ready index. " + _project_error(exc))
-                search_model = None
-                if indexer.info(root).get("model_id") != model:
-                    vectors = {}
+                except Exception as exc:
+                    if not indexer.info(root).get("chunks"):
+                        raise
+                    warnings.append("Index update failed; results from the last ready index. " + _project_error(exc))
+                    search_model = None
+                    if indexer.info(root).get("model_id") != model:
+                        vectors = {}
             if vectors and not cfg.get("rerank_model"):
                 warnings.append("Rerank not configured: hybrid lexical/vector order, less precise at the top. Configure a rerank_model.")
     _job_checkpoint(job_id)
@@ -1015,7 +1151,7 @@ def _perform_smart_search_isolated(arguments, job_id):
     query_terms = _symbol_terms(" ".join(queries[group] for group in groups if group != "doc"))
     _update_job(job_id, phase="searching")
     found = {group: indexer.search(root, vectors.get(queries[group]), top_k=max(limits[group] * 4, candidate_pool),
-                                   query=queries[group], model_id=search_model,
+                                   query=queries[group], model_id=search_model, overlay=overlay,
                                    include=lambda path, group=group: index_profile.kind(path, profile) == group)
              for group in groups}
 
@@ -1035,7 +1171,12 @@ def _perform_smart_search_isolated(arguments, job_id):
                 ordered = [(float(item["relevance_score"]), "rerank", candidates[item["index"]][1:]) for item in reranked]
             except Exception as exc:
                 problem = f"Rerank unavailable for {group}; hybrid lexical/vector order kept. " + _project_error(exc)
-        rows = [{"path": path, "lines": f"{start}-{end}", "score": round(score, 6), "snippet": text[:500],
+        exact = indexer.overlay_exact_keys(overlay, query)
+        if exact:
+            pinned = [(c[0], "overlay", c[1:]) for c in candidates if tuple(c[1:4]) in exact][:2]
+            pinned_keys = {tuple(item[2][:3]) for item in pinned}
+            ordered = pinned + [item for item in ordered if tuple(item[2][:3]) not in pinned_keys]
+        rows =[{"path": path, "lines": f"{start}-{end}", "score": round(score, 6), "snippet": text[:500],
                  "ranking": ranking, "location_kind": document_text.location_kind(path),
                  **({"symbols": _chunk_symbols(symbol_index, path, start, end, text, query_terms)}
                     if symbol_index and group != "doc" else {})}
@@ -1050,6 +1191,8 @@ def _perform_smart_search_isolated(arguments, job_id):
         if problem:
             warnings.append(problem)
     _job_checkpoint(job_id)
+    if not any(blocks.values()):
+        notes.append(EMPTY_RESULT_NOTICE)
     warning = " ".join(warnings)
     if warning:
         _update_job(job_id, warning=warning)
@@ -1120,7 +1263,8 @@ def _run_project_job_in_view(job_id, arguments, kind):
             if updated:
                 fields.update(indexed_seq=captured_seq, last_indexed=time.time())
             project_store.update(project_id, **fields)
-        _log(f"project_job {job_id} {project_id} {kind} done elapsed={time.time()-job['created_at']:.2f}s")
+        _log(f"project_job {job_id} {project_id} {kind} done elapsed={time.time()-job['created_at']:.2f}s "
+             f"phases={_phase_timings(final)}")
         return result
     except Exception as exc:
         with _JOBS_LOCK:
@@ -1215,8 +1359,13 @@ def _search_limits(value, groups, saved=None):
     for group in groups:
         raw = value if not isinstance(value, dict) else value.get(group, (saved or {}).get(group, SEARCH_LIMIT_DEFAULT))
         limits[group] = _limit_value(raw, f"top_k.{group}")
-    if sum(limits.values()) > SEARCH_LIMIT_TOTAL:
-        raise ValueError(f"The top_k total across the requested blocks is {sum(limits.values())}; the maximum is {SEARCH_LIMIT_TOTAL}.")
+    total = sum(limits.values())
+    if total > SEARCH_LIMIT_TOTAL:
+        # A first call that asks for more than the total is scaled down in proportion (a rejection costs the agent a turn).
+        scaled = {group: max(1, limit * SEARCH_LIMIT_TOTAL // total) for group, limit in limits.items()}
+        while sum(scaled.values()) > SEARCH_LIMIT_TOTAL:
+            scaled[max(scaled, key=scaled.get)] -= 1
+        limits = scaled
     return limits
 
 
@@ -3388,6 +3537,10 @@ def _pretool_hook(handler):
     client = (urllib.parse.parse_qs(urllib.parse.urlsplit(handler.path).query).get("client") or [""])[0]
     try:
         payload = json.loads(handler._read_body(HOOK_MAX_BODY_BYTES) or b"{}")
+        try:
+            _note_edit(payload)
+        except Exception as exc:
+            _log(f"edit index update skipped: {type(exc).__name__}: {exc}")
         output = hook_decision.decide(payload, client or None, _web_route)
     except Exception as exc:
         _log(f"PreToolUse hook without a decision: {type(exc).__name__}: {exc}")

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.19 - beta
+
+- A search no longer waits for the index to catch up. It answers from the existing index at once, searches the files
+  edited since the last index by keyword straight from disk, and says "Indexing in progress: N file(s) changed..." in
+  the answer while the update runs in the background. An index that does not exist yet, or was built by another model,
+  is still built first.
+- A search waits up to 25 s for its own result before answering with a `job_id` (it was 3 s, below the 3.3 s a warm
+  search takes at best, so nearly every call needed a second `smart_search_result`).
+- The scope and the language profile are no longer asked of the model inside a search that has an index: the saved ones
+  are used and refreshed in the background.
+- New folders are registered watched and eager: the index follows edits by itself. A PreToolUse Edit/Write of an eager
+  folder without a running watcher queues one debounced update with the edited paths. Folders already registered keep
+  their policy.
+- A `top_k` whose total is above 20 is scaled down in proportion instead of rejecting the call (the rejection cost the
+  agent a turn on its first search).
+- A search made right after an edit keeps the just-edited chunk in the answer: the reranker can no longer push it out.
+- An edit whose path comes in the Windows 8.3 short form (`ALLANS~1`-style folder names) is matched to its registered
+  project; before, the project lookup compared it with the long form and found nothing.
+- The daemon log prints the seconds spent in each phase of a job (`phases=queued:0.02,auth:0.01,...`).
+
 ## 0.9.18 - beta
 
 - Updates are no longer applied only at logon. The tray checks npm at start and every 24 h and installs a newer

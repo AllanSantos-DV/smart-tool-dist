@@ -40,8 +40,8 @@ def register(root, watch=None):
         row = db.execute("SELECT data FROM projects WHERE id=?", (key,)).fetchone()
         data = json.loads(row[0]) if row else {
             "id": key, "root": display, "name": os.path.basename(display) or display,
-            "status": "registered", "watch": False, "paused": False, "enabled": False,
-            "update_mode": "on_search",
+            "status": "registered", "watch": True, "paused": False, "enabled": False,
+            "update_mode": "eager",
             "dirty_seq": 0, "indexed_seq": 0, "created_at": time.time(),
             "last_indexed": None, "last_checked": None, "last_error": "",
             "last_job_id": None, "watch_backend": "off", "next_retry_at": 0,
@@ -58,6 +58,13 @@ def get(project_id):
     with _LOCK, _db() as db:
         row = db.execute("SELECT data FROM projects WHERE id=?", (project_id,)).fetchone()
     return json.loads(row[0]) if row else None
+
+
+def containing(path):
+    """The registered project whose folder holds `path` (the deepest one when projects nest), or `None`."""
+    target = project_identity.canonical_root(path)
+    inside = [p for p in all_projects() if target.startswith(project_identity.canonical_root(p["root"]) + os.sep)]
+    return max(inside, key=lambda p: len(p["root"])) if inside else None
 
 
 def all_projects():

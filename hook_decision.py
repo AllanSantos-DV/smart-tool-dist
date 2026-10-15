@@ -171,10 +171,8 @@ def advise(reason):
 
 
 def _project_of(path):
-    target = os.path.normcase(os.path.abspath(path))
-    roots = [p["root"] for p in project_store.all_projects()
-             if target.startswith(os.path.normcase(os.path.abspath(p["root"])) + os.sep)]
-    return max(roots, key=len) if roots else None
+    project = project_store.containing(path)
+    return project["root"] if project else None
 
 
 def _impact_line(root, rel, name):
