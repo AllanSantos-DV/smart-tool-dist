@@ -70,6 +70,7 @@ import web_fetch
 import version
 import update_check
 import gateway
+import code_graph
 import hook_decision
 import endpoint_sync
 
@@ -3574,6 +3575,60 @@ def _web_route(tool, url):
 
 
 HOOK_MAX_BODY_BYTES = 4 * 1024 * 1024
+# The client cancels a PreToolUse hook at its own timeout and lets the tool run, but the agent has waited all of it
+# (75 cancellations of 15 s in 9 days, 62 of them Write/Edit). The decision gets this much; past it the hook answers
+# without one and says so in the log. Edit reviews (docs, copies) are the slow ones, so they have their own small
+# pool: at most HOOK_EDIT_SLOTS run at once and a further edit is let through unreviewed instead of queueing.
+HOOK_BUDGET_S = 4.0
+HOOK_ANALYZER_TIMEOUT_S = 10
+HOOK_SLOW_LOG_S = 1.0
+HOOK_EDIT_SLOTS = 2
+_HOOK_POOL = concurrent.futures.ThreadPoolExecutor(4, thread_name_prefix="hook")
+_HOOK_EDIT_POOL = concurrent.futures.ThreadPoolExecutor(HOOK_EDIT_SLOTS, thread_name_prefix="hook-edit")
+_HOOK_EDIT_SLOTS = threading.BoundedSemaphore(HOOK_EDIT_SLOTS)
+
+
+def _hook_work(payload, client, slot):
+    """`hook_decision.decide` on a hook worker, with the analyzer timeout lowered and the edit slot released at the end
+    (the worker may outlive the request that gave up on it)."""
+    code_graph.ANALYZER_TIMEOUT_S.set(HOOK_ANALYZER_TIMEOUT_S)
+    try:
+        return hook_decision.decide(payload, client, _web_route)
+    finally:
+        if slot:
+            slot.release()
+
+
+def _decide_within_budget(payload, client):
+    """The hook decision of `payload`, or None when it did not come within HOOK_BUDGET_S or no edit slot was free (the
+    tool then runs as if the hook had nothing to say). Both cases, and any answer slower than HOOK_SLOW_LOG_S, leave one
+    line in the daemon log with the tool, the file or command and the time."""
+    tool = payload.get("tool_name") if isinstance(payload, dict) else None
+    tool_input = payload.get("tool_input") if isinstance(payload, dict) else None
+    target = str((tool_input or {}).get("file_path") or (tool_input or {}).get("command") or "")[:80]
+    edit = tool in hook_decision.EDIT_TOOLS
+    if edit and not _HOOK_EDIT_SLOTS.acquire(blocking=False):
+        _log(f"PreToolUse hook skipped the review of {tool} {target}: {HOOK_EDIT_SLOTS} edit reviews already running, "
+             "the edit goes through without one")
+        return None
+    started = time.monotonic()
+    try:
+        future = (_HOOK_EDIT_POOL if edit else _HOOK_POOL).submit(contextvars.copy_context().run, _hook_work, payload,
+                                                                   client, _HOOK_EDIT_SLOTS if edit else None)
+    except BaseException:
+        if edit:
+            _HOOK_EDIT_SLOTS.release()
+        raise
+    try:
+        output = future.result(timeout=HOOK_BUDGET_S)
+    except concurrent.futures.TimeoutError:
+        _log(f"PreToolUse hook over {HOOK_BUDGET_S:g} s for {tool} {target}: answered without a decision, the work "
+             "finishes in the background")
+        return None
+    took = time.monotonic() - started
+    if took > HOOK_SLOW_LOG_S:
+        _log(f"PreToolUse hook slow: {tool} {target} took {took:.1f} s")
+    return output
 
 
 def _pretool_hook(handler):
@@ -3587,9 +3642,11 @@ def _pretool_hook(handler):
             _note_edit(payload)
         except Exception as exc:
             _log(f"edit index update skipped: {type(exc).__name__}: {exc}")
-        output = hook_decision.decide(payload, client or None, _web_route)
+        output = _decide_within_budget(payload, client or None)
     except Exception as exc:
         _log(f"PreToolUse hook without a decision: {type(exc).__name__}: {exc}")
+        return {}
+    if output is None:
         return {}
     specific = output.get("hookSpecificOutput") or {}
     if specific.get("permissionDecision", "deny") != "deny":

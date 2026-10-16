@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.21 - beta
+
+- The PreToolUse hook can no longer hold a tool call for long. Its decision has 4 s; past that it answers without one
+  (the tool runs) and the daemon log gets one line, `PreToolUse hook over 4 s for Write <file>: answered without a
+  decision`; an answer slower than 1 s is logged too. Before, Write and Edit reviews (docstring reminder, copied
+  function check) could take longer than the client's 15 s timeout on large TypeScript or Java files and large
+  repositories (75 cancelled hook calls in 9 days, 62 of them Write or Edit) and Bash calls of other sessions waited
+  behind them.
+- Edit and Write reviews run on their own two workers: a third simultaneous edit goes through unreviewed (logged) instead
+  of queueing, and Bash, Read and Grep never wait for them.
+- The Node code analyzer called by the edit hook stops after 10 s, and an analysis that failed or timed out is no
+  longer remembered as "this file has no functions".
+- The timeout written in the client hook entry drops from 15 s to 6 s (Codex's thin command 14 s to 5 s). An entry
+  written by an older version shows as outdated on the setup screen until you accept the hook update (preview and
+  backup first).
+
 ## 0.9.20 - beta
 
 - The first search of a folder that has no index yet no longer waits for the index. It answers at once with the files

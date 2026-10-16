@@ -166,11 +166,13 @@ def functions(path, source, symbols=None):
 
 def analyze(path, *sources):
     """Analyzer symbols of several versions of one TypeScript/JavaScript/Java file, from one analyzer run for the
-    versions not seen yet (an edit hook needs the file before and after; the next edit's 'before' is this 'after')."""
+    versions not seen yet (an edit hook needs the file before and after; the next edit's 'before' is this 'after').
+    An analysis that failed or timed out is returned empty but not cached, so the next call tries again."""
     lower, name = path.lower(), os.path.basename(path)
     keys = [hashlib.sha1(f"{name}\0{source}".encode("utf-8")).hexdigest() for source in sources]
     with _PARSED_LOCK:
         missing = {key: source for key, source in zip(keys, sources) if key not in _PARSED}
+    found = {}
     if missing:
         batch = {f"v{i}/{name}": source for i, source in enumerate(missing.values())}
         analysis = (code_graph._javascript_graph(batch) if lower.endswith(SCRIPT)
@@ -178,11 +180,13 @@ def analyze(path, *sources):
         found = {key: [dict(s, path=name) for s in analysis.get("symbols") or [] if s.get("path") == f"v{i}/{name}"]
                  for i, key in enumerate(missing)}
         with _PARSED_LOCK:
-            _PARSED.update(found)
+            if not analysis.get("retryable"):
+                _PARSED.update(found)
             while len(_PARSED) > MAX_PARSED:
                 _PARSED.popitem(last=False)
     with _PARSED_LOCK:
-        return [_PARSED[key] if key in _PARSED else [] for key in keys]
+        cached = {key: _PARSED[key] for key in keys if key in _PARSED}
+    return [cached.get(key, found.get(key, [])) for key in keys]
 
 
 def _touched_lines(before, after):

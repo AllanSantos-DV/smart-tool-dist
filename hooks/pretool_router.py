@@ -15,7 +15,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import daemon_launcher
 
-TIMEOUT_S = 14
+TIMEOUT_S = 5
 
 
 def _client():

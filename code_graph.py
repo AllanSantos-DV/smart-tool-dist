@@ -233,14 +233,16 @@ def _python_graph(sources):
 
 
 NODE_HEAP_MB = (1024, 4096)
+ANALYZER_TIMEOUT_S = contextvars.ContextVar("analyzer_timeout_s", default=120)
 
 
 def _run_analyzer(script, payload, failure):
     """Runs a Node analyzer, retrying once with a larger heap when it runs out of memory (634 TypeScript files, 2.9 MB,
-    needed more than the former fixed 512 MB)."""
+    needed more than the former fixed 512 MB). The run is killed after `ANALYZER_TIMEOUT_S` seconds (a context
+    variable: the edit hook lowers it so a slow file cannot hold its worker)."""
     for heap in NODE_HEAP_MB:
         process=subprocess.run([web_search_adapters.NODE_EXECUTABLE,f'--max-old-space-size={heap}',str(Path(__file__).with_name(script))],
-            input=payload,capture_output=True,text=True,encoding='utf-8',timeout=120,
+            input=payload,capture_output=True,text=True,encoding='utf-8',timeout=ANALYZER_TIMEOUT_S.get(),
             creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         if process.returncode==0:
             return json.loads(process.stdout)
