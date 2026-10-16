@@ -176,6 +176,7 @@ _MAX_JOBS_RETAINED = 200
 # nearly every call and costs the agent extra smart_search_result round trips. Codex gives an MCP call 60 s by default.
 SMART_SEARCH_SYNC_WAIT_S = 25
 OVERLAY_MAX_FILES = 40
+COLD_SCAN_BUDGET_S = 8
 EDIT_INDEX_DELAY_S = 8
 # smart_search_result waits for the job this long before answering pending: answering at once had an agent poll the
 # same job 7 times in 16 s and then give up on Smart Tool (claude -p session, 2026-10-09; job durations median 6 s,
@@ -875,6 +876,29 @@ def _index_lag(root, model, cfg, problem, job_id):
             "refresh": bool(changed or removed or rescan or _profile_due(scope, scope_model))}
 
 
+def _cold_index(root, cfg, problem):
+    """Whether this search is the first one of a project with no index, and the index can be built in the background:
+    the gateway answers and the scope is saved or a model can decide it. Otherwise the search keeps its old course
+    (build first, or ask the agent for the scope)."""
+    if indexer.info(root).get("chunks") or problem:
+        return False
+    return bool(index_scope.valid_scope(index_scope.load_scope(root)) or cfg.get("scope_model") or cfg.get("router_model"))
+
+
+def _cold_overlay(root, queries):
+    """`(overlay, warning)` for a project with no index: the in-scope files (the saved scope, else the whole folder minus
+    the always-excluded names) holding a query term, read from disk and ranked by keyword, plus the notice that the
+    index is being built. The scan stops after `COLD_SCAN_BUDGET_S`."""
+    scope = index_scope.load_scope(root)
+    files = index_scope.resolve_included_files(root, scope if index_scope.valid_scope(scope) else {"include": [""]})
+    chunks, scanned = indexer.keyword_chunks(root, files, queries, COLD_SCAN_BUDGET_S)
+    reached = f"{scanned} of {len(files)} files" if scanned < len(files) else f"all {len(files)} files"
+    warning = ("Indexing in progress: this folder has no index yet, so the results are keyword matches read straight "
+               f"from disk in {reached}, without semantic ranking. The index is being built in the background: repeat "
+               "the search in a few minutes for the full ranking.")
+    return {"drop": [], "chunks": chunks}, warning
+
+
 def _lag_overlay(root, lag):
     """`(overlay, warning)` for `indexer.search`: the stale files read from disk, searched by keyword in place of their
     outdated chunks, and the notice telling the agent that indexing is in progress. `(None, "")` when the index is
@@ -1086,6 +1110,10 @@ def _perform_smart_search_isolated(arguments, job_id):
                 raise
             warnings.append("Lexical index not updated; results from the last ready index. " + _project_error(exc))
             search_model = None
+    elif _cold_index(root, cfg, problem):
+        overlay, notice = _cold_overlay(root, texts)
+        search_model = None
+        warnings += [text for text in (notice, _refresh_in_background(root, {"refresh": True})) if text]
     elif problem and not local_embedder.is_local(model):
         if not indexer.info(root).get("chunks"):
             raise RuntimeError(problem)
@@ -1434,13 +1462,13 @@ def _handle_smart_search(arguments):
     job_id, future = _submit_project_job("smart_search", arguments)
     if future is None:
         _metric("pending", reason="queued")
-        return _to_json_sanitized(_smart_search_job_payload(job_id))
+        return _agent_search_answer(_smart_search_job_payload(job_id))
     try:
         result = future.result(timeout=SMART_SEARCH_SYNC_WAIT_S)
     except concurrent.futures.TimeoutError:
         if not future.done():
             _metric("pending", reason="sync_timeout")
-            return _to_json_sanitized(_smart_search_job_payload(job_id))
+            return _agent_search_answer(_smart_search_job_payload(job_id))
         result = future.result()
     _mark_notice_delivered(job_id)
     return result
@@ -1546,7 +1574,25 @@ def _handle_smart_search_result(arguments):
         time.sleep(0.25)
         payload = _smart_search_job_payload(job_id)
     _mark_notice_delivered(job_id)
+    if payload["kind"] == "smart_search":
+        return _agent_search_answer(payload)
     return _to_json_sanitized(payload)
+
+
+_AGENT_SEARCH_DROPPED = ("kind", "project_id", "updated_at", "stats", "view")
+
+
+def _agent_search_answer(payload):
+    """What smart_search_result hands the agent for a smart_search job: the result text itself when done (the same text
+    a search that finishes within the wait returns, no JSON wrapper that escapes it and repeats the index stats and
+    the git view the setup page shows), otherwise the payload without those fields."""
+    if payload["status"] == "done":
+        warning = payload.get("warning")
+        return f"{payload['result']}\nwarning: {warning}" if warning else payload["result"]
+    slim = {key: value for key, value in payload.items() if key not in _AGENT_SEARCH_DROPPED}
+    if not slim.get("cancel_requested"):
+        slim.pop("cancel_requested", None)
+    return _to_json_sanitized(slim)
 
 
 def _project_payload(project):

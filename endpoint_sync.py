@@ -27,6 +27,11 @@ def claude_dir():
     return os.environ.get("CLAUDE_CONFIG_DIR") or _home(".claude")
 
 
+def codex_dir():
+    """Codex keeps config.toml and hooks.json in CODEX_HOME when set, else ~/.codex."""
+    return os.environ.get("CODEX_HOME") or _home(".codex")
+
+
 def claude_json():
     """User-scope MCP servers: $CLAUDE_CONFIG_DIR/.claude.json when set, else ~/.claude.json."""
     custom = os.environ.get("CLAUDE_CONFIG_DIR")
@@ -72,7 +77,7 @@ def _codex_mcp(text, base):
 
 def targets():
     return ((claude_json(), _claude_mcp), (os.path.join(claude_dir(), "settings.json"), _claude_hook),
-            (_home(".codex", "config.toml"), _codex_mcp))
+            (os.path.join(codex_dir(), "config.toml"), _codex_mcp))
 
 
 _CODEX_ANY_URL_RE = re.compile(r'\[mcp_servers\.smart-tool\][^\[]*?\burl\s*=\s*"([^"]+)"')
@@ -93,7 +98,7 @@ def registrations():
         except (OSError, AttributeError):
             break
     try:
-        with open(_home(".codex", "config.toml"), encoding="utf-8") as stream:
+        with open(os.path.join(codex_dir(), "config.toml"), encoding="utf-8") as stream:
             match = _CODEX_ANY_URL_RE.search(stream.read())
         found["codex"] = match.group(1) if match else None
     except OSError:

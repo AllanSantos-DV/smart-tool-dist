@@ -843,6 +843,32 @@ def overlay_chunks(root, rel_paths):
     return chunks
 
 
+def keyword_chunks(root, rel_paths, queries, budget_s):
+    """`(chunks, scanned)`: the chunks, read from disk right now, of the files among `rel_paths` that contain at least
+    one term of `queries` (the file name counts), for a project that has no index yet. The scan stops after `budget_s`
+    seconds; `scanned` is how many files it reached. Reading and skipping rules are the index's (`_stable_read`)."""
+    terms = [term.casefold() for term in dict.fromkeys(term for query in queries for term in _query_terms(query))]
+    deadline = time.monotonic() + budget_s
+    chunks, scanned = [], 0
+    for rel in rel_paths:
+        if time.monotonic() > deadline:
+            break
+        scanned += 1
+        data, encoding, _stat = _stable_read(root, rel)
+        if data is None:
+            continue
+        try:
+            text = data.decode(encoding or "utf-8", "ignore").casefold()
+        except LookupError:
+            continue
+        name = rel.casefold()
+        if not any(term in text or term in name for term in terms):
+            continue
+        pieces = chunk_file(root, rel, CHUNK_LINES, data=data, encoding=encoding)
+        chunks.extend((rel, start, end, piece) for start, end, piece in pieces or [])
+    return chunks, scanned
+
+
 def _overlay_scored(chunks, query, alpha):
     """`[(score, path, start, end, text)]` for overlay chunks matching the query terms by keyword. A chunk that holds
     every term scores 1.0, the top of the fused index scores (`search` ranks it first on a tie): the edited file is read
@@ -874,7 +900,10 @@ def search(root, query_vector=None, top_k=20, query=None, model_id=None, include
     files) are ignored and the overlay chunks, read from disk, take part by keyword instead."""
     path = existing_db_path(root)
     if not path:
-        return []
+        if not (overlay and overlay["chunks"] and query):
+            return []
+        extra = _overlay_scored([chunk for chunk in overlay["chunks"] if include is None or include(chunk[0])], query, 0.0)
+        return sorted(extra, key=lambda item: item[0], reverse=True)[:top_k]
     kind_filter = include
     if overlay and overlay["drop"]:
         dropped = set(overlay["drop"])

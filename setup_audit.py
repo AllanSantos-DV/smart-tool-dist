@@ -64,7 +64,7 @@ def _home(*parts):
 
 def codex_dir():
     """Codex's home: CODEX_HOME when set, else ~/.codex."""
-    return os.environ.get("CODEX_HOME") or _home(".codex")
+    return endpoint_sync.codex_dir()
 
 
 def _managed_settings():

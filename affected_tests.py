@@ -33,6 +33,8 @@ NOTE = ("Selection from the indexed import graph: tests that load code through s
         "files and imports count before reindexing; pytest fixtures link a test to the conftest.py that defines them.")
 TEST_SOURCES = (".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".java")
 _PATH_LITERAL = re.compile(r"""['"`]((?:\.{0,2}/)?[\w.-]+(?:/[\w.-]+)*\.(?:py|js|mjs|cjs|ts|mts|cts|java))['"`]""")
+_STRING_LITERAL = re.compile(r"""'([^'\n]*)'|"([^"\n]*)\"""")
+_IMPORT_STATEMENT = re.compile(r"(?:^|;)\s*(?:import|from)\s+([A-Za-z_]\w*(?:\.\w+)*)")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.M)
 
 
@@ -213,12 +215,7 @@ def _path_literal_users(root, test_files, known):
         if not test.lower().endswith(TEST_SOURCES):
             continue
         source = _read(os.path.join(root, test))
-        folders, folder = [], os.path.dirname(test)
-        while True:
-            folders.append(folder)
-            if not folder:
-                break
-            folder = os.path.dirname(folder)
+        folders = _folders_above(test)
         for literal in set(_PATH_LITERAL.findall(source)):
             for base in folders:
                 candidate = posixpath.normpath(posixpath.join(base, literal.removeprefix("./")))
@@ -226,6 +223,37 @@ def _path_literal_users(root, test_files, known):
                     users[candidate].add(test)
                     break
     return users
+
+
+def _import_string_users(root, test_files, known):
+    """Python modules a test imports inside a string (subprocess.run([sys.executable, "-c", "import click"])), resolved
+    to the package or module file under the project root, a `src` folder or a folder above the test: the code runs in
+    another process, so no import statement of the test links it."""
+    users = defaultdict(set)
+    for test in test_files:
+        if not test.lower().endswith(".py"):
+            continue
+        folders = ["src", *_folders_above(test)]
+        literals = (single or double for single, double in _STRING_LITERAL.findall(_read(os.path.join(root, test))))
+        for module in {name for text in literals for name in _IMPORT_STATEMENT.findall(text)}:
+            stem = module.replace(".", "/")
+            for base in folders:
+                target = next((candidate for candidate in (posixpath.join(base, stem + ".py"),
+                                                           posixpath.join(base, stem, "__init__.py"))
+                               if candidate in known and candidate != test), None)
+                if target:
+                    users[target].add(test)
+                    break
+    return users
+
+
+def _folders_above(path):
+    """The folder of `path` and every folder above it up to the project root (`""`), nearest first."""
+    folders, folder = [], os.path.dirname(path)
+    while folder:
+        folders.append(folder)
+        folder = os.path.dirname(folder)
+    return folders + [""]
 
 
 _TEST_CASES = {
@@ -296,8 +324,10 @@ def affected(root, base="HEAD", limit=30, view_id=None):
         callers[call["target"]].add(call["source"])
     for conftest, users in _fixture_users(root, test_files).items():
         importers[conftest] |= users
-    for target, users in _path_literal_users(root, test_files, {f["path"] for f in data.get("files") or []}).items():
-        importers[target] |= users
+    known_files = {f["path"] for f in data.get("files") or []}
+    for linked in (_path_literal_users(root, test_files, known_files), _import_string_users(root, test_files, known_files)):
+        for target, users in linked.items():
+            importers[target] |= users
     by_id = {s["id"]: s for s in data.get("symbols") or []}
     run_all, not_analyzed, changed_code, changed_tests, conftests = [], [], [], [], []
     for path, change in sorted(changes.items()):

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.20 - beta
+
+- The first search of a folder that has no index yet no longer waits for the index. It answers at once with the files
+  that hold a query term, read from disk and ranked by keyword (up to 8 s of scanning, and it says how many files it
+  reached), and builds the index in the background; the answer says "Indexing in progress: this folder has no index
+  yet". A folder with no saved scope and no model to decide it still asks the agent for the scope, as before.
+- `smart_search_result` hands the agent the result text itself when the job is done, the same text a search that
+  finishes within the wait returns. Before, it was a JSON wrapper that escaped the text and repeated the index stats
+  and the git view (~1.5 thousand characters of metadata per answer). A job still pending or failed comes without
+  those fields too.
+- Playwright MCP starts with `--caps=` so a `PLAYWRIGHT_MCP_CAPS=network` in the user's environment cannot turn on
+  `browser_route` (measured on 0.0.83: with the variable set, 29 tools including `browser_route`; with `--caps=`, 25
+  and no `browser_route`).
+- `CODEX_HOME` is followed everywhere the Codex config is read or written: the MCP registration check, the endpoint
+  sync after a port change and the Codex hook file (before, only the browser control and the setup audit followed it).
+- `affected_tests` links a Python test to the modules it imports inside a string, as in
+  `subprocess.run([sys.executable, "-c", "import click"])`, so a change to that module selects the test.
+
 ## 0.9.19 - beta
 
 - A search no longer waits for the index to catch up. It answers from the existing index at once, searches the files

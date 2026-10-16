@@ -62,7 +62,7 @@ def server_command():
         raise RuntimeError("Supported Node.js not found for Playwright MCP.")
     if not CLI.is_file():
         raise RuntimeError(f"Playwright MCP is not installed ({CLI}); reinstall Smart Tool.")
-    return [node, str(CLI), "--isolated", "--headless", "--no-webmcp", "--config", write_config(),
+    return [node, str(CLI), "--isolated", "--headless", "--no-webmcp", "--caps=", "--config", write_config(),
             "--executable-path", chromium_executable(), "--output-dir", OUTPUT_DIR,
             "--output-max-size", str(OUTPUT_MAX_BYTES)]
 
@@ -159,7 +159,7 @@ def registered():
 
 def _codex_config():
     """Codex keeps config.toml in CODEX_HOME when set, else ~/.codex."""
-    return os.path.join(os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex"), "config.toml")
+    return os.path.join(endpoint_sync.codex_dir(), "config.toml")
 
 
 def _replace_text(path, text):
