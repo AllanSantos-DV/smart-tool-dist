@@ -224,6 +224,12 @@ def _edit_review(payload, doc_mode, duplicate_mode):
     docs and files outside a project are left out, as in the docs coverage): missing ones deny the edit in require mode and become a reminder in remind mode; a
     documented function whose signature changed always gets a reminder. Copies of indexed functions follow
     duplicate_mode and only add context, never deny."""
+    with code_graph.pending_scope():
+        return _edit_review_scoped(payload, doc_mode, duplicate_mode)
+
+
+def _edit_review_scoped(payload, doc_mode, duplicate_mode):
+    """`_edit_review` inside one `code_graph.pending_scope`, so the pending-changes scan runs once per review."""
     doc_findings, duplicate_findings, failures = [], [], []
     for path, before, after in edit_preview.preview(payload.get("tool_name"), payload.get("tool_input"), payload.get("cwd")):
         if not doc_check.supported(path):

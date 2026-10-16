@@ -199,10 +199,15 @@ def _entry(path, name, start, end, file_lines, ext):
             "hash": hashlib.sha1(normalized.encode("utf-8")).hexdigest(), **_features(body, ext, short)}
 
 
+_WORKING_TREE_FUNCTIONS = {}
+_WORKING_TREE_FUNCTIONS_MAX = 2000
+
+
 def _working_tree_functions(root, changes, profile, include_tests=False):
     """Functions of the files the index does not reflect yet, read from disk (production code, plus tests when
     include_tests), with the same identity as indexed ones, so a copy written earlier in the session is caught and
-    a function removed since the last indexing is not reported."""
+    a function removed since the last indexing is not reported. The functions of a file are remembered per
+    (modification time, size), so only files written since the last call are read and parsed again."""
     found = []
     kinds = ("code", "test") if include_tests else ("code",)
     for rel, status in changes.items():
@@ -211,12 +216,20 @@ def _working_tree_functions(root, changes, profile, include_tests=False):
         if status == "deleted" or ext not in _LANG or kind not in kinds:
             continue
         try:
+            stat = os.stat(os.path.join(root, rel))
+            key = (root, rel, stat.st_mtime_ns, stat.st_size, kind)
+            with _LOCK:
+                cached = _WORKING_TREE_FUNCTIONS.get(key)
+            if cached is not None:
+                found += cached
+                continue
             with open(os.path.join(root, rel), encoding="utf-8") as stream:
                 source = stream.read()
         except (OSError, UnicodeDecodeError):
             continue
         if _GENERATED.search(source[:4000]):
             continue
+        before = len(found)
         lines = source.splitlines()
         functions = doc_check.functions(rel, source)
         occurrences = {}
@@ -230,6 +243,10 @@ def _working_tree_functions(root, changes, profile, include_tests=False):
                 occurrence = occurrences[entry["hash"]] = occurrences.get(entry["hash"], 0) + 1
                 found.append({**entry, "kind": kind, "fp": hashlib.sha1(
                     f"{rel}\0{entry['hash']}\0{occurrence}".encode("utf-8")).hexdigest()})
+        with _LOCK:
+            if len(_WORKING_TREE_FUNCTIONS) >= _WORKING_TREE_FUNCTIONS_MAX:
+                _WORKING_TREE_FUNCTIONS.pop(next(iter(_WORKING_TREE_FUNCTIONS)))
+            _WORKING_TREE_FUNCTIONS[key] = found[before:]
     return found
 
 

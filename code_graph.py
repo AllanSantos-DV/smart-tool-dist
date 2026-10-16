@@ -3,6 +3,7 @@ import ast
 import collections
 import copy
 import gzip
+import contextlib
 import contextvars
 import hashlib
 import json
@@ -504,7 +505,32 @@ def working_tree_changes(root):
     return changes
 
 
+_PENDING_SCOPE=contextvars.ContextVar('pending_scope',default=None)
+
+
+@contextlib.contextmanager
+def pending_scope():
+    """Inside the block, `pending_changes` of one (root, view) is computed once: an edit review asks for it from several
+    places (copy pool, impact graph) and each answer costs a git status, a git ls-files and a stat of every indexed
+    file. The memo ends with the block, so the next review reads the working tree again."""
+    token=_PENDING_SCOPE.set({})
+    try:
+        yield
+    finally:
+        _PENDING_SCOPE.reset(token)
+
+
 def pending_changes(root,view_path):
+    """`_pending_changes`, memoized while a `pending_scope` is open."""
+    memo=_PENDING_SCOPE.get()
+    if memo is None:
+        return _pending_changes(root,view_path)
+    if (root,view_path) not in memo:
+        memo[(root,view_path)]=_pending_changes(root,view_path)
+    return dict(memo[(root,view_path)])
+
+
+def _pending_changes(root,view_path):
     """Files the indexed view does not reflect yet: working-tree changes, indexed files whose size or modification time
     differs on disk, and files tracked by git inside the index scope that were never indexed (commits made after the
     last indexing). Path -> 'deleted' or 'changed'."""
@@ -537,21 +563,22 @@ def pending_changes(root,view_path):
     return changes
 
 
-def build_current(root,view_id=None):
+def build_current(root,view_id=None,shared=False):
     """The graph an agent should see while editing: the indexed view plus every file it does not reflect yet (see
     pending_changes and build_overlay) when that view is the current one; a pinned or older view is returned as
-    indexed."""
+    indexed. shared=True hands back the cached graph without copying it: the caller must only read it."""
     inventory=index_inventory.inspect(root,view_id)
     selected=inventory.get('selected') or {}
     changes=pending_changes(root,selected['path']) if selected.get('current') else {}
-    return build_overlay(root,changes,view_id) if changes else build(root,view_id)
+    return build_overlay(root,changes,view_id,shared) if changes else build(root,view_id)
 
 
-def build_overlay(root,changes,view_id=None):
+def build_overlay(root,changes,view_id=None,shared=False):
     """Graph of the indexed view with the given changed files read from the working tree instead of the snapshot
     (changes: project-relative path -> 'deleted' or any other status), so a caller right after an edit sees new files,
     new imports and current line numbers without reindexing or embeddings. A deleted file keeps its indexed copy so
-    the files that imported it stay linked to it. Cached per snapshot and file contents."""
+    the files that imported it stay linked to it. Cached per snapshot and file contents; shared=True returns a new top-level
+    dict over the cached lists instead of a deep copy (read-only for the caller)."""
     inventory=index_inventory.inspect(root,view_id)
     if not inventory['selected']:
         return {**inventory,'symbols':[],'dependencies':[],'calls':[],'diagnostics':[],'counts':{},'files':[]}
@@ -586,6 +613,6 @@ def build_overlay(root,changes,view_id=None):
             with _LOCK:
                 _CACHE[key]=cached
                 while len(_CACHE)>3:_CACHE.popitem(last=False)
-    data=copy.deepcopy(cached)
+    data=dict(cached) if shared else copy.deepcopy(cached)
     data.update(selected=inventory['selected'],source='indexed_snapshot_with_working_tree',overlaid=[r for r,_h in overlaid])
     return data

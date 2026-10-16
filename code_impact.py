@@ -80,7 +80,7 @@ def impact(root, symbol, view_id=None, depth=3, limit=30):
         raise ValueError("Pass symbol: a function, method (Class.method) or class name.")
     if type(depth) is not int or not 1 <= depth <= MAX_DEPTH:
         raise ValueError(f"depth must be an integer from 1 to {MAX_DEPTH}.")
-    data = code_graph.build_current(root, view_id)
+    data = code_graph.build_current(root, view_id, shared=True)
     found = _matches(data.get("symbols") or [], symbol)
     diagnostics = [d.get("reason") for d in data.get("diagnostics") or [] if d.get("reason")]
     if not found:

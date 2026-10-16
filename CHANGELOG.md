@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.22 - beta
+
+- The review of an Edit or Write (docstring reminder, copied-function check) is about twice as fast on a warm daemon
+  (a whole-file Write of the 130 KB `smart_tool_daemon.py`: 1.7 s to 0.8 s), so it stays within the hook's 4 s on large
+  files instead of being skipped: the scan of pending changes runs once per review instead of once per use, the
+  functions of each changed file are remembered until the file is written again, and the impact lookup reads the cached
+  graph instead of copying it. The first review after the daemon starts still waits for the graph to load and may be
+  skipped; the work finishes in the background and the next one is fast.
+
 ## 0.9.21 - beta
 
 - The PreToolUse hook can no longer hold a tool call for long. Its decision has 4 s; past that it answers without one
