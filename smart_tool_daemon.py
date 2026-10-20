@@ -3654,6 +3654,18 @@ def _decide_within_budget(payload, client):
     return output
 
 
+def _cold_index_building(root):
+    """Whether the folder has no index yet and the job that builds it is queued or running. A search job of that folder
+    would wait behind it in the per-folder queue (21.9 s measured, past the hook's wait), so a redirected search is
+    answered at once by `_perform_smart_search`'s cold path: keyword matches read from disk, with the notice."""
+    if indexer.info(root).get("chunks") or not _cold_index(root, config.load_config(), _gateway_problem()):
+        return False
+    project_id = project_identity.project_id(root)
+    with _JOBS_LOCK:
+        return any(job.get("kind") == "project_index" and job.get("status") == "pending"
+                   and job.get("project_id") == project_id for job in _jobs.values())
+
+
 def _redirected_search(arguments):
     """smart_search text for a redirected native search, waiting up to SMART_SEARCH_SYNC_WAIT_S; raises when the search
     is rejected, fails or is still running then. The hook's single_language_reason only passes the language check, it is
@@ -3661,6 +3673,8 @@ def _redirected_search(arguments):
     redirected, whether the index is still loading, and to keep using smart_search."""
     checked = _smart_search_arguments(arguments)
     checked.pop("single_language_reason", None)
+    if _cold_index_building(checked["project_root"]):
+        return f"{tool_redirect.search_notice(True)}\n{_perform_smart_search(checked, '')}"
     job_id, _future = _submit_project_job("smart_search", checked)
     deadline = time.monotonic() + SMART_SEARCH_SYNC_WAIT_S
     payload = _smart_search_job_payload(job_id)
@@ -3669,8 +3683,8 @@ def _redirected_search(arguments):
         payload = _smart_search_job_payload(job_id)
     if payload["status"] != "done":
         raise RuntimeError(f"smart_search job {job_id} is {payload['status']}: {payload.get('error') or ''}"[:300])
-    indexing = str(payload.get("warning") or "").startswith("Indexing in progress")
-    return f"{tool_redirect.search_notice(indexing)}\n{_agent_search_answer(payload)}"
+    answer = _agent_search_answer(payload)
+    return f"{tool_redirect.search_notice('Indexing in progress' in answer.partition(chr(10) + 'code:')[0])}\n{answer}"
 
 
 def _redirected_text(handler):

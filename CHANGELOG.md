@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.25 - beta
+
+- A redirected search made while the first index of a folder is still being built no longer waits in the folder's queue
+  behind the build (22 s measured, past the hook's 15 s, so the agent got the native result with no notice): it is
+  answered at once by the keyword search of the disk, with the redirect notice and the index-loading warning.
+- The first search of a cold folder also gets the index-loading sentence in the notice (it was read from a job field that
+  the answer text does not carry; it is now read from the answer's own warning).
+
 ## 0.9.24 - beta
 
 - A redirected search now tells the agent what happened: the answer opens with a line saying the search was redirected to
