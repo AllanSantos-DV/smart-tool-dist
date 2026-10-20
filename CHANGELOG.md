@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.24 - beta
+
+- A redirected search now tells the agent what happened: the answer opens with a line saying the search was redirected to
+  `smart_search` (index, related code, dependency map), that the index of the project is still loading when the answer is
+  a keyword search of the disk (the next searches will have it ready), and to keep using `smart_search`. Before, the
+  answer carried no word of the redirect.
+- The deny text of a search that cannot be redirected no longer says that reading or searching inside one known file is
+  never blocked: no message the agent receives offers a way around the redirect (file by file, narrower scope).
+  `NoWayAroundTheRedirectTest` fails if any of those texts (deny, advice, redirect notice, cold-index and stale-index
+  warnings) suggests one.
+
 ## 0.9.23 - beta
 
 - The hook no longer blocks. A content search over a project folder (the Grep tool on a folder, `grep -r`, `rg`,

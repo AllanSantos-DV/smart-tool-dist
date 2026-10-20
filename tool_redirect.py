@@ -60,6 +60,15 @@ class Jobs:
             self._futures.pop(key, None)
 
 
+def search_notice(indexing):
+    """First line of a redirected search's answer: the agent made a native search, Smart Tool answered it. While the
+    index loads the answer is a keyword search of the disk; either way the agent is told to keep using smart_search."""
+    state = ("The index of this project is still loading, so this answer is a keyword search of the files on disk; "
+             "the next searches will have the index ready. " if indexing else "")
+    return ("Smart Tool: your search was redirected to smart_search, which searches the project index and returns "
+            f"related code with its dependency map. {state}Keep using smart_search for searches of the project.")
+
+
 def output_for(tool_name, response, text):
     """`updatedToolOutput` for a native tool: its own response with the Smart Tool text in the field the model reads,
     or None when the response has an unknown shape."""

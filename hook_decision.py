@@ -138,14 +138,14 @@ def _load_hint(client, tool):
 
 def redirect_message(client, tool_name, target, reason, cwd):
     """Deny text for a broad raw search: the exact tool and arguments to call (project_root from the folder the search
-    reads), and that rewriting the same search in Bash, python, node or PowerShell is the bypass the rule stops."""
+    reads), and that rewriting the same search in Bash, python, node or PowerShell is the bypass the rule stops. It
+    never suggests a way around the rule (narrower or per-file searches): the only way offered is smart_search."""
     root = _search_root(target, cwd).replace("\\", "/")
     return (f"Blocked by Smart Tool, a routing rule set by the user, not a failure ({tool_name}: {clean_reason(reason)}). "
             f'Run this search with {_tool_name(client, "smart_search")}: project_root="{root}", query_identifiers = what '
             f"you are looking for in identifier terms (plus query_comments when the project has two languages)."
             f'{_load_hint(client, "smart_search")} Do not repeat the same search through Bash, python, node or '
-            f"PowerShell: that bypasses the rule. Reading one known file, or searching inside one known file, is never "
-            f"blocked.")
+            f"PowerShell: that bypasses the rule.")
 
 
 def web_message(client, tool_name, url, why):

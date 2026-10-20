@@ -3656,8 +3656,9 @@ def _decide_within_budget(payload, client):
 
 def _redirected_search(arguments):
     """smart_search text for a redirected native search, waiting up to SMART_SEARCH_SYNC_WAIT_S; raises when the search
-    is rejected, fails or is still running then. The hook's single_language_reason only passes the language check: the
-    answer stands for the native call's output and does not repeat it as a warning."""
+    is rejected, fails or is still running then. The hook's single_language_reason only passes the language check, it is
+    not repeated as a warning. The answer opens with `tool_redirect.search_notice`: the agent is told its search was
+    redirected, whether the index is still loading, and to keep using smart_search."""
     checked = _smart_search_arguments(arguments)
     checked.pop("single_language_reason", None)
     job_id, _future = _submit_project_job("smart_search", checked)
@@ -3668,7 +3669,8 @@ def _redirected_search(arguments):
         payload = _smart_search_job_payload(job_id)
     if payload["status"] != "done":
         raise RuntimeError(f"smart_search job {job_id} is {payload['status']}: {payload.get('error') or ''}"[:300])
-    return _agent_search_answer(payload)
+    indexing = str(payload.get("warning") or "").startswith("Indexing in progress")
+    return f"{tool_redirect.search_notice(indexing)}\n{_agent_search_answer(payload)}"
 
 
 def _redirected_text(handler):
