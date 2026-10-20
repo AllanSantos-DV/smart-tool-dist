@@ -50,6 +50,7 @@ import index_views
 import index_inventory
 import usage_meter
 import document_text
+import dossier
 import embedding_cache
 import model_defaults
 import project_identity
@@ -73,6 +74,7 @@ import gateway
 import code_graph
 import hook_decision
 import endpoint_sync
+import tool_redirect
 
 RUN_DIR = paths.DATA_DIR
 REGISTRY_PATH = os.path.join(RUN_DIR, "daemon.json")
@@ -331,18 +333,15 @@ def _smart_search_job_payload(job_id):
     return payload
 
 # Claude Code defers MCP tools behind tool search; the tools the hook redirects to (and their job polling) load
-# upfront, so a blocked agent already has the replacement in its tool list.
+# upfront, so an agent denied by the hook already has the replacement in its tool list.
 ALWAYS_LOAD = {"anthropic/alwaysLoad": True}
 SERVER_INSTRUCTIONS = (
     "Smart Tool serves an indexed semantic search over the user's projects and a cheaper web reader. Use smart_search "
     "FIRST to explore code in the user's projects (where something is implemented, how a flow works, what already "
     "exists to reuse) before reading files one by one; Grep/Read are for an exact string or a file you already know. "
-    "Use web_search/web_fetch for any web research. The user also installed "
-    "a PreToolUse hook that blocks content searches over a project folder (grep -r, rg, git grep, Grep on a folder) "
-    "and native WebFetch/WebSearch. A call blocked by Smart Tool is a routing rule, not a failure: make the call the block "
-    "message names (smart_search with project_root and query_identifiers, web_fetch with url and prompt, web_search "
-    "with query). Never retry the same search or download through Bash, python, node, PowerShell, curl or wget: that "
-    "bypasses the rule the user set. Reading one known file, or searching inside one known file, is never blocked. "
+    "Use web_search/web_fetch for any web research. If a call is ever denied by Smart Tool, that is a routing rule the "
+    "user set, not a failure: make the call the message names, never the same search or download through Bash, python, "
+    "node, PowerShell, curl or wget. "
     "Before changing a function, project_manage action=graph with symbol lists its callers and tests; after editing, "
     "project_manage action=affected_tests lists the tests to run. When smart_search returns nothing, retry smart_search with "
     "other terms; do not switch to Grep, Read of folders or shell search. A helper agent (smart-scout, a cheap model) is "
@@ -423,6 +422,12 @@ TOOLS = [
                                         "test": {"type": "integer", "minimum": 1, "maximum": 20},
                                         "doc": {"type": "integer", "minimum": 1, "maximum": 20}}}],
                           "description": "Results per block: one number for all blocks or {code, test, doc}; each 1-20, total at most 20. Defaults to the project's search_limits, else 5"},
+                "mode": {"type": "string", "enum": ["search", "dossier"], "default": "search",
+                         "description": "dossier answers only with ids and a short excerpt, by keyword from disk and without an index, from docs/research, the backlog, CLAUDE.md and AGENTS.md; it takes query_identifiers or doc_query, timeout_ms and max_hits and ignores the other fields"},
+                "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 800,
+                               "description": "mode=dossier only: scan budget; past it the answer is marked degraded"},
+                "max_hits": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5,
+                             "description": "mode=dossier only: hits returned"},
             },
             "required": ["project_root"],
         },
@@ -1443,6 +1448,7 @@ def _optional_text(arguments, name):
 
 _SMART_SEARCH_FIELDS = {"project_root", "query_identifiers", "query_comments", "doc_query",
                         "single_language_reason", "group", "top_k"}
+_DOSSIER_FIELDS = {"project_root", "query_identifiers", "query_comments", "doc_query", "mode", "timeout_ms", "max_hits"}
 
 
 def _reject_kind(message):
@@ -1455,6 +1461,17 @@ def _reject_kind(message):
 
 
 def _handle_smart_search(arguments):
+    mode = arguments.get("mode", "search") if isinstance(arguments, dict) else "search"
+    if mode == "dossier":
+        unknown = set(arguments) - _DOSSIER_FIELDS
+        if unknown:
+            raise ValueError(f"Unknown fields in smart_search mode=dossier: {', '.join(sorted(unknown))}. "
+                             f"Accepted: {', '.join(sorted(_DOSSIER_FIELDS))}.")
+        _metric("search", group="dossier")
+        return dossier.answer(arguments)
+    if mode != "search":
+        raise ValueError("mode must be search or dossier.")
+    arguments = {key: value for key, value in arguments.items() if key != "mode"}
     try:
         arguments = _smart_search_arguments(arguments)
     except ValueError as exc:
@@ -3580,10 +3597,14 @@ HOOK_MAX_BODY_BYTES = 4 * 1024 * 1024
 # without one and says so in the log. Edit reviews (docs, copies) are the slow ones, so they have their own small
 # pool: at most HOOK_EDIT_SLOTS run at once and a further edit is let through unreviewed instead of queueing.
 HOOK_BUDGET_S = 4.0
+# A redirected shell search waits up to hook_decision.PRE_WAIT_S for its answer; any other Bash decision takes
+# milliseconds, so the larger budget only matters for those.
+HOOK_SHELL_BUDGET_S = 11.0
 HOOK_ANALYZER_TIMEOUT_S = 10
 HOOK_SLOW_LOG_S = 1.0
 HOOK_EDIT_SLOTS = 2
-_HOOK_POOL = concurrent.futures.ThreadPoolExecutor(4, thread_name_prefix="hook")
+# A redirected shell search holds its worker while it waits for the answer (hook_decision.PRE_WAIT_S).
+_HOOK_POOL = concurrent.futures.ThreadPoolExecutor(8, thread_name_prefix="hook")
 _HOOK_EDIT_POOL = concurrent.futures.ThreadPoolExecutor(HOOK_EDIT_SLOTS, thread_name_prefix="hook-edit")
 _HOOK_EDIT_SLOTS = threading.BoundedSemaphore(HOOK_EDIT_SLOTS)
 
@@ -3593,20 +3614,22 @@ def _hook_work(payload, client, slot):
     (the worker may outlive the request that gave up on it)."""
     code_graph.ANALYZER_TIMEOUT_S.set(HOOK_ANALYZER_TIMEOUT_S)
     try:
-        return hook_decision.decide(payload, client, _web_route)
+        return hook_decision.decide(payload, client, _web_route, _REDIRECTS)
     finally:
         if slot:
             slot.release()
 
 
 def _decide_within_budget(payload, client):
-    """The hook decision of `payload`, or None when it did not come within HOOK_BUDGET_S or no edit slot was free (the
+    """The hook decision of `payload`, or None when it did not come within HOOK_BUDGET_S (HOOK_SHELL_BUDGET_S for a shell
+    call) or no edit slot was free (the
     tool then runs as if the hook had nothing to say). Both cases, and any answer slower than HOOK_SLOW_LOG_S, leave one
     line in the daemon log with the tool, the file or command and the time."""
     tool = payload.get("tool_name") if isinstance(payload, dict) else None
     tool_input = payload.get("tool_input") if isinstance(payload, dict) else None
     target = str((tool_input or {}).get("file_path") or (tool_input or {}).get("command") or "")[:80]
     edit = tool in hook_decision.EDIT_TOOLS
+    budget = HOOK_SHELL_BUDGET_S if tool in tool_redirect.NO_OP else HOOK_BUDGET_S
     if edit and not _HOOK_EDIT_SLOTS.acquire(blocking=False):
         _log(f"PreToolUse hook skipped the review of {tool} {target}: {HOOK_EDIT_SLOTS} edit reviews already running, "
              "the edit goes through without one")
@@ -3620,9 +3643,9 @@ def _decide_within_budget(payload, client):
             _HOOK_EDIT_SLOTS.release()
         raise
     try:
-        output = future.result(timeout=HOOK_BUDGET_S)
+        output = future.result(timeout=budget)
     except concurrent.futures.TimeoutError:
-        _log(f"PreToolUse hook over {HOOK_BUDGET_S:g} s for {tool} {target}: answered without a decision, the work "
+        _log(f"PreToolUse hook over {budget:g} s for {tool} {target}: answered without a decision, the work "
              "finishes in the background")
         return None
     took = time.monotonic() - started
@@ -3631,9 +3654,51 @@ def _decide_within_budget(payload, client):
     return output
 
 
+def _redirected_search(arguments):
+    """smart_search text for a redirected native search, waiting up to SMART_SEARCH_SYNC_WAIT_S; raises when the search
+    is rejected, fails or is still running then. The hook's single_language_reason only passes the language check: the
+    answer stands for the native call's output and does not repeat it as a warning."""
+    checked = _smart_search_arguments(arguments)
+    checked.pop("single_language_reason", None)
+    job_id, _future = _submit_project_job("smart_search", checked)
+    deadline = time.monotonic() + SMART_SEARCH_SYNC_WAIT_S
+    payload = _smart_search_job_payload(job_id)
+    while payload["status"] == "pending" and time.monotonic() < deadline:
+        time.sleep(0.1)
+        payload = _smart_search_job_payload(job_id)
+    if payload["status"] != "done":
+        raise RuntimeError(f"smart_search job {job_id} is {payload['status']}: {payload.get('error') or ''}"[:300])
+    return _agent_search_answer(payload)
+
+
+def _redirected_text(handler):
+    """A tool handler whose answer is always text (web_search may answer with a JSON object)."""
+    def run(arguments):
+        result = handler(arguments)
+        return result if isinstance(result, str) else _to_json_sanitized(result)
+    return run
+
+
+_REDIRECTS = tool_redirect.Jobs({"smart_search": _redirected_search, "web_fetch": _redirected_text(_handle_web_fetch),
+                                 "web_search": _redirected_text(_handle_web_search)})
+
+
+def _posttool_hook(handler):
+    """PostToolUse output for the Claude Code hook: the Smart Tool answer of a redirected call as the call's output, or
+    `{}`. Always 200, like the PreToolUse route."""
+    client = (urllib.parse.parse_qs(urllib.parse.urlsplit(handler.path).query).get("client") or [""])[0]
+    try:
+        payload = json.loads(handler._read_body(HOOK_MAX_BODY_BYTES) or b"{}")
+        return hook_decision.after(payload, client or None, _REDIRECTS)
+    except Exception as exc:
+        _log(f"PostToolUse hook without an answer: {type(exc).__name__}: {exc}")
+        return {}
+
+
 def _pretool_hook(handler):
-    """PreToolUse decision for the hook (Claude Code `type: "http"`, Codex via the thin command). Always 200 with `{}`
-    or `deny`: a non-2xx answer would show as a hook error on every tool call, and `allow` would skip the user's
+    """PreToolUse decision for the hook (Claude Code `type: "http"`, Codex via the thin command). Always 200 with `{}`,
+    `updatedInput`, `deny`, or `allow` only for the command the hook wrote to print a Smart Tool answer in Codex: a
+    non-2xx answer would show as a hook error on every tool call, and any other `allow` would skip the user's
     permission prompt."""
     client = (urllib.parse.parse_qs(urllib.parse.urlsplit(handler.path).query).get("client") or [""])[0]
     try:
@@ -3649,7 +3714,10 @@ def _pretool_hook(handler):
     if output is None:
         return {}
     specific = output.get("hookSpecificOutput") or {}
-    if specific.get("permissionDecision", "deny") != "deny":
+    decision = specific.get("permissionDecision", "deny")
+    if decision == "allow" and tool_redirect.is_codex_command((specific.get("updatedInput") or {}).get("command")):
+        return output
+    if decision != "deny":
         return {}
     return output
 
@@ -3964,6 +4032,8 @@ class MCPHandler(BaseHTTPRequestHandler):
         self._write_json(200, result)
 
     def do_POST(self):
+        """Routes a POST: setup actions, the hook routes (/hooks/pretool, /hooks/posttool, /hooks/session-audit) and
+        the MCP endpoint (/mcp); anything else is 404."""
         if self._reject_foreign_origin():
             return
         if self.path == "/setup/projects":
@@ -3982,6 +4052,9 @@ class MCPHandler(BaseHTTPRequestHandler):
             return
         if urllib.parse.urlsplit(self.path).path == "/hooks/pretool":
             self._write_json(200, _pretool_hook(self))
+            return
+        if urllib.parse.urlsplit(self.path).path == "/hooks/posttool":
+            self._write_json(200, _posttool_hook(self))
             return
         if urllib.parse.urlsplit(self.path).path == "/hooks/session-audit":
             self._write_json(200, _session_audit_hook(self))

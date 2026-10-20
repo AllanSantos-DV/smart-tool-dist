@@ -15,12 +15,17 @@ AUDIT_MARKER = "session_audit.py"
 AUDIT_MATCHER = "startup|resume|clear"
 AUDIT_TIMEOUT_S = 10
 HTTP_PATH = "/hooks/pretool"
-HTTP_TIMEOUT_S = 6
+POST_PATH = "/hooks/posttool"
+# A redirected shell search waits for its answer in the PreToolUse (smart_tool_daemon.HOOK_SHELL_BUDGET_S).
+HTTP_TIMEOUT_S = 15
+# The PostToolUse waits for the Smart Tool answer of a redirected call (web_fetch reads a whole page).
+POST_TIMEOUT_S = 60
 HOME = os.path.expanduser("~")
 PREVIEW_TTL_S = 600
 CLIENTS = {
     "claude": {"label": "Claude Code", "names": {"claude-code"}, "files": [os.path.join(endpoint_sync.claude_dir(), "settings.json")],
-               "docs": "https://code.claude.com/docs/en/hooks", "event": "PreToolUse", "matcher": "Grep|Glob|Read|Bash|PowerShell|WebSearch|WebFetch|Edit|MultiEdit|Write|mcp__smart-tool__smart_search", "http": True},
+               "docs": "https://code.claude.com/docs/en/hooks", "event": "PreToolUse", "matcher": "Grep|Glob|Read|Bash|PowerShell|WebSearch|WebFetch|Edit|MultiEdit|Write|mcp__smart-tool__smart_search", "http": True,
+               "post_matcher": "Grep|Bash|PowerShell|WebFetch|WebSearch"},
     "codex": {"label": "Codex", "prefix": "codex", "files": [os.path.join(endpoint_sync.codex_dir(), "hooks.json"), os.path.join(endpoint_sync.codex_dir(), "config.toml")],
               "docs": "https://learn.chatgpt.com/docs/hooks", "event": "PreToolUse", "matcher": "Bash|apply_patch",
               "after_install": "Codex only runs new hooks after the user approves the definition in /hooks."},
@@ -39,7 +44,18 @@ def identify(client_info):
 
 
 def _our_hook(hook):
-    return isinstance(hook, dict) and (MARKER in str(hook.get("command", "")) or HTTP_PATH in str(hook.get("url", "")))
+    return isinstance(hook, dict) and (MARKER in str(hook.get("command", "")) or
+                                       any(path in str(hook.get("url", "")) for path in (HTTP_PATH, POST_PATH)))
+
+
+def _entries(client):
+    """{event: (matcher, handler)} of our hook entries for the client: the PreToolUse, plus the PostToolUse that returns
+    the Smart Tool answer of a redirected call in Claude Code."""
+    spec = CLIENTS[client]
+    entries = {spec["event"]: (spec["matcher"], _handler(client))}
+    if spec.get("post_matcher"):
+        entries["PostToolUse"] = (spec["post_matcher"], _handler(client, POST_PATH, POST_TIMEOUT_S))
+    return entries
 
 
 def _ours(group):
@@ -79,28 +95,35 @@ def inspect(client):
             return {"state": "current", "changes": []}
         data = json.loads(text)
         hooks = data.get("hooks") if isinstance(data, dict) else None
-        groups = hooks.get(spec["event"]) if isinstance(hooks, dict) else None
-        ours = [group for group in groups if _ours(group)] if isinstance(groups, list) else []
-        if not ours:
-            return {"state": "outdated", "changes": [f"Smart Tool's entry is not under {spec['event']}."]}
-        expected = _handler(client)
-        if any(group.get("matcher") == spec["matcher"] and expected in group["hooks"] for group in ours):
-            return {"state": "current", "changes": []}
-        group = ours[0]
         changes = []
-        covered = str(group.get("matcher") or "").split("|")
-        left_out = [tool for tool in spec["matcher"].split("|") if tool not in covered]
-        if left_out:
-            changes.append("It does not cover " + ", ".join(left_out) + ".")
-        found = next(hook for hook in group["hooks"] if _our_hook(hook))
-        if _target(found) != _target(expected):
-            changes.append(f"It calls {_target(found)} instead of {_target(expected)}.")
-        elif found != expected:
-            changes.append("Its timeout or type is older than the current one.")
-        if not changes:
-            changes.append("Its tool list is ordered or written differently from the current one.")
-        return {"state": "outdated", "changes": changes}
+        for event, (matcher, expected) in _entries(client).items():
+            groups = hooks.get(event) if isinstance(hooks, dict) else None
+            changes += _entry_changes(event, matcher, expected, groups)
+        return {"state": "outdated" if changes else "current", "changes": changes}
     return {"state": "missing", "changes": []}
+
+
+def _entry_changes(event, matcher, expected, groups):
+    """Sentences saying what an update rewrites in our entry under one event; empty when it is current."""
+    ours = [group for group in groups if _ours(group)] if isinstance(groups, list) else []
+    if not ours:
+        return [f"Smart Tool's entry is not under {event}."]
+    if any(group.get("matcher") == matcher and expected in group["hooks"] for group in ours):
+        return []
+    group = ours[0]
+    changes = []
+    covered = str(group.get("matcher") or "").split("|")
+    left_out = [tool for tool in matcher.split("|") if tool not in covered]
+    if left_out:
+        changes.append(f"Its {event} entry does not cover " + ", ".join(left_out) + ".")
+    found = next(hook for hook in group["hooks"] if _our_hook(hook))
+    if _target(found) != _target(expected):
+        changes.append(f"It calls {_target(found)} instead of {_target(expected)}.")
+    elif found != expected:
+        changes.append("Its timeout or type is older than the current one.")
+    if not changes:
+        changes.append("Its tool list is ordered or written differently from the current one.")
+    return changes
 
 
 def installed(client):
@@ -160,18 +183,20 @@ def _command(client):
     return f"{_shell_safe(sys.executable)} {_shell_safe(HOOK_SCRIPT)} --client {client}"
 
 
-def _handler(client):
+def _handler(client, route=HTTP_PATH, timeout=HTTP_TIMEOUT_S):
     """Claude Code posts the payload straight to the warm daemon (`type: "http"`, no process per tool call); other
-    clients run the thin command that forwards to the same route."""
+    clients run the thin command that forwards to the PreToolUse route."""
     if CLIENTS[client].get("http"):
         registry = daemon_launcher.read_registry()
         if not registry or not registry.get("url"):
             raise ValueError("Smart Tool daemon has no registered URL; start the daemon before installing the hook.")
-        return {"type": "http", "url": f"{registry['url']}{HTTP_PATH}?client={client}", "timeout": HTTP_TIMEOUT_S}
-    return {"type": "command", "command": _command(client), "timeout": HTTP_TIMEOUT_S}
+        return {"type": "http", "url": f"{registry['url']}{route}?client={client}", "timeout": timeout}
+    return {"type": "command", "command": _command(client), "timeout": timeout}
 
 
 def _plan(client_info):
+    """(client, spec, path, data, changes): the client's config with our entries already taken out, and changes
+    {event: (groups, entry)}, the entry to append to each event's groups."""
     client = identify(client_info)
     if client is None:
         raise ValueError(f"Unrecognized MCP client ({(client_info or {}).get('name') or 'no clientInfo'}); "
@@ -187,21 +212,26 @@ def _plan(client_info):
         data = {}
     if not isinstance(data, dict) or not isinstance(data.setdefault("hooks", {}), dict):
         raise ValueError(f"{path} does not have the expected format (object with 'hooks'); nothing was changed.")
-    groups = data["hooks"].setdefault(spec["event"], [])
-    if not isinstance(groups, list):
-        raise ValueError(f"{path}: hooks.{spec['event']} is not a list; nothing was changed.")
-    groups[:] = _without_ours(groups)
-    entry = {"matcher": spec["matcher"], "hooks": [_handler(client)]}
-    return client, spec, path, data, groups, entry
+    changes = {}
+    for event, (matcher, handler) in _entries(client).items():
+        groups = data["hooks"].setdefault(event, [])
+        if not isinstance(groups, list):
+            raise ValueError(f"{path}: hooks.{event} is not a list; nothing was changed.")
+        groups[:] = _without_ours(groups)
+        changes[event] = (groups, {"matcher": matcher, "hooks": [handler]})
+    return client, spec, path, data, changes
 
 
 def preview(client_info):
-    client, spec, path, _data, _groups, entry = _plan(client_info)
+    """The entries install would write for client_info's client ({event: entry} in `change`, None when current) and
+    the token `install` needs."""
+    client, spec, path, _data, changes = _plan(client_info)
     if installed(client):
         return {"client": client, "installed": True, "file": path, "change": None}
     token = secrets.token_urlsafe(12)
     _PREVIEWS[token] = {"client": client, "at": time.time()}
-    return {"client": client, "installed": False, "file": path, "event": spec["event"], "change": entry,
+    return {"client": client, "installed": False, "file": path,
+            "change": {event: entry for event, (_groups, entry) in changes.items()},
             "token": token, "expires_s": PREVIEW_TTL_S, "after_install": spec.get("after_install")}
 
 
@@ -209,12 +239,13 @@ def install(client_info, token, confirm):
     """Writes the redirect hook for client_info's client with a backup; needs the `preview` token of this session
     (10 min) and confirm=True. Returns {client, installed, changed, file, backup}."""
     planned = _PREVIEWS.pop(token or "", None)
-    client, spec, path, data, groups, entry = _plan(client_info)
+    client, spec, path, data, changes = _plan(client_info)
     if confirm is not True or not planned or planned["client"] != client or time.time() - planned["at"] > PREVIEW_TTL_S:
         raise ValueError("Installing requires the install_hook_preview token from this session (valid for 10 min) and confirm=true.")
     if installed(client):
         return {"client": client, "installed": True, "changed": False, "file": path}
-    groups.append(entry)
+    for groups, entry in changes.values():
+        groups.append(entry)
     backup = _write_checked(path, data, lambda: installed(client), "The hook")
     return {"client": client, "installed": True, "changed": True, "file": path, "backup": backup,
             "after_install": spec.get("after_install")}

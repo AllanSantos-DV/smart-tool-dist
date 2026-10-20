@@ -97,8 +97,9 @@ def _next_in_session(rows, index):
 
 
 def redirects(days=7):
-    """Redirects of native searches in the last days and what the same session did next: called smart_search
-    (followed), ran an allowed native call such as reading a file it found (native), was blocked again, or made no other
+    """Redirects of native searches in the last days and what came next in the same session: the Smart Tool answer
+    returned as the call's output (served), a smart_search call (followed), an allowed native call such as reading a
+    file it found (native), another redirect (blocked_again), or no other
     call within FOLLOW_WINDOW_S. Redirects logged without a session (before 0.9.15, or a client that sends none) count
     as unknown. tokens_per_call holds the measured context of each side, so the panel never claims a saving it did
     not measure."""
@@ -120,6 +121,8 @@ def redirects(days=7):
         after = _next_in_session(own, own.index(row))
         if after is None:
             outcomes["no_other_call"] += 1
+        elif after.get("decision") == "served":
+            outcomes["served"] += 1
         elif str(after.get("tool_name", "")).startswith("mcp__smart-tool__"):
             outcomes["followed"] += 1
         elif after.get("decision") == "redirect":

@@ -76,6 +76,10 @@ _CWD_WALK = re.compile(r"os\.getcwd\(\)|process\.cwd\(\)|Path\(\)|os\.walk\(\s*\
 _SINGLE_QUOTED = re.compile(r"'([^'\n]+)'")
 _DOUBLE_QUOTED = re.compile(r'"([^"\n]+)"')
 _PS_READ = re.compile(r"\b(?:get-content|gc|select-string|sls|cat|type)\b|\[io\.file\]", re.IGNORECASE)
+_MATCHED_LITERAL = re.compile(r"""(?:\bre\.(?:search|findall|finditer|match|fullmatch|compile)\(\s*r?|"""
+                              r"""\.(?:includes|indexOf|match|matchAll|search|test)\(\s*)(['"])(.+?)\1|"""
+                              r"""(['"])([^'"\n]+)\3\s+in\s+\w+""")
+QUERY_MAX_CHARS = 400
 _ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 _VARIABLE = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 
@@ -318,29 +322,35 @@ def _inner_script(tokens):
 
 
 def _search_args(verb, tokens):
-    """Path arguments of a grep-like command (the pattern and flag values dropped) and whether it is recursive."""
+    """(path arguments, recursive, patterns) of a grep-like command: the paths without the pattern and flag values,
+    whether it walks folders, and the text it looks for (`-e`/`-Pattern`/`/c:` values, else the first argument)."""
     if verb in ("select-string", "sls"):
         recursive = False
     else:
         recursive = verb in ALWAYS_RECURSIVE or any(
             t in RECURSIVE_FLAGS or (re.fullmatch(r"-[a-zA-Z]+", t) and ("r" in t or "R" in t)) for t in tokens)
-    args, paths, skip, path_next, pattern_given = [], [], False, False, False
+    args, paths, patterns, skip, path_next, pattern_given = [], [], [], None, False, False
     for token in tokens:
         low = token.lower()
         if skip:
-            skip = False
+            if skip == "pattern":
+                patterns.append(token)
+            skip = None
         elif path_next:
             paths.append(token)
             path_next = False
         elif token in PATTERN_FLAGS or low == "-pattern":
-            skip, pattern_given = True, True
+            skip, pattern_given = ("value" if token in ("-f", "--file") else "pattern"), True
         elif low in ("-path", "-literalpath"):
             path_next = True
         elif token in VALUE_FLAGS or low in ("-include", "-exclude", "-context", "-encoding"):
-            skip = True
+            skip = "value"
+        elif verb == "findstr" and low.startswith("/c:"):
+            patterns.append(token[3:])
+            pattern_given = True
         elif not token.startswith("-") and not (verb == "findstr" and token.startswith("/")):
             args.append(token)
-    return paths + (args if pattern_given else args[1:]), recursive
+    return paths + (args if pattern_given else args[1:]), recursive, patterns if pattern_given else args[:1]
 
 
 def _reader_files(verb, tokens):
@@ -484,13 +494,19 @@ def _shell(command, cwd, state, powershell, depth):
     return verdict
 
 
-def _xargs_command(tokens):
-    """The verb xargs runs, past its own flags."""
+def _xargs_tokens(tokens):
+    """The command xargs runs, past its own flags."""
     rest = tokens[1:]
     while rest and rest[0].startswith("-"):
         flag = rest.pop(0)
         if flag in ("-I", "-n", "-P", "-d", "-L", "-s", "-E", "-a", "--delimiter", "--max-args", "--max-procs") and rest:
             rest.pop(0)
+    return rest
+
+
+def _xargs_command(tokens):
+    """The verb xargs runs, past its own flags."""
+    rest = _xargs_tokens(tokens)
     return rest[0].lower() if rest else None
 
 
@@ -519,7 +535,7 @@ def _git(tokens, variables, base, cwd):
 
 def _search(verb, tokens, variables, base, cwd, verdict):
     """(redirect or None, verdict so far) for a grep-like command."""
-    args, recursive = _search_args(verb, tokens[1:])
+    args, recursive, _patterns = _search_args(verb, tokens[1:])
     if LISTING in args:
         return (("redirect", base, "content search over the files of a listing") if _folder(base, cwd) else None), verdict
     if not args:
@@ -543,6 +559,56 @@ def _search(verb, tokens, variables, base, cwd, verdict):
     if listed:
         verdict = ("allow", None, "Search inside listed files.")
     return None, verdict
+
+
+def _command_patterns(command, powershell, depth):
+    """Patterns of the grep-like commands, `git grep`, `xargs grep` and `find -exec grep` of a shell command, inner
+    scripts and substitutions included."""
+    text, inner = _substitutions(_strip_heredocs(command), powershell)
+    found = []
+    for script in inner if depth < MAX_NESTING else ():
+        found += _command_patterns(script, powershell, depth + 1)
+    for segment, _after_pipe in segments(text):
+        tokens = _unwrap(_split(segment, powershell), {})
+        if not tokens:
+            continue
+        verb = tokens[0].lower()
+        script = _inner_script(tokens) if depth < MAX_NESTING else None
+        if script:
+            found += _command_patterns(script, re.sub(r"\.exe$", "", verb) in ("powershell", "pwsh", "cmd"), depth + 1)
+            continue
+        if verb == "xargs":
+            tokens = _xargs_tokens(tokens)
+        elif verb == "find":
+            start = next((i + 1 for i, t in enumerate(tokens) if t in ("-exec", "-execdir", "-ok", "-okdir")), None)
+            tokens = tokens[start:] if start else []
+        elif verb == "git":
+            tokens = tokens[tokens.index("grep"):] if "grep" in tokens else []
+            tokens = tokens[:tokens.index("--")] if "--" in tokens else tokens
+        if tokens and tokens[0].lower() in SEARCHERS | {"grep"}:
+            found += _search_args(tokens[0].lower(), tokens[1:])[2]
+    return found
+
+
+def _regex_words(pattern):
+    """The literal words of a regular expression: classes, quantifiers, escapes and operators become spaces."""
+    text = re.sub(r"\[[^\]]*\]|\{\d*,?\d*\}|\\[a-zA-Z]|\(\?[:=!<]*", " ", pattern)
+    return re.sub(r"[\\^$.*+?()|{}\[\]]", " ", text)
+
+
+def search_terms(tool_name, tool_input):
+    """The smart_search query of a redirected call: the words of the Grep pattern, of the patterns a shell command
+    searches for, or else of the string literals an inline script matches against. Empty when none is found."""
+    if tool_name == "Grep":
+        patterns = [str(tool_input.get("pattern") or "")]
+    else:
+        command = str(tool_input.get("command") or "")
+        patterns = _command_patterns(command, tool_name == "PowerShell", 0) or [
+            match.group(2) or match.group(4) for match in _MATCHED_LITERAL.finditer(command)]
+    words = []
+    for pattern in patterns:
+        words += [word for word in _regex_words(pattern).split() if word not in words]
+    return " ".join(words)[:QUERY_MAX_CHARS]
 
 
 def decide(tool_name, tool_input, cwd):

@@ -15,7 +15,8 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import daemon_launcher
 
-TIMEOUT_S = 5
+# Above the daemon's budget for a redirected shell search (smart_tool_daemon.HOOK_SHELL_BUDGET_S), below the entry's 15 s.
+TIMEOUT_S = 14
 
 
 def _client():

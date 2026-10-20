@@ -1281,7 +1281,7 @@ function agentCard(item) {
       const plan = await post("/setup/integration", { client: item.client, action: "preview" });
       setMsg(msg, "", "");
       if (plan.installed) { await loadIntegration(); return; }
-      confirmFile.textContent = (item.hook_state === "outdated" ? "Replaces Smart Tool's entry with this one under " : "Adds this entry under ") + plan.event + " in " + plan.file;
+      confirmFile.textContent = (item.hook_state === "outdated" ? "Replaces Smart Tool's entries with these, by event, in " : "Adds these entries, by event, in ") + plan.file;
       preview.textContent = JSON.stringify(plan.change, null, 2);
       confirm.hidden = false;
       start.hidden = true;

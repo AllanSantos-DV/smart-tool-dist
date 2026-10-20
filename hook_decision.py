@@ -1,13 +1,15 @@
-"""Decisão do PreToolUse do Smart Tool, tomada dentro do daemon já aquecido.
+"""Decisão do PreToolUse e do PostToolUse do Smart Tool, tomada dentro do daemon já aquecido.
 
-O Claude Code chama a rota POST /hooks/pretool como hook `type: "http"` (sem processo por chamada); o Codex usa o
-hook de comando `hooks/pretool_router.py`, que só repassa o payload para a mesma rota.
+O Claude Code chama as rotas POST /hooks/pretool e /hooks/posttool como hooks `type: "http"` (sem processo por
+chamada); o Codex usa o hook de comando `hooks/pretool_router.py`, que só repassa o payload para /hooks/pretool.
 
-INVARIANTE: a saída só pode ser `{}` (neutra) ou `deny`. `permissionDecision: "allow"` pula a confirmação do usuário
-no Claude Code, e nenhuma decisão aqui é sobre periculosidade, só sobre custo de contexto. Diagnóstico vai em
+Uma busca nativa que a regra redireciona, e WebFetch/WebSearch, não são negadas: o Smart Tool responde no lugar e o
+texto volta como saída da própria chamada (`tool_redirect`). INVARIANTE: a saída do PreToolUse é `{}`, `updatedInput`
+sem `permissionDecision` (as regras de permissão do usuário julgam a chamada reescrita), `allow` só junto do comando
+que o próprio hook escreveu para imprimir a resposta no Codex (`tool_redirect.is_codex_command`), ou `deny` quando a
+chamada não dá para montar. Nenhuma decisão aqui é sobre periculosidade, só sobre custo de contexto. Diagnóstico vai em
 `systemMessage`, que não altera permissão.
 """
-import json
 import os
 
 import code_graph
@@ -20,9 +22,18 @@ import index_profile
 import index_scope
 import endpoint_sync
 import project_store
+import redirect_rule
 import router
+import tool_redirect
 
 WEB_TOOLS = ("WebSearch", "WebFetch")
+# A warm smart_search takes 4 to 13 s with the reranker, and in Codex a late answer is a lost one (no output
+# replacement): a redirected shell search waits this long within the daemon's HOOK_SHELL_BUDGET_S. The PostToolUse
+# entry has its own client timeout (60 s).
+PRE_WAIT_S = 10.0
+SEARCH_POST_WAIT_S = 15
+WEB_POST_WAIT_S = 50
+SINGLE_LANGUAGE_REASON = "redirected native search: its pattern is the only query there is"
 EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "apply_patch")
 MAX_DOC_FINDINGS = 5
 MAX_DUPLICATE_FINDINGS = 3
@@ -102,13 +113,16 @@ def agent_has_smart_tool(agent_type, cwd):
 
 
 def _search_root(target, cwd):
-    """project_root for smart_search: the registered project holding the folder the redirected search reads, else that
-    folder; the session folder when the rule names none."""
+    """project_root for smart_search: the registered project holding the folder the redirected search reads, else the
+    session folder when it holds that folder (a subfolder is not indexed on its own), else that folder."""
     target = os.path.abspath(target or cwd or ".")
     key = os.path.normcase(target) + os.sep
     roots = [p["root"] for p in project_store.all_projects()
              if key.startswith(os.path.normcase(os.path.abspath(p["root"])).rstrip(os.sep) + os.sep)]
-    return max(roots, key=len) if roots else target
+    if roots:
+        return max(roots, key=len)
+    session = os.path.abspath(cwd) if cwd else None
+    return session if session and key.startswith(os.path.normcase(session).rstrip(os.sep) + os.sep) else target
 
 
 def _tool_name(client, tool):
@@ -144,24 +158,6 @@ def web_message(client, tool_name, url, why):
         tool, fetchers = "web_search", "curl, a browser script or another search tool"
     return (f"Blocked by Smart Tool, a routing rule set by the user, not a failure. Call {call}: {why}"
             f"{_load_hint(client, tool)} Do not fetch it through {fetchers}: that bypasses the rule.")
-
-
-def smart_tool_in_session(cwd):
-    """Claude Code loads MCP servers from ~/.claude.json (user and per project) and the project's .mcp.json."""
-    with open(endpoint_sync.claude_json(), encoding="utf-8") as stream:
-        data = json.load(stream)
-    key = os.path.normcase(os.path.normpath(cwd or ""))
-    project = next((value for path, value in (data.get("projects") or {}).items()
-                    if os.path.normcase(os.path.normpath(path)) == key), {})
-    if SMART_TOOL_SERVER in (project.get("disabledMcpServers") or []):
-        return False
-    if SMART_TOOL_SERVER in (data.get("mcpServers") or {}) or SMART_TOOL_SERVER in (project.get("mcpServers") or {}):
-        return True
-    try:
-        with open(os.path.join(cwd or "", ".mcp.json"), encoding="utf-8") as stream:
-            return SMART_TOOL_SERVER in (json.load(stream).get("mcpServers") or {})
-    except (OSError, ValueError):
-        return False
 
 
 def advise(reason):
@@ -255,10 +251,12 @@ def _edit_review_scoped(payload, doc_mode, duplicate_mode):
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": message}}
 
 
-def decide(payload, client, web_route):
+def decide(payload, client, web_route, jobs):
     """Hook output for one PreToolUse payload: edits follow doc_mode (require | remind | off) and duplicate_mode
-    (warn | off), the other tools follow hook_mode (redirect | advise | off). A subagent whose tool list has no
-    Smart Tool MCP tool is never redirected: it has nothing to switch to."""
+    (warn | off), the other tools follow hook_mode (redirect | advise | off). In redirect mode the Smart Tool call that
+    replaces a redirected one starts in `jobs` under the call's tool_use_id (see `_redirect`); only a search whose
+    query cannot be built, or a client that sends no tool_use_id, is denied with the exact call to make, and never in a
+    subagent whose tool list has no Smart Tool MCP tool: it has nothing to switch to."""
     cfg = config.load_config()
     if isinstance(payload, dict) and payload.get("tool_name") in EDIT_TOOLS:
         doc_mode, duplicate_mode = config.doc_mode(cfg), config.duplicate_mode(cfg)
@@ -274,30 +272,96 @@ def decide(payload, client, web_route):
     mode = config.hook_mode(cfg)
     if mode == "off" or not isinstance(payload, dict):
         return {}
-    output = _route(payload, client, web_route, cfg)
-    reason = (output.get("hookSpecificOutput") or {}).get("permissionDecisionReason")
-    if reason and not agent_has_smart_tool(payload.get("agent_type") if payload.get("agent_id") else None,
-                                           payload.get("cwd")):
+    plan = _route(payload, client, web_route, cfg)
+    if "kind" not in plan:
+        return plan
+    if mode == "advise":
+        return advise(plan["message"])
+    if plan["kind"] and payload.get("tool_use_id"):
+        return _redirect(payload, client, plan, jobs)
+    if not agent_has_smart_tool(payload.get("agent_type") if payload.get("agent_id") else None, payload.get("cwd")):
         return {}
-    return advise(reason) if mode == "advise" and reason else output
+    return deny(plan["message"])
+
+
+def _redirect(payload, client, plan, jobs):
+    """Starts the Smart Tool call of a redirected one. A shell search whose answer comes within PRE_WAIT_S is rewritten
+    so the answer is all it prints: a no-op whose output the PostToolUse replaces in Claude Code, a `cat` of a file
+    holding the answer in Codex (which has no output replacement and applies a rewrite only with `allow`). Anything
+    else runs as the agent wrote it and, in Claude Code, `after` swaps its output for the answer."""
+    key, tool_name = payload["tool_use_id"], payload["tool_name"]
+    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    jobs.start(key, plan["kind"], plan["arguments"])
+    if tool_name not in tool_redirect.NO_OP:
+        return {}
+    text = _answer(jobs, key, PRE_WAIT_S, tool_name)
+    if text is None:
+        return {}
+    if client != "codex":
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                       "updatedInput": {**tool_input, "command": tool_redirect.NO_OP[tool_name]}}}
+    jobs.forget(key)
+    _log_served(client, payload)
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                   "permissionDecisionReason": "Smart Tool answered this search",
+                                   "updatedInput": {**tool_input, "command": tool_redirect.codex_command(text)}}}
+
+
+def _answer(jobs, key, timeout, tool_name):
+    """The Smart Tool text of key within timeout; None when it is not ready or the call failed (logged: the native call
+    then runs as written)."""
+    try:
+        text = jobs.wait(key, timeout)
+    except Exception as exc:
+        jobs.forget(key)
+        router._log_error(f"redirect of {tool_name} not served: {type(exc).__name__}: {exc}")
+        return None
+    return text if isinstance(text, str) and text.strip() else None
+
+
+def _log_served(client, payload):
+    router.CLIENT.set(client)
+    router.SESSION.set(payload.get("session_id"))
+    router._log_decision(payload.get("tool_name"), {}, "served", "Smart Tool answer returned as the call's output")
+
+
+def after(payload, client, jobs):
+    """PostToolUse output: the call's own response with the Smart Tool answer started for its tool_use_id in the field
+    the model reads (`updatedToolOutput`), or `{}` when there is none, it did not come in time or the response has an
+    unknown shape (the native output stays)."""
+    if not isinstance(payload, dict) or not payload.get("tool_use_id"):
+        return {}
+    key, tool_name = payload["tool_use_id"], payload.get("tool_name")
+    text = _answer(jobs, key, WEB_POST_WAIT_S if tool_name in WEB_TOOLS else SEARCH_POST_WAIT_S, tool_name)
+    jobs.forget(key)
+    output = tool_redirect.output_for(tool_name, payload.get("tool_response"), text) if text else None
+    if output is None:
+        return {}
+    _log_served(client, payload)
+    return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": output}}
 
 
 def _route(payload, client, web_route, cfg):
+    """`{}` or a `systemMessage` output when the call runs untouched, else the redirect plan: `kind` and `arguments`
+    of the Smart Tool call (kind None when no query can be built from the call) and `message`, the exact call for an
+    agent that has to make it itself."""
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
     cwd = payload.get("cwd")
     if tool_name in WEB_TOOLS:
-        if not cfg.get("router_model"):
-            return {}
-        try:
-            present = smart_tool_in_session(cwd)
-        except (OSError, ValueError):
-            present = False
-        if not present:
+        if not cfg.get("router_model") or tool_input.get("allowed_domains") or tool_input.get("blocked_domains"):
             return {}
         url = str(tool_input.get("url") or "")
         decision = web_route(tool_name, url)
-        return deny(web_message(client, tool_name, url, clean_reason(decision.get("reason")))) if decision.get("redirect") else {}
+        if not decision.get("redirect"):
+            return {}
+        if tool_name == "WebFetch":
+            kind, arguments = "web_fetch", {"url": url, "prompt": str(tool_input.get("prompt") or "")}
+        else:
+            query = str(tool_input.get("query") or "")
+            kind, arguments = "web_search", {"query": query, "query_en": query}
+        return {"kind": kind if all(arguments.values()) else None, "arguments": arguments,
+                "message": web_message(client, tool_name, url, clean_reason(decision.get("reason")))}
     router.CLIENT.set(client)
     router.SESSION.set(payload.get("session_id"))
     try:
@@ -308,6 +372,10 @@ def _route(payload, client, web_route, cfg):
         except Exception:
             pass
         return {"systemMessage": f"Smart Tool unavailable, routing skipped: {type(exc).__name__}"}
-    if decision == "redirect":
-        return deny(redirect_message(client, tool_name, target, reason, cwd))
-    return {}
+    if decision != "redirect" or (tool_name in tool_redirect.NO_OP and tool_input.get("run_in_background")):
+        return {}
+    terms = redirect_rule.search_terms(tool_name, tool_input)
+    arguments = {"project_root": _search_root(target, cwd), "query_identifiers": terms,
+                 "single_language_reason": SINGLE_LANGUAGE_REASON}
+    return {"kind": "smart_search" if terms else None, "arguments": arguments,
+            "message": redirect_message(client, tool_name, target, reason, cwd)}

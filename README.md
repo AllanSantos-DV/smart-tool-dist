@@ -15,7 +15,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.22 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.23 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -122,8 +122,14 @@ Redirects) and Maintenance (Setup audit, Startup).
    `claude mcp remove playwright -s user` / `codex mcp remove playwright`.
 
    The hook behaviors:
-   - **Redirect** (default): the native tool is denied with the reason and the Smart Tool tool to use. The decision
-     is a fixed rule, under a millisecond and the same every time: a content search over a project folder (`grep -r`,
+   - **Redirect** (default): the call is not denied. Smart Tool answers it and the answer comes back as the output
+     of the call the agent made: `smart_search` for a search, `web_fetch` for WebFetch, `web_search` for WebSearch
+     (without `allowed_domains`/`blocked_domains`). In Claude Code a PostToolUse entry swaps the output (WebFetch and
+     WebSearch still run natively, their result is replaced); a shell search whose answer is ready within 10 s runs as a
+     no-op instead, so a grep with no match does not end in exit 1. In Codex the shell search is rewritten to print the
+     answer from a file. When the Smart Tool call fails or is late, the native call and its output stay as they are; a
+     deny, with the exact call to make, is left only for a search whose query cannot be read from the command. The
+     decision is a fixed rule, under a millisecond and the same every time: a content search over a project folder (`grep -r`,
      `rg`, `git grep`, the Grep tool on a folder) or over more than 20 listed files goes to `smart_search`, in Bash and
      PowerShell alike and also when it is wrapped (`bash -c`, `powershell -Command`, `timeout`, a subshell), looped
      (`for f in src/*.py`), fed by a listing (`find -exec grep`, `xargs`, `Get-ChildItem | Select-String`) or written
@@ -131,7 +137,7 @@ Redirects) and Maintenance (Setup audit, Startup).
      listings, Glob and commands that change files run. The setup screen counts the redirects and what each session
      did next. With **Block patterns proposed by a
      model** on (default), the scope model reviews, in the background, bulk reads the rule could not measure and
-     proposes regex patterns, each checked against the logged calls; a pattern blocks only after you accept it.
+     proposes regex patterns, each checked against the logged calls; a pattern redirects only after you accept it.
    - **Advise only**: the native tool runs; the agent receives the same advice next to the result and decides.
    - **Off**: no routing.
 

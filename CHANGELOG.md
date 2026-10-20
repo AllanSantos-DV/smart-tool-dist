@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.9.23 - beta
+
+- The hook no longer blocks. A content search over a project folder (the Grep tool on a folder, `grep -r`, `rg`,
+  `git grep`, `findstr /s`, `Select-String` over a listing, an inline python/node script that walks a folder) and
+  native WebFetch/WebSearch are answered by Smart Tool, and the answer comes back as the output of the call the agent
+  made, with no block message: before, the deny pushed agents to retry the same search through Bash and the Smart Tool
+  went unused. The query is the search pattern of the call (regex syntax dropped); the project is the registered one
+  holding the folder, else the session folder.
+  - Claude Code: a new PostToolUse entry (`/hooks/posttool`, 60 s) puts the answer in the tool's own output, in the
+    shape that tool returns. A shell search whose answer is ready within 10 s runs as a no-op (`true`, `$null` in
+    PowerShell), so a grep with no match no longer ends in exit 1; a later answer replaces the native output when the
+    command succeeds. WebFetch and WebSearch still run natively and their result is replaced (measured on Claude Code
+    2.1.300: a PreToolUse cannot skip them, and a WebFetch pointed at the daemon fails because http turns into https).
+    WebSearch with `allowed_domains`/`blocked_domains` is left alone.
+  - Codex: the shell search is rewritten to `cat` a file holding the answer, approved with `allow` (Codex applies a
+    rewrite only with it); the daemon lets `allow` through for that command and nothing else.
+  - A Smart Tool call that fails or does not answer in time leaves the native call and its output as they were. A deny,
+    with the exact call to make, remains only for a search whose pattern cannot be read from the command, and for a
+    client that sends no `tool_use_id`.
+  - A redirected shell search waits up to 10 s for its answer in the PreToolUse (a warm `smart_search` takes 4 to
+    13 s with the reranker), so the PreToolUse entry's timeout goes back from 6 s to 15 s (Codex's thin command 5 s
+    to 14 s); every other decision keeps its 4 s budget in the daemon.
+  - The setup screen counts a redirect answered this way as `served`. The hook entry of an older version shows as
+    outdated until you accept the update (preview and backup first).
+- `smart_search` with `mode=dossier` answers a narrow keyword query over `docs/research`, the backlog, `CLAUDE.md` and
+  `AGENTS.md` with ids, short excerpts and a time budget, without an index.
+
 ## 0.9.22 - beta
 
 - The review of an Edit or Write (docstring reminder, copied-function check) is about twice as fast on a warm daemon

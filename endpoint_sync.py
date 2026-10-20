@@ -15,6 +15,7 @@ import urllib.parse
 
 SERVER = "smart-tool"
 HOOK_PATH = "/hooks/pretool"
+POST_HOOK_PATH = "/hooks/posttool"
 _CODEX_URL_RE = re.compile(r'(\[mcp_servers\.smart-tool\][^\[]*?\burl\s*=\s*")http://127\.0\.0\.1:\d+(/mcp")')
 
 
@@ -58,14 +59,17 @@ def _claude_mcp(text, base):
 
 
 def _claude_hook(text, base):
+    """settings.json text with our PreToolUse and PostToolUse hook URLs moved to base, or None when none changed."""
     data = json.loads(text)
     changed = False
-    groups = ((data.get("hooks") or {}).get("PreToolUse") or []) if isinstance(data, dict) else []
-    for group in groups if isinstance(groups, list) else []:
-        for hook in (group.get("hooks") or []) if isinstance(group, dict) else []:
-            if isinstance(hook, dict) and HOOK_PATH in str(hook.get("url", "")):
-                new = _rebase(hook["url"], base)
-                changed, hook["url"] = changed or new != hook["url"], new
+    hooks = (data.get("hooks") or {}) if isinstance(data, dict) else {}
+    for event, path in (("PreToolUse", HOOK_PATH), ("PostToolUse", POST_HOOK_PATH)):
+        groups = (hooks.get(event) or []) if isinstance(hooks, dict) else []
+        for group in groups if isinstance(groups, list) else []:
+            for hook in (group.get("hooks") or []) if isinstance(group, dict) else []:
+                if isinstance(hook, dict) and path in str(hook.get("url", "")):
+                    new = _rebase(hook["url"], base)
+                    changed, hook["url"] = changed or new != hook["url"], new
     return json.dumps(data, indent=2, ensure_ascii=False) if changed else None
 
 
