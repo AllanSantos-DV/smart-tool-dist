@@ -1873,7 +1873,8 @@ def _project_action_locked(arguments):
                 "storage_dir": indexer.INDEX_DIR,
                 "gateway": dict(_GATEWAY_STATUS),
                 "monitor": {"debounce_s": project_monitor.DEBOUNCE_S,
-                            "reconcile_s": project_monitor.RECONCILE_S}}
+                            "reconcile_s": project_monitor.RECONCILE_S,
+                            "reconcile_watched_s": project_monitor.RECONCILE_WATCHED_S}}
     if action == "register":
         root = arguments.get("project_root")
         if not isinstance(root, str) or not os.path.isabs(root):

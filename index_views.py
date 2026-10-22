@@ -97,6 +97,11 @@ def storage_key(root):
     return key + '.v-' + view['view_id'] if view['git'] else key
 
 
+def stamp_changed(view):
+    """Whether the Git files that define `view` moved since it was described (a stat of five files, no process)."""
+    return bool(view.get('git')) and _stamp(view) != view.get('stamp')
+
+
 def assert_current(view):
     if view.get('git') and _stamp(view) != view.get('stamp'):
         _CACHE.pop(view['root'], None)

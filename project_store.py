@@ -13,18 +13,25 @@ import secret_store
 
 DB_PATH = os.path.join(paths.DATA_DIR, "projects.sqlite3")
 _LOCK = threading.RLock()
+_SCHEMA_READY = set()
 MAX_JOBS = 500
 
 
 @contextmanager
 def _db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    if not os.path.isfile(DB_PATH):
+        _SCHEMA_READY.discard(DB_PATH)
     db = sqlite3.connect(DB_PATH, timeout=10)
     try:
         db.execute("PRAGMA secure_delete=ON")
-        db.execute("CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, root TEXT NOT NULL, data TEXT NOT NULL, updated_at REAL NOT NULL)")
-        db.execute("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, project_id TEXT, status TEXT NOT NULL, updated_at REAL NOT NULL, payload TEXT NOT NULL)")
-        db.execute("CREATE INDEX IF NOT EXISTS jobs_project ON jobs(project_id,updated_at)")
+        if DB_PATH not in _SCHEMA_READY:
+            db.execute("CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, root TEXT NOT NULL, data TEXT NOT NULL, updated_at REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, project_id TEXT, status TEXT NOT NULL, updated_at REAL NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE INDEX IF NOT EXISTS jobs_project ON jobs(project_id,updated_at)")
+            db.execute("CREATE INDEX IF NOT EXISTS jobs_updated ON jobs(updated_at)")
+            db.execute("CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status,project_id)")
+            _SCHEMA_READY.add(DB_PATH)
         with db:
             yield db
     finally:
@@ -102,17 +109,62 @@ def record_changes(project_id, paths=(), full=False, scope=False):
         project = get(project_id)
         if not project:
             return
-        merged = set(project.get('dirty_paths', [])) | set(paths)
-        full = full or project.get('needs_full_check', False) or len(merged) > 1000
-        update(project_id, dirty_paths=[] if full else sorted(merged), needs_full_check=full,
-               scope_dirty=scope or project.get('scope_dirty', False))
+        update(project_id, **_changes_fields(project, paths, full, scope))
+
+
+def _changes_fields(project, paths, full, scope):
+    """`needs_full_check` / `scope_dirty` remember the `dirty_seq` at which they were raised (`*_seq`), so a job that ran
+    after that sequence can clear them even while events keep arriving."""
+    merged = set(project.get('dirty_paths', [])) | set(paths)
+    full = full or project.get('needs_full_check', False)
+    scope = scope or project.get('scope_dirty', False)
+    seq = project.get('dirty_seq', 0)
+    # Past 1000 paths the list stops helping: the update compares stat of the whole scope instead.
+    return {"dirty_paths": [] if len(merged) > 1000 else sorted(merged), "needs_full_check": full,
+            "scope_dirty": scope,
+            "full_check_seq": seq if full and not project.get('needs_full_check') else project.get('full_check_seq', 0),
+            "scope_dirty_seq": seq if scope and not project.get('scope_dirty') else project.get('scope_dirty_seq', 0)}
+
+
+def note_changes(project_id, reason, paths=(), full=False, scope=False):
+    """mark_dirty + record_changes in one read and one write of the registry; a burst of file events costs one commit per
+    batch instead of two reads and two commits."""
+    with _LOCK, _db() as db:
+        row = db.execute("SELECT data FROM projects WHERE id=?", (project_id,)).fetchone()
+        if not row:
+            return None
+        data = json.loads(row[0])
+        data["dirty_seq"] = data.get("dirty_seq", 0) + 1
+        data.update(status="dirty" if not data.get("paused") else "paused", dirty_reason=reason,
+                    last_event=time.time(), **_changes_fields(data, paths, full, scope))
+        db.execute("UPDATE projects SET data=?,updated_at=? WHERE id=?",
+                   (json.dumps(data, ensure_ascii=False), time.time(), project_id))
+    return data
 
 
 def confirm_changes(project_id, sequence):
+    """Clears what the finished job covered: the path list only if nothing changed since the job captured `sequence`;
+    the full-check and scope flags if they were raised at or before it (the job did both from that state)."""
     with _LOCK:
         project = get(project_id)
-        if project and project.get('dirty_seq', 0) == sequence:
-            update(project_id, dirty_paths=[], needs_full_check=False, scope_dirty=False)
+        if not project:
+            return
+        fields = {}
+        if project.get('dirty_seq', 0) == sequence:
+            fields.update(dirty_paths=[], needs_full_check=False, scope_dirty=False)
+        else:
+            if project.get('needs_full_check') and project.get('full_check_seq', 0) <= sequence:
+                fields["needs_full_check"] = False
+            if project.get('scope_dirty') and project.get('scope_dirty_seq', 0) <= sequence:
+                fields["scope_dirty"] = False
+        if fields:
+            update(project_id, **fields)
+
+
+def projects_with_pending_job():
+    """Ids of the projects with a job still pending, from the `status` column: no job payload is decrypted."""
+    with _LOCK, _db() as db:
+        return {row[0] for row in db.execute("SELECT DISTINCT project_id FROM jobs WHERE status='pending'")}
 
 
 def save_job(job_id, payload):
@@ -123,8 +175,10 @@ def save_job(job_id, payload):
     with _LOCK, _db() as db:
         db.execute("INSERT OR REPLACE INTO jobs VALUES(?,?,?,?,?)",
                    (job_id, payload.get("project_id"), payload.get("status", "pending"), time.time(), protected))
-        db.execute("DELETE FROM jobs WHERE status!='pending' AND id NOT IN "
-                   "(SELECT id FROM jobs ORDER BY updated_at DESC LIMIT ?)", (MAX_JOBS,))
+        # The threshold comes from the updated_at index alone: ordering the payload rows read the whole jobs table
+        # (1.7 MB) on every save, several saves per job.
+        db.execute("DELETE FROM jobs WHERE status!='pending' AND updated_at < "
+                   "(SELECT updated_at FROM jobs ORDER BY updated_at DESC LIMIT 1 OFFSET ?)", (MAX_JOBS - 1,))
 
 
 def _decode(payload):

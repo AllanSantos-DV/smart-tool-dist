@@ -41,6 +41,19 @@ _ALWAYS_EXCLUDE_FILES = {
 
 _ROOT_DOC_NAMES = ("AGENTS.md", "CLAUDE.md", "README.md", "README")
 
+# Runtime folders a tool keeps inside its own config home (conversation logs, plugin caches, snapshots): never project
+# source, written all day by the tool itself. Keyed by the root's folder name; excluded mechanically, whatever the
+# scope decision says, so a registered `~/.claude` never indexes or re-scans them.
+_TOOL_STATE_DIRS = {
+    ".claude": ("backups", "cache", "daemon", "debug", "downloads", "file-history", "ide", "paste-cache", "plugins",
+                "projects", "session-env", "sessions", "shell-snapshots", "state", "statsig", "telemetry", "todos"),
+}
+
+
+def tool_state_excludes(root):
+    """Names of the tool-runtime folders under `root` (empty unless `root` is a known tool config home)."""
+    return _TOOL_STATE_DIRS.get(os.path.basename(os.path.normpath(root)).casefold(), ())
+
 
 def always_excluded(name):
     """Directory name in _ALWAYS_EXCLUDE, entries may be globs (e.g. *.egg-info)."""
@@ -173,11 +186,14 @@ def save_scope(root, scope):
         {**scope, "root": project_identity.canonical_root(root)}, indent=2, ensure_ascii=False))
 
 
-def _structure(root, max_dirs=1500):
+def _structure(root, max_dirs=1500, keep=None):
+    """Relative folders of `root` (at most `max_dirs`). `keep(rel)` prunes the walk: a folder it rejects is neither
+    listed nor entered."""
     found = []
     for current, dirs, _files in os.walk(root):
         dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not always_excluded(d)
-                         and _within_root(root, os.path.join(current, d)))
+                         and _within_root(root, os.path.join(current, d))
+                         and (keep is None or keep(os.path.relpath(os.path.join(current, d), root).replace(os.sep, "/"))))
         for name in dirs:
             found.append(os.path.relpath(os.path.join(current, name), root).replace(os.sep, "/"))
             if len(found) >= max_dirs:
@@ -200,8 +216,10 @@ def needs_rescan(root, cached_scope):
         return True
     known = set(cached_scope.get("top_level_dirs", []))
     current = set(_top_level_dirs(root))
+    # A folder the scope excludes (a cache that grows all day) is not a structure change: the walk skips it.
     return (not current.issubset(known) or
-            not set(_structure(root)).issubset(set(cached_scope.get("structure", []))))
+            not set(_structure(root, keep=scope_filter(cached_scope, root))).issubset(
+                set(cached_scope.get("structure", []))))
 
 
 def _read_root_docs(root, max_chars=4000):
@@ -315,7 +333,7 @@ def decide_scope(root, router_model, force=False, deadline=None, cancel_check=No
         return cached
 
     top_level_dirs = _top_level_dirs(root)
-    ambiguous_dirs = [d for d in top_level_dirs if not always_excluded(d)]
+    ambiguous_dirs = [d for d in top_level_dirs if not always_excluded(d) and d not in tool_state_excludes(root)]
     root_files = _root_level_files(root, _exclude_matcher(_ALWAYS_EXCLUDE_FILES))
     doc_context = _read_root_docs(root)
 
@@ -374,14 +392,17 @@ def decide_scope(root, router_model, force=False, deadline=None, cancel_check=No
 
     if decision is None:
         raise RuntimeError("The model did not define a valid scope. Check the model or set the scope manually.")
+    final = {"include": (decision or {}).get("include") or [],
+             "exclude": [*((decision or {}).get("exclude") or []), *tool_state_excludes(root)],
+             "user_exclude": (cached or {}).get("user_exclude", [])}
     scope = {
-        "include": (decision or {}).get("include") or [],
-        "exclude": (decision or {}).get("exclude") or [],
+        "include": final["include"],
+        "exclude": final["exclude"],
         "top_level_dirs": top_level_dirs,
         "scope_version": SCOPE_VERSION,
-        "structure": _structure(root),
+        "structure": _structure(root, keep=scope_filter(final, root)),
         "docs_digest": _docs_digest(root),
-        "user_exclude": (cached or {}).get("user_exclude", []),
+        "user_exclude": final["user_exclude"],
         "decided_at": time.time(),
     }
     save_scope(root, scope)
@@ -441,20 +462,32 @@ def _exclude_matcher(exclude):
     return matches
 
 
-def in_scope(scope, rel_path):
-    """Whether resolve_included_files would list rel_path: under an include base, outside the exclusions and outside
-    hidden folders."""
-    rel_path = rel_path.replace("\\", "/")
+def scope_filter(scope, root=None):
+    """Predicate `keep(rel_path)`: whether resolve_included_files would list rel_path (a file) or walk it (a folder) —
+    under an include base, outside the exclusions, outside hidden folders. Built once so a burst of file events does not
+    rebuild the matcher per path; `root` adds the tool-runtime folders of a known config home."""
     include = scope.get("include") or [""]
     matcher = _exclude_matcher(set(scope.get("exclude") or []) | set(scope.get("user_exclude") or []) |
-                               _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
-    parts = rel_path.split("/")
-    if matcher(rel_path) or any(part.startswith(".") for part in parts[:-1]):
-        return False
-    if any(base in ("", ".") for base in include):
-        return True
-    return len(parts) == 1 or any(rel_path == base.strip("/") or rel_path.startswith(base.strip("/") + "/")
-                                  for base in include)
+                               set(tool_state_excludes(root) if root else ()) | _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
+    bases = [base.strip("/") for base in include]
+    whole = any(base in ("", ".") for base in include)
+
+    def keep(rel_path):
+        rel_path = rel_path.replace("\\", "/")
+        parts = rel_path.split("/")
+        if matcher(rel_path) or any(part.startswith(".") for part in parts[:-1]):
+            return False
+        if whole or len(parts) == 1:
+            return True
+        return any(rel_path == base or rel_path.startswith(base + "/") for base in bases)
+
+    return keep
+
+
+def in_scope(scope, rel_path, root=None):
+    """Whether resolve_included_files would list rel_path: under an include base, outside the exclusions and outside
+    hidden folders."""
+    return scope_filter(scope, root)(rel_path)
 
 
 def resolve_included_files(root, scope, cancel_check=None):
@@ -462,7 +495,7 @@ def resolve_included_files(root, scope, cancel_check=None):
         raise ValueError("Invalid scope; request a new project analysis.")
     include = scope.get("include") or [""]
     matcher = _exclude_matcher(set(scope.get("exclude") or []) | set(scope.get("user_exclude") or []) |
-                               _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
+                               set(tool_state_excludes(root)) | _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
     files = []
     def walk_error(error):
         raise OSError("Could not list a folder in the scope; try again when it is accessible.") from error

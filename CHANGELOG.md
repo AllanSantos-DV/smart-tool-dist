@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.9.26 - beta
+
+- The daemon no longer re-reads and re-hashes every watched folder in a loop. Measured on the owner's machine: one
+  daemon process read 181 GB and wrote 29.7 GB in 15 h (3.6 MB/s read, 2.2 MB/s write while idle), which kept the disk
+  busy and made Defender scan the files again and again. Causes, all fixed:
+  - A file-event buffer overflow, or more than 1 000 changed paths, raised a full check that opened and hashed every
+    file of the scope; the flag was cleared only when no event arrived during the job, so under constant events (the
+    `~/.claude` session logs, a state folder) every job hashed everything again, and the stuck scope flag also asked the
+    scope model to decide the scope again on every job. An overflow now asks for a stat comparison (mtime and size) of
+    the scope, and a finished job clears the full-check and scope flags raised before it started.
+  - An event under a folder the scope leaves out (`plugins/cache`, `projects/*.jsonl` of `~/.claude`) marked the project
+    dirty and queued an index job. Events are now filtered by the saved scope, which is reloaded only when its file
+    changes.
+  - A folder growing inside an excluded one counted as a structure change and called the scope model again. The
+    structure kept in the scope and the one compared against it skip excluded folders.
+  - The runtime folders of a `.claude` home (`plugins`, `projects`, `sessions`, `shell-snapshots`, `file-history`,
+    `cache`, `debug`, `telemetry`, ...) are excluded mechanically, whatever the scope says.
+  - The monitor decrypted up to 50 job payloads per watched folder every second just to learn whether a job was
+    pending; it now asks the `status` column once per tick. A Git folder is identified again (four git processes)
+    only when `HEAD`, the index or the refs moved, not every 5 s. With a live watcher the stat reconciliation runs
+    every 15 min instead of 3; the tick sleeps 5 s instead of 1 s while nothing is pending.
+  - A burst of events cost two reads and two writes of the project registry per batch; it is one of each, and the
+    registry schema is created once per process instead of per connection.
+  - Every save of a job (several per index job) ordered the whole `jobs` table, payloads included, to prune the history:
+    1.7 MB read per save. The pruning now takes its threshold from an `updated_at` index (50 saves: 85.7 MB read before,
+    5.0 MB after, `tests/save_job_io_probe.py`).
+  - The pending-job query of the monitor tick scanned the whole `jobs` table (2.7 MB) every second; it now reads the
+    covering index `jobs_status`.
+  - A folder that changes all the time (the orchestrator's state folder queued an index job every 8 s) is indexed by the
+    monitor at most once a minute; the changes accumulate and one job covers them.
+  - Measured with `tests/monitor_io_probe.py` on a copy of the real registry (14 watched folders, 100 event batches
+    under excluded folders with a buffer overflow every 10th): 149 MB read and 45.7 MB written before, 28 MB read and
+    5.4 MB written after; folders left with a pending full check 14 before, 0 after.
 ## 0.9.25 - beta
 
 - A redirected search made while the first index of a folder is still being built no longer waits in the folder's queue
