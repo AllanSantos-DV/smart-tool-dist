@@ -892,11 +892,11 @@ def _cold_index(root, cfg, problem):
 
 
 def _cold_overlay(root, queries):
-    """`(overlay, warning)` for a project with no index: the in-scope files (the saved scope, else the whole folder minus
-    the always-excluded names) holding a query term, read from disk and ranked by keyword, plus the notice that the
-    index is being built. The scan stops after `COLD_SCAN_BUDGET_S`."""
+    """`(overlay, warning)` for a project with no index: the in-scope files (the saved scope, else only the loose files
+    at the root: no folder is read before it is classified) holding a query term, read from disk and ranked by
+    keyword, plus the notice that the index is being built. The scan stops after `COLD_SCAN_BUDGET_S`."""
     scope = index_scope.load_scope(root)
-    files = index_scope.resolve_included_files(root, scope if index_scope.valid_scope(scope) else {"include": [""]})
+    files = index_scope.resolve_included_files(root, scope if index_scope.valid_scope(scope) else {"include": []})
     chunks, scanned = indexer.keyword_chunks(root, files, queries, COLD_SCAN_BUDGET_S)
     reached = f"{scanned} of {len(files)} files" if scanned < len(files) else f"all {len(files)} files"
     warning = ("Indexing in progress: this folder has no index yet, so the results are keyword matches read straight "
@@ -1958,7 +1958,10 @@ def _project_action_locked(arguments):
         manual = arguments.get("manual", True)
         if type(manual) is not bool:
             raise ValueError("manual must be true or false.")
-        scope = dict(index_scope.load_scope(project["root"]) or {"include": ["."], "exclude": []})
+        scope = dict(index_scope.load_scope(project["root"]) or {"include": [], "exclude": []})
+        if "include" not in arguments and not scope.get("include"):
+            raise ValueError("include is required: list the folders with the project's code, tests and docs. "
+                             "Nothing is indexed from a folder that is not listed.")
         for field in ("include", "exclude", "user_exclude"):
             values = arguments.get(field, scope.get(field, []))
             if not isinstance(values, list) or len(values) > 200 or any(
@@ -1969,6 +1972,10 @@ def _project_action_locked(arguments):
                     raise ValueError("The scope must stay inside the project folder.")
                 if field == "include" and not project_identity.within_root(project["root"], os.path.join(project["root"], value)):
                     raise ValueError("Include points outside the folder.")
+                if field == "include" and index_scope.is_hidden(value):
+                    raise ValueError(f"Include '{value}' is inside a hidden folder: hidden folders are never indexed.")
+            if field == "include":
+                values = index_scope.normalize_include(values)[0]
             scope[field] = values
         scope.update(manual=manual, scope_version=index_scope.SCOPE_VERSION if manual else 0)
         scope.pop("profile", None)

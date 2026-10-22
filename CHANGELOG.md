@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.27 - beta
+
+- No folder is read before it is classified, and a tool's hidden folder (`.crowd`, `.tokenguard`, `.vscode`, any name
+  starting with a dot) is never indexed, whatever the scope says:
+  - An empty or missing `include` used to mean "the whole project" (the saved scopes of `sistema` and a Claude memory
+    folder had `include: []`), and a search of a folder with no index and no scope read every file of it from disk (one
+    registered folder had 715 427). An empty `include` now indexes only the loose files at the root, and that first
+    keyword search reads only those.
+  - The `scope` action without a saved scope defaulted to `include: ["."]`; it now requires `include`, and refuses an
+    include inside a hidden folder.
+  - A model that answered with `docs/**`, `*` or `**/*` (the cause of the `error` status of two registered folders)
+    now has the entry reduced to the folder it names; an entry that is absolute, climbs out with `..`, sits in a hidden
+    folder or keeps a wildcard in the middle is dropped and kept in `dropped_include` of the saved scope.
+  - Hidden files at the root and inside any included folder are no longer listed (they were listed and then skipped
+    when read).
+  - The mechanical exclusion grows: `site-packages`, `bower_components`, `jspm_packages` everywhere, and `target`
+    (Cargo.toml or pom.xml at the root) and `Pods` (Podfile). These are never offered to the scope model.
+- Tests for each rule: `tests/test_scope_rules.py`.
+
 ## 0.9.26 - beta
 
 - The daemon no longer re-reads and re-hashes every watched folder in a loop. Measured on the owner's machine: one

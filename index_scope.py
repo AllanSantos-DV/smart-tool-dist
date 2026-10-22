@@ -28,7 +28,17 @@ SCOPE_DIR = paths.DATA_DIR
 _ALWAYS_EXCLUDE = {
     ".git", "node_modules", "__pycache__", ".venv", "venv", "env",
     ".tox", ".mypy_cache", ".pytest_cache", "*.egg-info",
+    "site-packages", "bower_components", "jspm_packages",
 }
+
+# Folders that are generated output only when the root proves the project type: a root marker file maps to the names
+# it makes unambiguous (Cargo's and Maven's `target`, CocoaPods' `Pods`). Excluded mechanically, before any model sees
+# the folder list.
+_PROJECT_TYPE_EXCLUDES = (
+    (("Cargo.toml",), ("target",)),
+    (("pom.xml",), ("target",)),
+    (("Podfile",), ("Pods",)),
+)
 
 # Mesmo critério do `_ALWAYS_EXCLUDE`, para arquivo: o significado não varia por
 # projeto. Lockfile é grafo de dependência resolvido por ferramenta — nunca é fonte de
@@ -53,6 +63,51 @@ _TOOL_STATE_DIRS = {
 def tool_state_excludes(root):
     """Names of the tool-runtime folders under `root` (empty unless `root` is a known tool config home)."""
     return _TOOL_STATE_DIRS.get(os.path.basename(os.path.normpath(root)).casefold(), ())
+
+
+def project_type_excludes(root):
+    """Names of the generated-output folders `root`'s marker files make unambiguous (empty for an unknown type)."""
+    found = []
+    for markers, names in _PROJECT_TYPE_EXCLUDES:
+        if any(os.path.isfile(os.path.join(root, marker)) for marker in markers):
+            found.extend(names)
+    return tuple(found)
+
+
+def mechanical_excludes(root):
+    """Everything excluded without asking a model: the tool-runtime folders of a config home and the generated output
+    of the project type. The names of `_ALWAYS_EXCLUDE` and every hidden folder are excluded on top of these."""
+    return (*tool_state_excludes(root), *project_type_excludes(root))
+
+
+def is_hidden(rel_path):
+    """Whether any part of the relative path starts with a dot (a tool's folder: .git, .vscode, .crowd, .tokenguard)."""
+    return any(part.startswith(".") for part in str(rel_path).replace("\\", "/").split("/") if part not in ("", ".", ".."))
+
+
+def normalize_include(include):
+    """`(bases, dropped)` from the include entries of a scope. A base is a folder or file path relative to the root, with
+    the shapes a model emits for "everything under it" (`docs/**`, `docs/*`, `docs/`) reduced to the folder; `*`, `**`
+    and `**/*` mean the whole project and become ``. An entry that is absolute, climbs out with `..`, sits inside a hidden
+    folder or keeps a wildcard in the middle is dropped: it can never name something indexable, and it is returned so the
+    caller can report it. No entries means no folder: only the loose files at the root are indexed."""
+    bases, dropped = [], []
+    for raw in include or []:
+        base = str(raw).replace("\\", "/").strip()
+        while base.startswith("./"):
+            base = base[2:]
+        for tail in ("/**/*", "/**", "/*"):
+            if base.endswith(tail):
+                base = base[:-len(tail)]
+        base = base.strip("/")
+        if base in ("*", "**", "**/*", "."):
+            base = ""
+        if (os.path.isabs(str(raw)) or str(raw).strip().startswith(("/", "\\")) or ".." in base.split("/") or is_hidden(base)
+                or any(ch in base for ch in "*?[")):
+            dropped.append(raw)
+        elif base not in bases:
+            bases.append(base)
+    return bases, dropped
 
 
 def always_excluded(name):
@@ -122,10 +177,12 @@ def _top_level_dirs(root):
         names = os.listdir(root)
     except OSError:
         return []
+    skipped = mechanical_excludes(root)
     return sorted(
         name for name in names
         if not name.startswith(".")
         and not always_excluded(name)
+        and name not in skipped
         and os.path.isdir(os.path.join(root, name))
         and _within_root(root, os.path.join(root, name))
     )
@@ -293,7 +350,8 @@ def _build_scope_prompt(root, ambiguous_dirs, root_files, doc_context):
         "You are deciding what to include in a semantic code-search index for the "
         f"repository at {root}.\n\n"
         "These directories are already excluded automatically (dependency/tooling caches "
-        f"whose meaning does not vary by project): {', '.join(sorted(_ALWAYS_EXCLUDE))}. "
+        f"whose meaning does not vary by project): {', '.join(sorted({*_ALWAYS_EXCLUDE, *mechanical_excludes(root)}))}. "
+        "Every hidden folder (name starting with a dot: .git, .vscode, .crowd, .tokenguard...) is also never indexed. "
         "Do not decide on them.\n\n"
         f"Directories that still need a decision: {', '.join(ambiguous_dirs) or '(none)'}\n\n"
         "Loose files at the repository ROOT are indexed automatically, because in a flat "
@@ -317,6 +375,8 @@ def _build_scope_prompt(root, ambiguous_dirs, root_files, doc_context):
         "source, even if it also contains a few generated/log files. Only call submit_scope "
         "once every non-obvious directory is grounded in inspection data or in the "
         "documentation.\n\n"
+        "`include` lists folder paths relative to the root, without wildcards; a folder you leave out of `include` is "
+        "not indexed, and an empty `include` indexes only the loose root files. "
         "Include sources useful for search even if they are gitignored (e.g. docs/, README, "
         "ADRs). Java, Angular, HTML/CSS, plain text and Markdown are supported sources. "
         "DOCX documents are supported through bounded local text extraction; do not exclude "
@@ -333,7 +393,7 @@ def decide_scope(root, router_model, force=False, deadline=None, cancel_check=No
         return cached
 
     top_level_dirs = _top_level_dirs(root)
-    ambiguous_dirs = [d for d in top_level_dirs if not always_excluded(d) and d not in tool_state_excludes(root)]
+    ambiguous_dirs = list(top_level_dirs)
     root_files = _root_level_files(root, _exclude_matcher(_ALWAYS_EXCLUDE_FILES))
     doc_context = _read_root_docs(root)
 
@@ -392,11 +452,13 @@ def decide_scope(root, router_model, force=False, deadline=None, cancel_check=No
 
     if decision is None:
         raise RuntimeError("The model did not define a valid scope. Check the model or set the scope manually.")
-    final = {"include": (decision or {}).get("include") or [],
-             "exclude": [*((decision or {}).get("exclude") or []), *tool_state_excludes(root)],
+    include, dropped = normalize_include(decision.get("include"))
+    final = {"include": include,
+             "exclude": [*(decision.get("exclude") or []), *mechanical_excludes(root)],
              "user_exclude": (cached or {}).get("user_exclude", [])}
     scope = {
         "include": final["include"],
+        "dropped_include": [str(item) for item in dropped],
         "exclude": final["exclude"],
         "top_level_dirs": top_level_dirs,
         "scope_version": SCOPE_VERSION,
@@ -422,7 +484,7 @@ def _root_level_files(root, matcher):
         raise OSError("Could not list the root; the existing index was kept.") from exc
     out = []
     for name in names:
-        if matcher(name):
+        if matcher(name) or name.startswith("."):
             continue
         full = os.path.join(root, name)
         # `isfile` segue link: sem a checagem de contenção, um link na raiz apontando
@@ -466,16 +528,15 @@ def scope_filter(scope, root=None):
     """Predicate `keep(rel_path)`: whether resolve_included_files would list rel_path (a file) or walk it (a folder) —
     under an include base, outside the exclusions, outside hidden folders. Built once so a burst of file events does not
     rebuild the matcher per path; `root` adds the tool-runtime folders of a known config home."""
-    include = scope.get("include") or [""]
+    bases, _dropped = normalize_include(scope.get("include"))
     matcher = _exclude_matcher(set(scope.get("exclude") or []) | set(scope.get("user_exclude") or []) |
-                               set(tool_state_excludes(root) if root else ()) | _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
-    bases = [base.strip("/") for base in include]
-    whole = any(base in ("", ".") for base in include)
+                               set(mechanical_excludes(root) if root else ()) | _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
+    whole = "" in bases
 
     def keep(rel_path):
         rel_path = rel_path.replace("\\", "/")
         parts = rel_path.split("/")
-        if matcher(rel_path) or any(part.startswith(".") for part in parts[:-1]):
+        if matcher(rel_path) or is_hidden(rel_path):
             return False
         if whole or len(parts) == 1:
             return True
@@ -493,16 +554,16 @@ def in_scope(scope, rel_path, root=None):
 def resolve_included_files(root, scope, cancel_check=None):
     if not valid_scope(scope):
         raise ValueError("Invalid scope; request a new project analysis.")
-    include = scope.get("include") or [""]
+    include, _dropped = normalize_include(scope.get("include"))
     matcher = _exclude_matcher(set(scope.get("exclude") or []) | set(scope.get("user_exclude") or []) |
-                               set(tool_state_excludes(root)) | _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
+                               set(mechanical_excludes(root)) | _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
     files = []
     def walk_error(error):
         raise OSError("Could not list a folder in the scope; try again when it is accessible.") from error
-    if not any(base in ("", ".") for base in include):
+    if "" not in include:
         files.extend(_root_level_files(root, matcher))
     for base in include:
-        base_full = os.path.join(root, base) if base not in ("", ".") else root
+        base_full = os.path.join(root, base) if base else root
         # `include` vem de tool call de um LLM cujo prompt embute documentação do
         # repositório analisado: um valor absoluto ou com `..` faria a varredura sair do
         # projeto e mandar conteúdo de fora pro endpoint de embeddings.
@@ -510,7 +571,7 @@ def resolve_included_files(root, scope, cancel_check=None):
             continue
         if os.path.isfile(base_full):
             rel = os.path.relpath(base_full, root).replace(os.sep, "/")
-            if not matcher(rel):
+            if not matcher(rel) and not is_hidden(rel):
                 files.append(rel)
             continue
         for dirpath, dirnames, filenames in os.walk(base_full, onerror=walk_error):
@@ -528,6 +589,6 @@ def resolve_included_files(root, scope, cancel_check=None):
             ]
             for name in filenames:
                 rel_path = f"{rel_dir}/{name}" if rel_dir else name
-                if not matcher(rel_path) and _within_root(root, os.path.join(root, rel_path)):
+                if not name.startswith(".") and not matcher(rel_path) and _within_root(root, os.path.join(root, rel_path)):
                     files.append(rel_path)
     return sorted(set(files))
