@@ -8,10 +8,11 @@ Cada arquivo é relido logo antes da gravação atômica: o Claude Code reescrev
 import json
 import os
 import re
-import shutil
 import subprocess
 import time
 import urllib.parse
+
+import node_locator
 
 SERVER = "smart-tool"
 HOOK_PATH = "/hooks/pretool"
@@ -110,7 +111,11 @@ def registrations():
     return found
 
 
-REGISTER_TIMEOUT_S = 60
+REGISTER_TIMEOUT_S = 120
+TIMEOUT_ENV = "SMART_TOOL_CLI_TIMEOUT_S"
+CLI_EXTENSIONS = (".exe", ".cmd", ".bat")
+NPM_CLAUDE_FIX = "npm install -g @anthropic-ai/claude-code@latest --include=optional --allow-scripts=@anthropic-ai/claude-code"
+_NPM_CLAUDE_BINARY = os.path.join("node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe")
 _CMD_METACHARS = re.compile(r'[&|<>^%!"\r\n]')
 
 
@@ -124,21 +129,99 @@ def register_command(client, base):
     raise ValueError(f"Client without MCP registration: {client!r}")
 
 
+def remove_command(client):
+    """Official CLI command that removes the smart-tool MCP server a client holds."""
+    if client == "claude":
+        return ["claude", "mcp", "remove", SERVER, "--scope", "user"]
+    if client == "codex":
+        return ["codex", "mcp", "remove", SERVER]
+    raise ValueError(f"Client without MCP registration: {client!r}")
+
+
 def register(client, base):
-    """Runs the client's own CLI (it owns its config file; ~/.claude.json is rewritten by Claude Code all the time)."""
+    """Makes the client's smart-tool MCP entry point to base, through the client's own CLI (it owns its config file;
+    ~/.claude.json is rewritten by Claude Code all the time). Idempotent: the same URL runs nothing, another URL (the
+    port changed) is removed first because `mcp add` refuses an existing name, no entry only adds. Returns what was run."""
+    url = f"{base}/mcp"
+    current = registrations().get(client)
+    if current == url:
+        return f"nothing to run: {client} already points to {url}"
     command = register_command(client, base)
+    if current:
+        run_cli(remove_command(client))
     run_cli(command)
-    if registrations().get(client) != f"{base}/mcp":
+    if registrations().get(client) != url:
         raise RuntimeError(f"'{' '.join(command)}' finished, but the registration did not appear in the client's configuration.")
     return " ".join(command)
 
 
+def cli_folders():
+    """Where the native installers of the clients put their CLI, for a PATH that does not list them."""
+    home, local, roaming = os.path.expanduser("~"), os.environ.get("LOCALAPPDATA"), os.environ.get("APPDATA")
+    folders = [os.path.join(home, ".local", "bin")]
+    if local:
+        folders.append(os.path.join(local, "Programs", "OpenAI", "Codex", "bin"))
+    if roaming:
+        folders.append(os.path.join(roaming, "npm"))
+    return folders
+
+
+def resolve_cli(name):
+    """Full path of the client CLI `name` as a .exe, .cmd or .bat (never a .ps1 or the extensionless script npm leaves
+    beside its shims, which Windows cannot run), looked up in the PATH as Windows stores it now and then in cli_folders;
+    None when absent."""
+    for folder in node_locator.search_path() + cli_folders():
+        for extension in CLI_EXTENSIONS:
+            path = os.path.join(folder, name + extension)
+            if os.path.isfile(path):
+                return path
+    return None
+
+
+def _is_native(path):
+    with open(path, "rb") as stream:
+        return stream.read(2) == b"MZ"
+
+
+def check_runnable(executable):
+    """Raises RuntimeError, without running anything, when executable is a .exe that is not a Windows program or an npm
+    shim whose package holds such a file: Windows answers those with a modal "not compatible" box and the command hangs.
+    That is how Claude Code installed by npm 11 ends up when its postinstall is blocked (a ~500-byte text claude.exe)."""
+    if executable.lower().endswith(".exe"):
+        broken = executable if not _is_native(executable) else None
+    else:
+        package_binary = os.path.join(os.path.dirname(executable), _NPM_CLAUDE_BINARY)
+        broken = package_binary if os.path.isfile(package_binary) and not _is_native(package_binary) else None
+    if not broken:
+        return
+    if os.path.join("@anthropic-ai", "claude-code") in broken:
+        raise RuntimeError(f"Claude Code was installed by npm without its native binary ({broken} is a text file). "
+                           f"Run: {NPM_CLAUDE_FIX}")
+    raise RuntimeError(f"{broken} is not a Windows executable (it does not start with MZ); reinstall that CLI.")
+
+
+def cli_timeout_s():
+    """Seconds a client CLI may run: SMART_TOOL_CLI_TIMEOUT_S when set (a positive number), else REGISTER_TIMEOUT_S."""
+    raw = os.environ.get(TIMEOUT_ENV)
+    if raw is None:
+        return REGISTER_TIMEOUT_S
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = 0
+    if seconds <= 0:
+        raise RuntimeError(f"{TIMEOUT_ENV} must be a positive number of seconds, not {raw!r}.")
+    return seconds
+
+
 def run_cli(command):
-    """Runs a client CLI command (claude, codex) found on PATH, killing its whole shim tree after REGISTER_TIMEOUT_S.
-    Raises RuntimeError with the command and the CLI's own message when it is missing, hangs or exits non-zero."""
-    executable = shutil.which(command[0])
+    """Runs a client CLI command (claude, codex) found by resolve_cli, killing its whole shim tree after cli_timeout_s.
+    Raises RuntimeError with the command and the CLI's own message when it is missing, cannot run, hangs or exits non-zero."""
+    executable = resolve_cli(command[0])
     if not executable:
         raise RuntimeError(f"CLI '{command[0]}' not found in Smart Tool's PATH. Register it manually: {' '.join(command)}")
+    check_runnable(executable)
+    timeout = cli_timeout_s()
     unsafe = [arg for arg in command[1:] if _CMD_METACHARS.search(arg)]
     if executable.lower().endswith((".cmd", ".bat")) and unsafe:
         # cmd.exe parses a .cmd shim's arguments again: & | < > ^ % ! would run as commands or expand as variables.
@@ -152,7 +235,7 @@ def run_cli(command):
     except OSError as exc:
         raise RuntimeError(f"'{' '.join(command)}' did not start: {exc}") from None
     try:
-        stdout, stderr = proc.communicate(timeout=REGISTER_TIMEOUT_S)
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         # npm shims are cmd.exe -> node: killing only cmd.exe leaves node holding the pipes forever.
         if os.name == "nt":
@@ -160,7 +243,7 @@ def run_cli(command):
         else:
             proc.kill()
         proc.communicate(timeout=10)
-        raise RuntimeError(f"'{' '.join(command)}' did not finish in {REGISTER_TIMEOUT_S}s.") from None
+        raise RuntimeError(f"'{' '.join(command)}' did not finish in {timeout:g}s.") from None
     if proc.returncode != 0:
         detail = (stderr or stdout).strip()[-400:]
         raise RuntimeError(f"'{' '.join(command)}' failed (code {proc.returncode}): {detail}")

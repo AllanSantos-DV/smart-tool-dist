@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.9.29 - beta
+
+- Registering the MCP server in Claude Code or Codex is idempotent. `claude mcp add` refuses a name that exists
+  ("MCP server smart-tool already exists in user"), so a second registration used to fail. Now the same URL runs
+  nothing and succeeds, another URL (the port changed) is removed with `claude mcp remove smart-tool --scope user`
+  (`codex mcp remove smart-tool`) and added again, and no entry only adds. The result is read back from the client's
+  configuration, as before.
+- The client CLI is resolved before it runs and never left hanging:
+  - Only `.exe`, `.cmd` and `.bat` are candidates, never a `.ps1` or the extensionless script npm leaves beside its
+    shims.
+  - A `.exe` that does not start with `MZ`, or an npm shim whose `claude-code` package holds such a file (Claude Code
+    installed by npm 11 with its postinstall blocked: a ~500-byte text `claude.exe`, which makes Windows open a modal
+    "not compatible" box and hang the command), fails at once with the reason and, for Claude Code,
+    `npm install -g @anthropic-ai/claude-code@latest --include=optional --allow-scripts=@anthropic-ai/claude-code`.
+  - The limit is 120 s (it was 60) and `SMART_TOOL_CLI_TIMEOUT_S` sets it.
+- The CLI is searched in the PATH as Windows stores it now (machine and user, from the registry), not the one the daemon
+  started with, and then in `%USERPROFILE%\.local\bin`, `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` and `%APPDATA%\npm`.
+- Networks that inspect TLS with a corporate root CA:
+  - `npx ... install` shows the real error code (`SELF_SIGNED_CERT_IN_CHAIN`, kept by Node in `error.cause`, not
+    "fetch failed") and, on Node 22.15+/23.8+/24, runs itself again once with `NODE_USE_SYSTEM_CA=1`; otherwise it says
+    to set `NODE_EXTRA_CA_CERTS`. uv gets one retry with `UV_NATIVE_TLS=1` on a certificate error. The installer steps
+    (npm, Playwright) run with `NODE_USE_SYSTEM_CA=1`, and the Camoufox download uses the Windows store through
+    `truststore`. `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `UV_NATIVE_TLS` and
+    `NODE_USE_SYSTEM_CA` are never overwritten.
+  - The bootstrap ends by setting `process.exitCode` instead of calling `process.exit()` while a fetch is closing (Node
+    24 on Windows aborts with `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`).
+- Tests: `tests/test_cli_registration.py`, `tests/test_bootstrap_network.py`, and cases in `test_fetch_camoufox.py` and
+  `test_install_runtime.py`.
+
 ## 0.9.28 - beta
 
 - Node, npx and npm are looked up when they are needed, never remembered. A process keeps the PATH it was born with:

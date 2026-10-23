@@ -176,6 +176,7 @@ def _run(args, *, cwd=None, label="Web dependency", idle_s=600, stream=False, at
     node, _npm = _node_commands()
     env = node_locator.environment(prefer=node)
     env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    env.setdefault("NODE_USE_SYSTEM_CA", "1")
     flags = (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
     for attempt in range(1, attempts + 1):
         print(f"{label}: starting{f' (attempt {attempt} of {attempts})' if attempt > 1 else ''}...", flush=True)
@@ -256,7 +257,7 @@ def _check():
     if status["browser_python"]:
         try:
             result = subprocess.run(
-                [str(BROWSER_PYTHON), "-c", "import camoufox, crawl4ai, playwright"],
+                [str(BROWSER_PYTHON), "-c", "import camoufox, crawl4ai, playwright, truststore"],
                 capture_output=True, check=False, timeout=30,
             )
             status["browser_packages"] = result.returncode == 0

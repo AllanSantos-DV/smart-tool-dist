@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Failure, certificateAdvice, download, isCertificateText, nativeTlsEnvironment } from "./network.mjs";
 
 const PACKAGE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNTIME_DIR = join(homedir(), ".smart-tool", "runtime");
@@ -20,8 +21,7 @@ const USAGE = `Usage: npx @allansantos-dev/smart-tool install [--target DIR] [--
 Installs or updates Smart Tool for this Windows user. Run it again with @latest to update.`;
 
 function fail(message) {
-  console.error(`smart-tool: ${message}`);
-  process.exit(1);
+  throw new Failure(message);
 }
 
 function run(command, args, options = {}) {
@@ -31,13 +31,18 @@ function run(command, args, options = {}) {
   return (result.stdout || "").trim();
 }
 
+function runAgain(env) {
+  const again = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], { stdio: "inherit", env });
+  if (again.error) fail(`could not run again: ${again.error.message}`);
+  return again.status ?? 1;
+}
+
 async function ensureUv() {
   if (existsSync(UV_EXE)) return;
   const url = `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ASSET}`;
   console.log(`Downloading uv ${UV_VERSION} (Python manager)...`);
-  const response = await fetch(url);
-  if (!response.ok) fail(`download of ${url} failed: HTTP ${response.status}`);
-  const archive = Buffer.from(await response.arrayBuffer());
+  const { body: archive, rerun } = await download(url, { rerun: runAgain });
+  if (rerun !== undefined) return { rerun };
   const digest = createHash("sha256").update(archive).digest("hex");
   if (digest !== UV_SHA256) fail(`${UV_ASSET} checksum mismatch (expected ${UV_SHA256}, got ${digest}).`);
   const scratch = mkdtempSync(join(tmpdir(), "smart-tool-uv-"));
@@ -55,7 +60,17 @@ async function ensureUv() {
 function ensurePython() {
   const env = { ...process.env, UV_PYTHON_INSTALL_DIR: PYTHON_DIR };
   console.log(`Preparing Python ${PYTHON_VERSION} in ${PYTHON_DIR}...`);
-  run(UV_EXE, ["python", "install", PYTHON_VERSION, "--no-bin", "--no-registry"], { env });
+  const install = ["python", "install", PYTHON_VERSION, "--no-bin", "--no-registry"];
+  try {
+    run(UV_EXE, install, { env });
+  } catch (error) {
+    const native = nativeTlsEnvironment(env);
+    if (!(error instanceof Failure) || !isCertificateText(error.message)) throw error;
+    if (!native) throw new Failure(`${error.message}\n${certificateAdvice(env)}`);
+    console.log("TLS inspection detected by uv; running it again with the Windows certificate store...");
+    env.UV_NATIVE_TLS = native.UV_NATIVE_TLS;
+    run(UV_EXE, install, { env });
+  }
   const python = run(UV_EXE, ["python", "find", "--managed-python", "--no-python-downloads", PYTHON_VERSION], { env });
   if (!python.toLowerCase().startsWith(PYTHON_DIR.toLowerCase())) fail(`uv returned a Python outside ${PYTHON_DIR}: ${python}`);
   return python;
@@ -69,10 +84,15 @@ async function main() {
   }
   if (command !== "install") {
     console.log(USAGE);
-    process.exit(command === undefined || command === "--help" || command === "-h" ? 0 : 1);
+    process.exitCode = command === undefined || command === "--help" || command === "-h" ? 0 : 1;
+    return;
   }
   if (process.platform !== "win32" || process.arch !== "x64") fail(`Smart Tool runs on Windows x64 only (this is ${process.platform}-${process.arch}).`);
-  await ensureUv();
+  const again = await ensureUv();
+  if (again) {
+    process.exitCode = again.rerun;
+    return;
+  }
   const python = ensurePython();
   const installer = spawnSync(python, [join(PACKAGE_DIR, "install.py"), "--skip-tests", ...rest], {
     stdio: "inherit",
@@ -80,7 +100,10 @@ async function main() {
     env: { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" },
   });
   if (installer.error) fail(`the installer did not start: ${installer.error.message}`);
-  process.exit(installer.status ?? 1);
+  process.exitCode = installer.status ?? 1;
 }
 
-main().catch((error) => fail(error.stack || String(error)));
+main().catch((error) => {
+  console.error(error instanceof Failure ? `smart-tool: ${error.message}` : `smart-tool: ${error.stack || error}`);
+  process.exitCode = 1;
+});

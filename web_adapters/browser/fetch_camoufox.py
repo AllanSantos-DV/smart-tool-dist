@@ -2,7 +2,10 @@
 caught here and turned into a failing exit, and the browser executable must exist afterwards. The 1.3 GB download
 goes through ranged_download (Range requests that resume after a dropped or stalled connection; camoufox still checks
 the sha256), its other requests get a timeout (requests passes None, which also overrides socket.setdefaulttimeout),
-and progress is printed as plain lines (the rich bar stays invisible in a pipe)."""
+and progress is printed as plain lines (the rich bar stays invisible in a pipe). requests trusts only certifi's bundle, so on
+a network that inspects TLS with a corporate root CA its release lookups fail; the Windows certificate store is used
+instead (truststore), unless the user already set a CA bundle variable."""
+import os
 import sys
 from io import BytesIO
 from pathlib import Path
@@ -14,6 +17,7 @@ from camoufox import pkgman
 import ranged_download
 
 TIMEOUT_S = (30, 60)
+CA_VARIABLES = ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE")
 REPORT_EVERY_MB = 50
 _update = camoufox_cli.CamoufoxUpdate.update
 _get = requests.get
@@ -59,7 +63,18 @@ def installed_executable():
     return executable
 
 
+def trust_system_certificates():
+    """Makes ssl (and so requests) verify against the Windows certificate store; False and untouched when the user set
+    REQUESTS_CA_BUNDLE, SSL_CERT_FILE or CURL_CA_BUNDLE."""
+    if any(os.environ.get(name) for name in CA_VARIABLES):
+        return False
+    import truststore
+    truststore.inject_into_ssl()
+    return True
+
+
 def main():
+    trust_system_certificates()
     requests.get = _get_with_timeout
     pkgman.webdl = _ranged_webdl
     camoufox_cli.CamoufoxUpdate.update = _recording_update
