@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.28 - beta
+
+- Node, npx and npm are looked up when they are needed, never remembered. A process keeps the PATH it was born with:
+  the tray started at logon never saw a Node installed, moved or removed afterwards, so the automatic update
+  (`npx --yes ... install`, run from the tray) stopped working once Node changed place, and everything the update then
+  started (installer, restarted tray) inherited the same stale PATH. New `node_locator.py`: the process PATH, then the
+  machine and user PATH stored in the registry, then the usual install folders (Program Files, nvm, Volta, fnm, Scoop,
+  Chocolatey); the Node inside Smart Tool (`web_adapters/node/.node-runtime`) is used only when the machine has none.
+  - The updater launches the install with that fresh PATH and the folder of the `npx` it found first in it.
+  - The web runtime installer takes the machine's Node from the PATH first (it preferred the one inside Smart Tool).
+  - Search adapters and the code analyzers resolve Node at each launch, so a Node changed while the daemon runs is
+    followed without a restart.
+  - The Playwright MCP registration writes the absolute Node path into the client's configuration; the daemon now
+    registers it again at start when that executable no longer exists (`browser_control.heal`).
+- Tests: `tests/test_node_locator.py` (Node in an unusual folder, only in the registry PATH, only in a known folder,
+  nothing found, the updater without npx in the tray PATH, a registration whose Node is gone).
+
 ## 0.9.27 - beta
 
 - No folder is read before it is classified, and a tool's hidden folder (`.crowd`, `.tokenguard`, `.vscode`, any name

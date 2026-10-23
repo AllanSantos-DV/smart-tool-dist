@@ -21,6 +21,8 @@ import venv
 import zipfile
 from pathlib import Path
 
+import node_locator
+
 
 ROOT = Path(__file__).resolve().parent
 NODE_DIR = ROOT / "web_adapters" / "node"
@@ -32,7 +34,7 @@ JAVA_PARSER = NODE_DIR / 'node_modules' / 'java-parser' / 'src' / 'index.js'
 ANGULAR_PARSER = NODE_DIR / 'node_modules' / '@angular' / 'compiler' / 'fesm2022' / 'compiler.mjs'
 # Browser control for agents (browser_control.py): Microsoft's Playwright MCP over the Chromium installed below.
 PLAYWRIGHT_MCP_CLI = NODE_DIR / "node_modules" / "@playwright" / "mcp" / "cli.js"
-NODE_RUNTIME = NODE_DIR / ".node-runtime"
+NODE_RUNTIME = Path(node_locator.LOCAL_RUNTIME)
 # Moli renders the JavaScript pages web_fetch cannot read over HTTP; Chromium (Crawl4AI) stays as its fallback.
 # Measured on 2026-10-10 over 21 such pages: 1.6 s and 90 MB peak (median) against 4.2 s and 581 MB for Chromium.
 MOLI_VERSION = "1.1.15"
@@ -58,14 +60,16 @@ def _node_supported(node):
 
 
 def _node_commands():
+    """(node, npm) of the Node to use: the machine's, found through the PATH first, else the one inside Smart Tool;
+    (None, None) when neither is a supported version."""
+    node = node_locator.which("node")
+    npm = node_locator.which("npm.cmd") or node_locator.which("npm")
+    if node and npm and _node_supported(node):
+        return node, npm
     local_node, local_npm = NODE_RUNTIME / "node.exe", NODE_RUNTIME / "npm.cmd"
-    if NODE_RUNTIME.exists():
-        if local_node.is_file() and local_npm.is_file() and _node_supported(local_node):
-            return str(local_node), str(local_npm)
-        return None, None
-    node = shutil.which("node")
-    npm = shutil.which("npm.cmd") or shutil.which("npm")
-    return (node, npm) if node and npm and _node_supported(node) else (None, None)
+    if local_node.is_file() and local_npm.is_file() and _node_supported(local_node):
+        return str(local_node), str(local_npm)
+    return None, None
 
 
 def _download_verified(url, expected_sha256, path):
@@ -169,10 +173,9 @@ def _install_moli():
 def _run(args, *, cwd=None, label="Web dependency", idle_s=600, stream=False, attempts=1):
     """Runs a step with UTF-8 output and closed stdin (a prompt fails at once instead of hanging); it is stopped only
     after idle_s without any output, and stream shows the output live."""
-    env = os.environ.copy()
+    node, _npm = _node_commands()
+    env = node_locator.environment(prefer=node)
     env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
-    if NODE_RUNTIME.is_dir():
-        env["PATH"] = str(NODE_RUNTIME) + os.pathsep + env.get("PATH", "")
     flags = (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
     for attempt in range(1, attempts + 1):
         print(f"{label}: starting{f' (attempt {attempt} of {attempts})' if attempt > 1 else ''}...", flush=True)

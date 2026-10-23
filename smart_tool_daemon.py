@@ -40,6 +40,7 @@ import capabilities
 import client_hooks
 import install_runtime
 import integration_metrics
+import node_locator
 import config
 import freshness
 import model_client
@@ -2078,9 +2079,9 @@ def _run_search_script(executable, script_path, args, timeout_s):
         if _IS_WINDOWS else {"start_new_session": True}
     )
     proc = subprocess.Popen(
-        [executable, script_path, *args],
+        [web_search_adapters.executable_path(executable), script_path, *args],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-        env={**os.environ, "SMART_TOOL_USER_AGENT": version.user_agent(config.load_config().get("contact"))},
+        env={**node_locator.environment(), "SMART_TOOL_USER_AGENT": version.user_agent(config.load_config().get("contact"))},
         **popen_kwargs,
     )
     try:
@@ -4183,6 +4184,14 @@ def _probe_capabilities():
         _log(f"capabilities probe failed: {type(exc).__name__}: {exc}")
 
 
+def _heal_browser_control():
+    """Re-registers the Playwright MCP server when the Node it was registered with is gone (Node moved or reinstalled)."""
+    try:
+        browser_control.heal(_log)
+    except Exception as exc:
+        _log(f"browser control not refreshed: {type(exc).__name__}: {exc}")
+
+
 def main():
     global _PROJECT_MONITOR
     # O bind vem antes de qualquer I/O de rede: enquanto a porta não abre, o
@@ -4206,6 +4215,7 @@ def main():
     except (OSError, ValueError) as exc:
         _log(f"clients not pointed to port {_BOUND_PORT}: {type(exc).__name__}: {exc}")
     atexit.register(BROWSER_SERVICE.close)
+    threading.Thread(target=_heal_browser_control, daemon=True).start()
     try:
         recovered = project_store.recover_interrupted()
         project_store.import_known_legacy(indexer.INDEX_DIR)

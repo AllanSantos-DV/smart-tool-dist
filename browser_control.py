@@ -26,6 +26,7 @@ import tomllib
 import atomic_io
 import endpoint_sync
 import install_runtime
+import node_locator
 import paths
 
 SERVER = "playwright"
@@ -155,6 +156,34 @@ def registered():
     except OSError:
         pass
     return found
+
+
+def registered_command(client):
+    """Executable the client's `playwright` server is registered with, or None when it is not registered."""
+    try:
+        if client == "claude":
+            with open(endpoint_sync.claude_json(), encoding="utf-8") as stream:
+                entry = (json.load(stream).get("mcpServers") or {}).get(SERVER)
+        else:
+            with open(_codex_config(), encoding="utf-8") as stream:
+                entry = (tomllib.loads(stream.read()).get("mcp_servers") or {}).get(SERVER)
+    except (OSError, ValueError, AttributeError):
+        return None
+    command = entry.get("command") if isinstance(entry, dict) else None
+    return command if isinstance(command, str) else None
+
+
+def heal(log=None):
+    """Registers again, through ensure, each registration of ours whose executable no longer exists: the Node path is
+    written into the client's configuration, which a moved or reinstalled Node leaves pointing nowhere. Returns
+    {client: ensure's outcome} for the clients refreshed."""
+    refreshed = {}
+    for client in ("claude", "codex"):
+        command = registered_command(client)
+        ours = status().get(client, {}).get("state") in ("registered", "undenied")
+        if ours and command and not node_locator.exists(command):
+            refreshed[client] = ensure(client, log)
+    return refreshed
 
 
 def _codex_config():

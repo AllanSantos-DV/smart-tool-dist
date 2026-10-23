@@ -242,7 +242,7 @@ def _run_analyzer(script, payload, failure):
     needed more than the former fixed 512 MB). The run is killed after `ANALYZER_TIMEOUT_S` seconds (a context
     variable: the edit hook lowers it so a slow file cannot hold its worker)."""
     for heap in NODE_HEAP_MB:
-        process=subprocess.run([web_search_adapters.NODE_EXECUTABLE,f'--max-old-space-size={heap}',str(Path(__file__).with_name(script))],
+        process=subprocess.run([web_search_adapters.executable_path(web_search_adapters.NODE_EXECUTABLE),f'--max-old-space-size={heap}',str(Path(__file__).with_name(script))],
             input=payload,capture_output=True,text=True,encoding='utf-8',timeout=ANALYZER_TIMEOUT_S.get(),
             creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         if process.returncode==0:

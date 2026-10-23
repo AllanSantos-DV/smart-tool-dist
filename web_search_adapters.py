@@ -31,11 +31,14 @@ Bing entra pelo tier yahoo.
 import os
 import sys
 
+import node_locator
+
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 NODE_ADAPTER_DIR = os.path.join(PACKAGE_DIR, "web_adapters", "node")
 BROWSER_ADAPTER_DIR = os.path.join(PACKAGE_DIR, "web_adapters", "browser")
-LOCAL_NODE_EXECUTABLE = os.path.join(NODE_ADAPTER_DIR, ".node-runtime", "node.exe")
-NODE_EXECUTABLE = LOCAL_NODE_EXECUTABLE if os.path.isfile(LOCAL_NODE_EXECUTABLE) else "node"
+# Adapters name Node, not a path: `executable_path` finds it when the adapter is launched (node_locator), so a Node
+# installed, moved or removed while the daemon runs is followed without a restart.
+NODE_EXECUTABLE = "node"
 CAMOUFOX_VENV_PYTHON = os.path.join(BROWSER_ADAPTER_DIR, ".venv", "Scripts", "python.exe")
 BROWSER_SERVICE_SCRIPT = os.path.join(BROWSER_ADAPTER_DIR, "browser_service.py")
 DDG_SEARCH_SCRIPT = os.path.join(NODE_ADAPTER_DIR, "ddg-search.mjs")
@@ -43,6 +46,13 @@ OPEN_WEBSEARCH_ADAPTER_SCRIPT = os.path.join(NODE_ADAPTER_DIR, "open-websearch-a
 WIKIPEDIA_SEARCH_SCRIPT = os.path.join(NODE_ADAPTER_DIR, "wikipedia-search.mjs")
 EXTERNAL_SEARCH_SCRIPT = os.path.join(PACKAGE_DIR, "web_search_external.py")
 DDGS_SEARCH_SCRIPT = os.path.join(PACKAGE_DIR, "web_search_ddgs.py")
+
+
+def executable_path(executable):
+    """The program to launch for an adapter's `executable`: Node is looked up now (PATH first, then the Node inside
+    Smart Tool); any other executable is returned unchanged. A Node that is nowhere stays `node`, so the launch fails
+    with the system's own "not found"."""
+    return (node_locator.node() or NODE_EXECUTABLE) if executable == NODE_EXECUTABLE else executable
 
 FETCH_TIMEOUT_S = 15
 OPEN_WEBSEARCH_TIMEOUT_S = 30

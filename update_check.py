@@ -13,6 +13,7 @@ import urllib.request
 
 import atomic_io
 import config
+import node_locator
 import paths
 import version
 
@@ -136,7 +137,9 @@ def notices(now=None):
 
 def run_update(latest, automatic):
     """Starts the install command in its own visible console, detached from the tray (the installer stops and restarts
-    the tray). The console closes on success and stays open with the error on failure."""
+    the tray). The console closes on success and stays open with the error on failure. npx is looked up now, not in the
+    PATH the tray was born with: a Node installed or moved since the last logon still runs the update, and the folder
+    found is put first in the PATH the installer (and the tray it restarts) inherits."""
     if automatic:
         state = _state()
         state.update(attempted=latest, at=time.time())
@@ -144,4 +147,4 @@ def run_update(latest, automatic):
     flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     command = f'title Smart Tool update to {latest} && {UPDATE_COMMAND} || pause'
     subprocess.Popen(["cmd.exe", "/c", command], creationflags=flags, close_fds=True,
-                     cwd=os.path.expanduser("~"))
+                     cwd=os.path.expanduser("~"), env=node_locator.environment(prefer=node_locator.which("npx.cmd")))
