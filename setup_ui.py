@@ -79,6 +79,7 @@ def status_payload():
         "missing_models": models["missing"],
         "router_model": cfg.get("router_model", ""),
         "scope_model": cfg.get("scope_model", ""),
+        "scout_model": cfg.get("scout_model", ""),
         "research_model": cfg.get("research_model", ""),
         "research_max_iterations": cfg.get("research_max_iterations", config.DEFAULT_CONFIG["research_max_iterations"]),
         "quick_search_timeout_s": cfg.get("quick_search_timeout_s", config.DEFAULT_CONFIG["quick_search_timeout_s"]),
@@ -132,6 +133,7 @@ def handle_models_get():
         "current": {
             "router_model": cfg.get("router_model", ""),
             "scope_model": cfg.get("scope_model", ""),
+            "scout_model": cfg.get("scout_model", ""),
             "research_model": cfg.get("research_model", ""),
             "research_max_iterations": cfg.get("research_max_iterations", config.DEFAULT_CONFIG["research_max_iterations"]),
             "quick_search_timeout_s": cfg.get("quick_search_timeout_s", config.DEFAULT_CONFIG["quick_search_timeout_s"]),
@@ -369,6 +371,7 @@ def handle_autostart_action(body):
 _MODEL_FIELDS = {
     "router_model": "chat",
     "scope_model": "chat",
+    "scout_model": "chat",
     "research_model": "chat",
     "embedding_model": "embedding",
     "rerank_model": "rerank",
@@ -681,6 +684,7 @@ _PAGE_TEMPLATE = """<!doctype html>
             <div class="field"><label for="sel-scope">Index classification</label><span class="explain">Decides scope, code or documentation, and languages while indexing. Runs once per project.</span><input id="sel-scope" list="dl-scope" autocomplete="off" spellcheck="false"><datalist id="dl-scope"></datalist></div>
             <div class="field"><label for="sel-router">Router</label><span class="explain">Decides before each agent Grep, Read or Bash. Use a small model without reasoning: above 10 s routing turns off.</span><input id="sel-router" list="dl-router" autocomplete="off" spellcheck="false"><datalist id="dl-router"></datalist></div>
           </div>
+          <div class="field"><label for="sel-scout">Code scout (optional)</label><span class="explain">smart_scout: writes a short answer over the lines it read and keeps only the ones that answer. Empty returns the literal lines without a model.</span><input id="sel-scout" list="dl-scout" autocomplete="off" spellcheck="false"><datalist id="dl-scout"></datalist></div>
           <div class="field"><label for="sel-research">Web research</label><span class="explain">Used by web_search with depth=research. Empty uses the router model.</span><input id="sel-research" list="dl-research" autocomplete="off" spellcheck="false"><datalist id="dl-research"></datalist></div>
           <details class="more">
             <summary>Advanced web research limits</summary>
@@ -1031,6 +1035,7 @@ async function loadModels() {
     const data = await getJSON("/setup/models");
     fillSuggestions($("sel-router"), data.chat_lightweight.length ? data.chat_lightweight : data.chat, data.current.router_model);
     fillSuggestions($("sel-scope"), data.chat, data.current.scope_model);
+    fillSuggestions($("sel-scout"), data.chat_lightweight.length ? data.chat_lightweight : data.chat, data.current.scout_model);
     fillSuggestions($("sel-research"), data.chat, data.current.research_model);
     fillSuggestions($("sel-embedding"), data.embedding, data.current.embedding_model);
     fillSuggestions($("sel-rerank"), data.rerank, data.current.rerank_model);
@@ -1048,7 +1053,7 @@ $("btn-save-models").addEventListener("click", async () => {
   setMsg("models-msg", "", "Saving…");
   try {
     await post("/setup/models", {
-      router_model: $("sel-router").value, scope_model: $("sel-scope").value, research_model: $("sel-research").value,
+      router_model: $("sel-router").value, scope_model: $("sel-scope").value, scout_model: $("sel-scout").value, research_model: $("sel-research").value,
       research_max_iterations: Number($("num-research-iterations").value), quick_search_timeout_s: Number($("num-quick-timeout").value),
       site_memory_similarity_threshold: Number($("num-site-memory-threshold").value),
       embedding_model: $("sel-embedding").value, rerank_model: $("sel-rerank").value,

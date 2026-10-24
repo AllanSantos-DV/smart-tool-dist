@@ -6,12 +6,16 @@ import config
 import model_catalog
 
 
-# Matched as the last path/dot segment of the catalog id, so "gpt-4o-mini" also finds "openai/gpt-4o-mini" (OpenRouter)
-# and "openai.gpt-4o-mini" (LiteLLM aliases). Router: small, no reasoning (it runs before tool calls).
+# Matched as the last path/dot segment of the catalog id, so "claude-haiku-5-5" also finds "vertex_ai.anthropic.claude-haiku-5-5"
+# (LiteLLM aliases) and "anthropic/claude-haiku-5-5" (OpenRouter). Chosen by measurement, 3 rounds per model, correctness
+# first and price second (docs/research/2026-10-24-modelos-do-scout-e-dos-outros-papeis.md): the router answers pages
+# and the scout reads code excerpts, where Claude Haiku 5.5 answered every request and led the no-index path; scope and
+# research pick the GPT-5.4 nano, as accurate there at about half the price and without the long reasoning of the mini.
 RECOMMENDED_MODELS = {
-    "router_model": ("chat", "gpt-4o-mini"),
-    "scope_model": ("chat", "gpt-5-mini"),
-    "research_model": ("chat", "gpt-oss-20b"),
+    "router_model": ("chat", "claude-haiku-5-5"),
+    "scope_model": ("chat", "gpt-5.4-nano"),
+    "scout_model": ("chat", "claude-haiku-5-5"),
+    "research_model": ("chat", "gpt-5.4-nano"),
     "embedding_model": ("embedding", "text-embedding-3-small"),
     "rerank_model": ("rerank", "rerank-3-5"),
 }

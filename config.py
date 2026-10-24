@@ -23,6 +23,7 @@ _LOCK = threading.RLock()
 DEFAULT_CONFIG = {
     "router_model": "",
     "scope_model": "",
+    "scout_model": "",
     "embedding_model": "",
     "rerank_model": "",
     "research_model": "",

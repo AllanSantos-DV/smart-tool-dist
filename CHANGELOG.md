@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.9.31 - beta
+
+- `scout_model` is filled by default. The setup screen (and the daemon, when it checks the models) now fills an empty
+  `scout_model` with Claude Haiku 5.5 when the configured gateway has it; a choice you made is never replaced, and a
+  gateway without that model leaves the field empty to choose (the scout then returns the literal lines, as before).
+- The other recommended models were re-measured by the same criterion (correctness first, price second; 3 rounds per
+  model; docs/research/2026-10-24-modelos-do-scout-e-dos-outros-papeis.md) and changed for new fills: `router_model`
+  Claude Haiku 5.5 (was GPT-4o-mini: it invented an answer to every request whose answer was not on the page),
+  `scope_model` GPT-5.4 nano (same accuracy as GPT-5-mini at 29% of the price), `research_model` GPT-5.4 nano (was
+  GPT-OSS 20B, which failed tool calls). Models already set are kept.
+  - Scout with an index (16 questions x 3 rounds x 15 models): Haiku 5.5 21/36 files found (the index's ceiling, equal
+    to no model), 12/12 on the questions with no answer, 0 failures; without an index, 20/36 against 12/36 for the
+    keyword scan and at most 17/36 for the other models.
+  - 8-question sessions with Sonnet: US$ 0.121 per session with Haiku 5.5 against 0.177 without a model, 73/80 against
+    75/80, and the agent never left the tool to read files itself (GPT-4o-mini: 10 times).
+- The client repeats a chat call once without `temperature` when the gateway answers 400 about it (Claude on Bedrock,
+  the GPT-5 family) and remembers the model; a second refusal still fails.
+- Tests: `tests/test_model_client.py`; probes `tests/scout_model_probe.py` and `tests/role_model_probe.py`;
+  `tests/scout_probe.py --scout-model`.
+
+## 0.9.30 - beta
+
+- New MCP tool `smart_scout(project_root, question, terms?, max_files?)`: answers a question about a project's code with
+  the lines that answer it, read inside Smart Tool so the files never enter the agent's context.
+  - Candidates come from the `smart_search` pipeline: the index when it is ready, the index plus a keyword read of the
+    files changed after it, or the keyword scan of the disk while the first index is built (answered at once, outside
+    the per-folder queue). With no index, no saved scope and no model, the scan covers the whole project (dependency,
+    hidden and generated folders excluded) instead of the root files only.
+  - For each of up to `max_files` files (default 5, at most 10) it reads the current lines from disk and keeps the
+    window with most of the question's words; the agent gets `path:lines`, the functions in it and those lines verbatim.
+  - Optional `scout_model` (setup screen, "Code scout"; empty by default): a small model of the configured gateway
+    reads the windows, writes up to 5 lines of answer and picks the line ranges to show, which are sliced from what
+    was read on disk. Without an index it first chooses the terms and folders to scan (two calls; one with an index).
+    A range outside what was read is clipped or dropped; an answer that cites no lines comes with the best keyword
+    windows; a model failure returns the lines with the error in a warning. Model calls are metered under the
+    purpose `scout` (`project_manage action=usage`).
+  - The server instructions point to `smart_scout` for questions that would mean reading several files, and the tool
+    loads upfront in Claude Code.
+  - Measured in isolated sessions (clean HOME and config, no CLAUDE.md, hooks, skills or plugins; 8 questions per
+    session, Sonnet, two repositories; docs/research/2026-10-24-smart-scout-construido-e-medido.md): with an index,
+    `smart_scout` with a `scout_model` cost US$ 0.154 per session against US$ 0.250 for `smart_search` alone, 31/32
+    right against 29/32, 90 s against 70 s; without a model, US$ 0.203, 29/32, 63 s. On a fresh install (no index)
+    it answered in 43 s (no model) and 117 s (model) against 256 s.
+- Tests: `tests/test_scout.py`; probe `tests/scout_probe.py`.
+
 ## 0.9.29 - beta
 
 - Registering the MCP server in Claude Code or Codex is idempotent. `claude mcp add` refuses a name that exists

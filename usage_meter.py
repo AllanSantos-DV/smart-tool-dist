@@ -11,7 +11,7 @@ import project_store
 
 _CONTEXT=contextvars.ContextVar('smart_usage',default=None)
 _PHASES={'scope':'scope','embedding_query':'query_embedding','model_probe':'embedding_probe',
-         'indexing':'index_embedding','reranking':'rerank'}
+         'indexing':'index_embedding','reranking':'rerank','scout':'scout'}
 
 
 @contextlib.contextmanager

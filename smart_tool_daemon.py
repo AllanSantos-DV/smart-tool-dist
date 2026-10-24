@@ -52,6 +52,7 @@ import index_inventory
 import usage_meter
 import document_text
 import dossier
+import scout
 import embedding_cache
 import model_defaults
 import project_identity
@@ -334,7 +335,8 @@ def _smart_search_job_payload(job_id):
     return payload
 
 # Claude Code defers MCP tools behind tool search; the tools the hook redirects to (and their job polling) load
-# upfront, so an agent denied by the hook already has the replacement in its tool list.
+# upfront, so an agent denied by the hook already has the replacement in its tool list. smart_scout loads upfront too:
+# the server instructions point to it in place of reading several files.
 ALWAYS_LOAD = {"anthropic/alwaysLoad": True}
 SERVER_INSTRUCTIONS = (
     "Smart Tool serves an indexed semantic search over the user's projects and a cheaper web reader. Use smart_search "
@@ -345,9 +347,9 @@ SERVER_INSTRUCTIONS = (
     "node, PowerShell, curl or wget. "
     "Before changing a function, project_manage action=graph with symbol lists its callers and tests; after editing, "
     "project_manage action=affected_tests lists the tests to run. When smart_search returns nothing, retry smart_search with "
-    "other terms; do not switch to Grep, Read of folders or shell search. A helper agent (smart-scout, a cheap model) is "
-    "optional: use it only for a task that chains several Smart Tool calls or while the index is still loading; a plain "
-    "search is faster called directly. A helper that returns empty means retry with the tool or report not found."
+    "other terms; do not switch to Grep, Read of folders or shell search. To answer a question that would mean reading "
+    "several files, call smart_scout: it reads them inside Smart Tool and returns only the lines that answer, as "
+    "path:lines with the literal text."
 )
 
 TOOLS = [
@@ -431,6 +433,30 @@ TOOLS = [
                              "description": "mode=dossier only: hits returned"},
             },
             "required": ["project_root"],
+        },
+    },
+    {
+        "name": "smart_scout",
+        "_meta": ALWAYS_LOAD,
+        "description": (
+            "Answers a question about a project's code with the lines that answer it, read inside Smart Tool so the "
+            "files never enter your context: path:lines plus the literal text of each excerpt, read from disk now. "
+            "Use it instead of reading several files one by one (how a flow works, where something is decided). "
+            "Candidates come from the index when it is ready and from a keyword scan of the disk when it is not. "
+            "When a scout_model is configured, a light model also writes a short answer and keeps only the lines that "
+            "support it; its text never replaces the literal lines. For a plain lookup of a name, smart_search is enough."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_root": {"type": "string", "description": "Absolute path to the project root"},
+                "question": {"type": "string", "description": "The question in natural language, as you would ask a colleague"},
+                "terms": {"type": "string", "description": "Optional identifier words you already know (function, class, config names)"},
+                "max_files": {"type": "integer", "minimum": 1, "maximum": scout.MAX_FILES, "default": scout.DEFAULT_MAX_FILES,
+                              "description": "Files read and shown at most"},
+            },
+            "required": ["project_root", "question"],
+            "additionalProperties": False,
         },
     },
     {
@@ -1102,6 +1128,7 @@ def _perform_smart_search_isolated(arguments, job_id):
     vectors = {}
     overlay = None
     search_model = model
+    source = "index"
     if problem:
         model_client.OFFLINE.set(problem)
     token = "" if problem else model_client.get_token()
@@ -1120,6 +1147,7 @@ def _perform_smart_search_isolated(arguments, job_id):
     elif _cold_index(root, cfg, problem):
         overlay, notice = _cold_overlay(root, texts)
         search_model = None
+        source = "cold"
         warnings += [text for text in (notice, _refresh_in_background(root, {"refresh": True})) if text]
     elif problem and not local_embedder.is_local(model):
         if not indexer.info(root).get("chunks"):
@@ -1144,6 +1172,7 @@ def _perform_smart_search_isolated(arguments, job_id):
             lag = _index_lag(root, model, cfg, problem, job_id)
             if lag is not None:
                 overlay, notice = _lag_overlay(root, lag)
+                source = "index+disk" if overlay else source
                 warnings += [text for text in (notice, _refresh_in_background(root, lag)) if text]
             else:
                 try:
@@ -1231,6 +1260,9 @@ def _perform_smart_search_isolated(arguments, job_id):
     warning = " ".join(warnings)
     if warning:
         _update_job(job_id, warning=warning)
+    if arguments.get("_structured"):
+        return {"source": source if source == "cold" or vectors else "lexical index", "blocks": blocks,
+                "warnings": warnings}
     return _grouped_yaml(index_profile.public(profile), blocks, " ".join(warnings + notes))
 
 
@@ -1612,6 +1644,152 @@ def _agent_search_answer(payload):
     if not slim.get("cancel_requested"):
         slim.pop("cancel_requested", None)
     return _to_json_sanitized(slim)
+
+
+SCOUT_SEARCH_WAIT_S = 20
+SCOUT_MODEL_TIMEOUT_S = 30
+SCOUT_SCAN_MAX_FILES = 4000
+SCOUT_MAX_POINTERS = 8
+_SCOUT_SOURCES = {
+    "index": "index (semantic search and rerank)",
+    "index+disk": "index, with the files changed after it searched by keyword on disk",
+    "lexical index": "index by keyword only (no embedding)",
+    "cold": "keyword scan of the disk (no index yet; it is being built in the background)",
+    "pending": "keyword scan of the disk (the index is being updated in the background)",
+    "failed": "keyword scan of the disk (the search failed)",
+}
+
+
+def _handle_smart_scout(arguments):
+    """smart_scout: the literal lines that answer a question about a project, read from disk, with a short answer by
+    the configured `scout_model` when there is one. Candidates come from the smart_search pipeline (index when ready,
+    keyword scan of the disk when not); without an index the model first plans terms and folders to scan (two calls in
+    all, one with an index). A model failure is reported in a warning and the literal lines are returned without a
+    summary; model calls are recorded in the usage meter under the purpose `scout`."""
+    started = time.monotonic()
+    args = scout.arguments(arguments)
+    root = project_identity.display_root(args["project_root"])
+    question, max_files = args["question"], args["max_files"]
+    query = " ".join(part for part in (args["terms"], question) if part)
+    model = config.load_config().get("scout_model") or ""
+    problem = _gateway_problem() if model else None
+    warnings, calls, failure = [], 0, None
+    if problem:
+        warnings.append(f"scout_model {model} unavailable ({problem}): literal lines only, no answer.")
+        failure, model = "gateway", ""
+    with usage_meter.job(root, index_views.describe(root), "scout"):
+        found = _scout_search(root, query, question, max_files)
+        usage_meter.phase("scout")
+        warnings += found["warnings"]
+        rows = scout.order_candidates(found["blocks"], max_files)
+        plan_terms = []
+        if model and found["source"] in ("cold", "pending", "failed"):
+            calls += 1
+            try:
+                plan_terms, planned = _scout_plan_scan(root, question, model)
+                rows = planned + rows
+            except Exception as exc:
+                warnings.append(f"scout_model {model} failed planning the scan ({_project_error(exc)}): literal lines "
+                                "only, no answer.")
+                failure, model = "plan", ""
+        if (not model and found["source"] in ("cold", "pending", "failed")
+                and not index_scope.valid_scope(index_scope.load_scope(root))):
+            wide, scanned, total = _scout_scan(root, [""], " ".join(scout.focus_terms(args["terms"], question)))
+            rows = wide + rows
+            warnings.append(f"No index and no saved scope yet: keyword scan of the whole project in {scanned} of {total} "
+                            "files (dependency, hidden and generated folders excluded).")
+        terms = scout.focus_terms(args["terms"], question, " ".join(plan_terms))
+        items = scout.evidence(root, rows, terms, max_files,
+                               scout.MODEL_WINDOW_LINES if model else scout.LEXICAL_WINDOW_LINES)
+        shown = {item["path"] for item in items}
+        others = list(dict.fromkeys(f"{row['path']}:{row['lines']}" for row in rows
+                                    if row["path"] not in shown))[:SCOUT_MAX_POINTERS]
+        source = _SCOUT_SOURCES[found["source"]]
+        text = None
+        if model and items:
+            calls += 1
+            try:
+                raw = _research_llm_call(model, model_client.get_token(), scout.ANSWER_SYSTEM,
+                                         scout.answer_prompt(question, items), scout.ANSWER_TOOL,
+                                         timeout=SCOUT_MODEL_TIMEOUT_S)
+                found_answer, answer, citations = scout.valid_answer(raw, items)
+                note = f"{model} ({calls} call{'s' if calls > 1 else ''})"
+                if citations:
+                    text = scout.render(question, source, items, citations, answer, found_answer, note, warnings, others)
+                else:
+                    shown_items = scout.evidence(root, rows, terms, max_files,
+                                                 scout.LEXICAL_WINDOW_LINES)[:scout.UNCITED_WINDOWS]
+                    rest = [f"{item['path']}:{item['start']}-{item['end']}" for item in items
+                            if item["path"] not in {kept["path"] for kept in shown_items}]
+                    text = scout.render(question, source, shown_items, None, answer, found_answer, note,
+                                        warnings + ["the scout_model cited no lines; the best keyword windows are shown "
+                                                    "instead."], rest + others)
+            except Exception as exc:
+                warnings.append(f"scout_model {model} failed writing the answer ({_project_error(exc)}): literal lines "
+                                "only, no answer.")
+                failure = "answer"
+                items = scout.evidence(root, rows, terms, max_files, scout.LEXICAL_WINDOW_LINES)
+        if text is None:
+            text = scout.render(question, source, items, warnings=warnings, others=others)
+    _metric("scout", source=found["source"], model=bool(model) and failure is None, model_calls=calls, failure=failure,
+            files=len({item["path"] for item in items}), chars=len(text), elapsed_s=round(time.monotonic() - started, 2))
+    return _sanitize_text(text)
+
+
+def _scout_search(root, query, question, max_files):
+    """`{"source", "blocks", "warnings"}` for smart_scout: the smart_search pipeline (structured result) when it answers
+    within SCOUT_SEARCH_WAIT_S; otherwise, or when it fails, a keyword scan of the disk in the searched scope while the
+    search job keeps updating the index in the background. While the first index of the folder is being built the cold
+    path runs at once, outside the per-folder queue, as for a redirected search."""
+    limits = {"code": min(SEARCH_LIMIT_TOTAL - 6, max_files * 2), "test": 3, "doc": 3}
+    search = {"project_root": root, "query": query, "doc_query": question, "group": "all", "top_k": limits,
+              "_structured": True}
+    if _cold_index_building(root):
+        return _perform_smart_search(search, "")
+    job_id, future = _submit_project_job("smart_search", search)
+    deadline = time.monotonic() + SCOUT_SEARCH_WAIT_S
+    if future is not None:
+        with contextlib.suppress(Exception):
+            future.result(timeout=SCOUT_SEARCH_WAIT_S)
+    while True:
+        with _JOBS_LOCK:
+            job = dict(_jobs.get(job_id) or {})
+        if job.get("status") != "pending" or time.monotonic() >= deadline:
+            break
+        time.sleep(0.2)
+    if job.get("status") == "done" and isinstance(job.get("result"), dict):
+        return job["result"]
+    state, warnings = ("pending", []) if job.get("status") == "pending" else (
+        "failed", [f"smart_search failed ({job.get('error') or 'no result'}); keyword scan of the disk instead."])
+    overlay, _notice = _cold_overlay(root, [query])
+    found = indexer.search(root, None, top_k=max_files * 3, query=query, overlay=overlay)
+    return {"source": state, "warnings": warnings,
+            "blocks": {"code": [{"path": path, "lines": f"{start}-{end}", "snippet": text[:500]}
+                                for _score, path, start, end, text in found]}}
+
+
+def _scout_plan_scan(root, question, model):
+    """First model call of smart_scout without an index: the model names identifier terms and folders from the
+    project outline, and the daemon scans those folders (plus the root files) by keyword within COLD_SCAN_BUDGET_S.
+    Returns `(terms, rows)` with the rows ranked like the cold search."""
+    folders, root_files = scout.outline(root)
+    raw = _research_llm_call(model, model_client.get_token(), scout.PLAN_SYSTEM,
+                             scout.plan_prompt(question, folders, root_files), scout.PLAN_TOOL,
+                             timeout=SCOUT_MODEL_TIMEOUT_S)
+    terms, picked = scout.valid_plan(raw, folders)
+    rows, _scanned, _total = _scout_scan(root, picked, " ".join(terms))
+    return terms, rows
+
+
+def _scout_scan(root, include, query):
+    """`(rows, scanned, total)`: the files under the `include` folders (index exclusions applied, root files always
+    in, '' = the whole project) holding a term of `query`, read from disk within COLD_SCAN_BUDGET_S and ranked by
+    keyword like the cold search."""
+    files = index_scope.resolve_included_files(root, {"include": include})[:SCOUT_SCAN_MAX_FILES]
+    chunks, scanned = indexer.keyword_chunks(root, files, [query], COLD_SCAN_BUDGET_S)
+    found = indexer.search(root, None, top_k=scout.MAX_FILES * 2, query=query, overlay={"drop": [], "chunks": chunks})
+    return ([{"path": path, "lines": f"{start}-{end}", "snippet": text[:500]} for _score, path, start, end, text in found],
+            scanned, len(files))
 
 
 def _project_payload(project):
@@ -3773,6 +3951,7 @@ _TOOL_HANDLERS = {
     "project_manage": _handle_project_manage,
     "smart_search": _handle_smart_search,
     "smart_search_result": _handle_smart_search_result,
+    "smart_scout": _handle_smart_scout,
     "web_search": _handle_web_search,
     "web_search_result": _handle_web_search_result,
 }

@@ -5,6 +5,7 @@ A local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharpe
 | Tool | What it does |
 |---|---|
 | `smart_search` / `smart_search_result` | Semantic + lexical search over an indexed project, results split into code, tests and docs, with the likeliest functions per chunk |
+| `smart_scout` | Answers a question about the code with the lines that answer it: reads the candidate files inside Smart Tool and returns `path:lines` with the literal text, so the files never enter the agent's context; with a `scout_model`, a small model also writes a short answer and keeps only the lines that support it |
 | `web_search` / `web_search_result` | Web search across several sources in parallel, in the query language and in English, with a cache shared across sessions; `depth="research"` runs a multi-round research loop |
 | `web_fetch` | Reads a known URL and returns only the answer to your prompt, written by a small model; pages are cached for 24 h. Pages over 60,000 characters are not cut: the model reads the parts closest to the prompt (needs an `embedding_model`) |
 | `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage; `graph` with `symbol` tells what changing a function touches: callers, calls, the tests that reach it and the files that import it |
@@ -15,7 +16,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.29 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.31 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -27,6 +28,7 @@ program that runs on your machine and offers the agent better tools for the same
 ```
 Claude Code / Codex ──MCP──▶ Smart Tool daemon (127.0.0.1, one per machine)
                                ├─ smart_search ──▶ local index of your project (SQLite)
+                               ├─ smart_scout ───▶ the files behind a search, read on disk (small model optional)
                                ├─ web_search ───▶ several search engines at once, shared cache
                                ├─ web_fetch ────▶ the page, read by a small model
                                └─ project_manage
@@ -40,6 +42,13 @@ once, by meaning (embeddings) and by exact words (SQLite full-text search), merg
 rerank model, reorders the best candidates. The agent gets back a few chunks split into code, tests and docs, with
 the functions most likely to matter, instead of every line that contains a word. The index follows the project:
 only files whose content changed are processed again, and each Git branch keeps its own view.
+
+**Reading code to answer a question.** `smart_scout` takes a question in plain language. It finds the candidates the
+same way as `smart_search` (or by keyword on disk while there is no index yet), reads the current lines of each one
+and keeps, per file, the window with most of the question's words. The agent receives `path:lines` and those lines
+verbatim. With a `scout_model` (the setup screen fills it with Claude Haiku 5.5 when the gateway has it), a small model reads those windows, writes a few lines of answer
+and picks which lines to show; without an index it first picks the words and folders to scan (two calls; one with an
+index). What the model writes never replaces the literal lines, and when it fails the lines come back with the error.
 
 **Searching the web.** `web_search` asks several free search sources in parallel (DuckDuckGo, Wikipedia, Yahoo,
 Exa, Google and others), in the language of the question and in English, and merges what comes back. Search APIs with a
