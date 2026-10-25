@@ -22,11 +22,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autostart
 import config
 import daemon_launcher
+import toast_notice
 import update_check
 import version
 
 POLL_INTERVAL_S = 45
 UPDATE_CHECK_INTERVAL_S = 24 * 3600
+NOTICE_INTERVAL_S = 600
 SETUP_URL = "http://127.0.0.1:8765/setup"
 
 _STATE_LOCK = threading.Lock()
@@ -109,6 +111,42 @@ def _poll_loop(icon):
         except Exception:
             _set_state("down", icon)
         time.sleep(POLL_INTERVAL_S)
+
+
+def _show_notices(icon, notices):
+    """Shows a toast for each pending notice: the new-default-models offer and each model over the failure limit."""
+    offer = notices.get("upgrade")
+    if offer:
+        lines = [f"{role}: {change['current']} -> {change['new']}" for role, change in offer["changes"].items()]
+        nonce = offer["nonce"]
+        toast_notice.show("Smart Tool has new recommended models", lines, [
+            ("Apply now", toast_notice.action_uri("models-apply", n=nonce)),
+            ("Don't show again", toast_notice.action_uri("models-decline", n=nonce)),
+        ], tag="models-upgrade")
+    for row in notices.get("failing") or []:
+        last = row.get("last_error") or "see the failure log in the settings"
+        toast_notice.show(
+            f"{row['model']} is failing", [f"{row['errors']} of {row['calls']} calls failed in 24 h as {row['role']}.", last[:160]],
+            [("Switch model", toast_notice.action_uri("open-setup", section="models")),
+             ("Mute 7 days", toast_notice.action_uri("mute-model", model=row["model"]))], tag="model-failing:" + row["model"])
+
+
+def _notice_loop(icon):
+    """Asks the daemon every 10 minutes whether a toast is due. The daemon decides (once a day per notice) and marks it
+    announced, so a restart of the tray never repeats one."""
+    while True:
+        try:
+            daemon_url = (daemon_launcher.read_registry() or {}).get("url")
+            if daemon_url:
+                request = urllib.request.Request(daemon_url.rstrip("/") + "/setup/notices", data=b"{}", method="POST",
+                                                 headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    _show_notices(icon, json.load(response))
+        except Exception as exc:
+            if str(exc) != _state.get("notice_error"):
+                _state["notice_error"] = str(exc)
+                icon.notify(f"Could not show a Smart Tool notice: {exc}", "Smart Tool")
+        time.sleep(NOTICE_INTERVAL_S)
 
 
 def _announce_start(icon):
@@ -304,6 +342,7 @@ def main():
     )
     threading.Thread(target=_poll_loop, args=(icon,), daemon=True).start()
     threading.Thread(target=_update_loop, args=(icon,), daemon=True).start()
+    threading.Thread(target=_notice_loop, args=(icon,), daemon=True).start()
     try:
         icon.run()
     finally:

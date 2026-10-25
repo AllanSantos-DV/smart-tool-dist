@@ -55,6 +55,7 @@ import dossier
 import scout
 import embedding_cache
 import model_defaults
+import model_health
 import project_identity
 import project_store
 import project_scheduler
@@ -3984,13 +3985,19 @@ def _dispatch_tool_call(params, session_id=None):
         return _tool_result(_sanitize_text(f"Unknown tool: {name}"), is_error=True)
     token = _MCP_SESSION.set(session_id)
     try:
-        return _tool_result(handler(arguments))
-    except Exception as exc:
-        # Boundary central pra qualquer handler atual/futuro: uma exceção pode
-        # carregar texto de uma fonte não totalmente confiável (ex.: corpo/reason
-        # de erro de um proxy externo) até este ponto sem ter passado por
-        # sanitização própria do handler.
-        return _tool_result(_sanitize_text(str(exc)), is_error=True)
+        with model_health.tool_call(name) as failures:
+            try:
+                result = _tool_result(handler(arguments))
+            except Exception as exc:
+                # Boundary central pra qualquer handler atual/futuro: uma exceção pode
+                # carregar texto de uma fonte não totalmente confiável (ex.: corpo/reason
+                # de erro de um proxy externo) até este ponto sem ter passado por
+                # sanitização própria do handler.
+                result = _tool_result(_sanitize_text(str(exc)), is_error=True)
+        warning = model_health.warning_text(failures, setup_ui.setup_origin())
+        if warning:
+            result["content"][0]["text"] += _sanitize_text(warning)
+        return result
     finally:
         _MCP_SESSION.reset(token)
 
@@ -4059,6 +4066,7 @@ def _loopback_host(header_value, require_port=False):
 
 _SETUP_SAVES = {
     "/setup/models": setup_ui.handle_models_save,
+    "/setup/models/upgrade": setup_ui.handle_upgrade_action,
     "/setup/providers": setup_ui.handle_providers_save,
     "/setup/local-models": setup_ui.handle_local_models_save,
     "/setup/integration": setup_ui.handle_integration_save,
@@ -4180,6 +4188,13 @@ class MCPHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._write_json(500, {"error": _sanitize_text(str(exc))})
             return
+        if self.path in ("/setup/models/upgrade", "/setup/models/health"):
+            try:
+                self._write_json(200, setup_ui.handle_upgrade_get() if self.path.endswith("upgrade")
+                                 else setup_ui.handle_health_get())
+            except Exception as exc:
+                self._write_json(500, {"error": _sanitize_text(str(exc))})
+            return
         if self.path == "/projects":
             import projects_ui
             self._write_html(200, projects_ui.render_projects_page())
@@ -4262,6 +4277,12 @@ class MCPHandler(BaseHTTPRequestHandler):
             return
         if urllib.parse.urlsplit(self.path).path == "/hooks/session-audit":
             self._write_json(200, _session_audit_hook(self))
+            return
+        if self.path == "/setup/notices":
+            try:
+                self._write_json(200, setup_ui.handle_notices())
+            except Exception as exc:
+                self._write_json(500, {"error": _sanitize_text(str(exc))})
             return
         save = _SETUP_SAVES.get(self.path)
         if save:

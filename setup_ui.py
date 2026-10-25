@@ -18,6 +18,7 @@ import json
 import os
 import re
 import secrets
+import time
 
 import autostart
 import block_patterns
@@ -29,6 +30,8 @@ import endpoint_sync
 import gateway
 import model_catalog
 import model_defaults
+import model_health
+import model_upgrade
 import local_embedder
 import project_store
 import secret_store
@@ -153,6 +156,56 @@ def handle_models_get():
             "site_memory_similarity_threshold": list(config.SITE_MEMORY_SIMILARITY_THRESHOLD_RANGE),
         },
     }
+
+
+_UPGRADE_CHECK_EVERY_S = 3600
+_upgrade_checked = {"at": 0.0, "error": ""}
+
+
+def _checked_upgrade(force=False):
+    """The model offer, rechecked against the catalog at most once an hour (or when forced). A catalog that cannot be
+    read is reported in `check_error`, with the last stored offer, never as 'nothing to offer'."""
+    now = time.time()
+    if force or now - _upgrade_checked["at"] >= _UPGRADE_CHECK_EVERY_S:
+        try:
+            model_upgrade.check()
+            _upgrade_checked["error"] = ""
+        except Exception as exc:
+            _upgrade_checked["error"] = str(exc)[:300]
+        _upgrade_checked["at"] = now
+    return {**model_upgrade.status(), "check_error": _upgrade_checked["error"]}
+
+
+def handle_upgrade_get():
+    return _checked_upgrade(force=True)
+
+
+def handle_upgrade_action(body):
+    action = body.get("action") if isinstance(body, dict) else None
+    try:
+        if action == "apply":
+            text = model_upgrade.apply()
+        elif action == "decline":
+            text = model_upgrade.decline()
+        elif action == "revert":
+            text = model_upgrade.revert()
+        else:
+            raise SetupError("Invalid action: use apply, decline or revert.")
+    except (ValueError, config.ConfigCorruptedError, OSError) as exc:
+        raise SetupError(str(exc))
+    return {"ok": True, "message": text, "upgrade": model_upgrade.status()}
+
+
+def handle_health_get():
+    return model_health.summary()
+
+
+def handle_notices():
+    """What the tray should show now: the model offer (once a day until answered) and models over the failure limit
+    (once a day each). Fetching marks them announced, so each toast is shown once per reminder period."""
+    upgrade = _checked_upgrade()
+    offer = model_upgrade.due() if upgrade["state"] == "pending" else None
+    return {"upgrade": offer, "failing": model_health.alerts_due(), "check_error": upgrade["check_error"]}
 
 
 def handle_local_models_get():
@@ -671,6 +724,24 @@ _PAGE_TEMPLATE = """<!doctype html>
         <div class="msg" id="gateway-msg" role="status"></div>
       </div>
 
+      <div class="card" id="upgrade-card" hidden>
+        <div class="card-head"><h3>New recommended models</h3><span class="pill" id="upgrade-pill" data-tone="warn">Available</span></div>
+        <p class="lede">This version recommends other models than the ones you use. Nothing changes until you apply; the models you have now are kept so you can switch back.</p>
+        <ul id="upgrade-list"></ul>
+        <div class="actions">
+          <button type="button" class="primary" id="btn-upgrade-apply">Apply recommended models</button>
+          <button type="button" id="btn-upgrade-decline">Keep mine, don't ask again</button>
+          <button type="button" id="btn-upgrade-revert" hidden>Switch back to my previous models</button>
+        </div>
+        <div class="msg" id="upgrade-msg" role="status"></div>
+      </div>
+
+      <div class="card" id="health-card">
+        <div class="card-head"><h3>Model failures (last 24 h)</h3><span class="pill" id="health-pill" data-tone="busy">Checking</span></div>
+        <p class="lede">Every failed call to a gateway model, by role and tool. A model that fails half of its calls (5 or more) also raises a Windows notification.</p>
+        <div id="health-table"></div>
+      </div>
+
       <div class="card" id="models-card">
         <div class="card-head"><h3>2. Models</h3><span class="pill" id="models-pill" data-tone="busy">Checking</span></div>
         <p class="lede">Any model id your gateway accepts. The gateway's catalog shows up as suggestions while you type.</p>
@@ -1046,6 +1117,52 @@ async function loadModels() {
     setMsg("models-msg", "", "");
   } catch (error) {
     setMsg("models-msg", "error", "Could not read the gateway catalog: " + error.message);
+  }
+}
+
+function esc(text) { const el = document.createElement("span"); el.textContent = text; return el.innerHTML; }
+async function loadUpgrade() {
+  try {
+    const data = await getJSON("/setup/models/upgrade");
+    const rows = Object.entries(data.changes || {}).map(([role, change]) => `<li><b>${esc(role)}</b>: ${esc(change.current)} → ${esc(change.new)}</li>`);
+    const offer = data.state === "pending" && rows.length;
+    const applied = data.state === "applied" && Object.keys(data.previous || {}).length;
+    $("upgrade-card").hidden = !(offer || applied);
+    $("upgrade-list").innerHTML = offer ? rows.join("") : Object.entries(data.previous).map(([role, model]) => `<li><b>${esc(role)}</b> was ${esc(model)}</li>`).join("");
+    setPill("upgrade-pill", offer ? "warn" : "ok", offer ? "Available" : "Applied");
+    $("btn-upgrade-apply").hidden = $("btn-upgrade-decline").hidden = !offer;
+    $("btn-upgrade-revert").hidden = !applied;
+    if (data.check_error) setMsg("upgrade-msg", "error", "Could not check the catalog: " + data.check_error);
+  } catch (error) {
+    $("upgrade-card").hidden = false;
+    setMsg("upgrade-msg", "error", "Could not read the model offer: " + error.message);
+  }
+}
+for (const [id, action] of [["btn-upgrade-apply", "apply"], ["btn-upgrade-decline", "decline"], ["btn-upgrade-revert", "revert"]]) {
+  $(id).addEventListener("click", async () => {
+    setMsg("upgrade-msg", "", "Working…");
+    try {
+      const result = await post("/setup/models/upgrade", { action });
+      await loadUpgrade();
+      await loadModels();
+      setMsg("upgrade-msg", "ok", result.message);
+    } catch (error) {
+      setMsg("upgrade-msg", "error", error.message);
+    }
+  });
+}
+async function loadHealth() {
+  try {
+    const data = await getJSON("/setup/models/health");
+    const failing = data.models.filter((row) => row.failing).length;
+    setPill("health-pill", failing ? "bad" : "ok", failing ? plural(failing, "model") + " failing" : "No problem");
+    const models = data.models.map((row) => `<tr><td>${esc(row.role)}</td><td>${esc(row.model)}</td><td>${row.errors} / ${row.calls}</td><td>${Math.round(row.rate * 100)}%</td></tr>`).join("");
+    const failures = data.failures.map((row) => `<tr><td>${esc(new Date(row.at * 1000).toLocaleString())}</td><td>${esc(row.role)}</td><td>${esc(row.model)}</td><td>${esc(row.tool || "-")}</td><td>${esc(row.error)}</td></tr>`).join("");
+    $("health-table").innerHTML = (models ? `<table><tr><th>Role</th><th>Model</th><th>Failed / calls</th><th>Rate</th></tr>${models}</table>` : "<p>No model call in the last 24 hours.</p>")
+      + (failures ? `<table><tr><th>When</th><th>Role</th><th>Model</th><th>Tool</th><th>Error</th></tr>${failures}</table>` : "");
+  } catch (error) {
+    setPill("health-pill", "bad", "Unavailable");
+    $("health-table").textContent = "Could not read the failure log: " + error.message;
   }
 }
 $("btn-save-models").addEventListener("click", async () => {
@@ -1809,7 +1926,8 @@ $("btn-audit-run").addEventListener("click", async () => {
 
 renderGateway();
 renderOverview();
-if (status.gateway.status === "ready") loadModels();
+if (status.gateway.status === "ready") { loadModels(); loadUpgrade(); }
+loadHealth();
 loadLocalModels();
 loadIntegration();
 loadAutostart();

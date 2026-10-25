@@ -7,6 +7,7 @@ import urllib.error
 import usage_meter
 
 import gateway
+import model_health
 
 OFFLINE = contextvars.ContextVar("model_offline", default=None)
 _NO_TEMPERATURE = set()
@@ -34,6 +35,7 @@ def fetch(path, token, method="GET", body=None, timeout=15):
         raise
     finally:
         usage_meter.record(path,body,result,headers,failure,time.monotonic()-started)
+        model_health.record(path,body,failure)
 
 
 def _fetch(path, _token, method="GET", body=None, timeout=15):

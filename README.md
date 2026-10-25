@@ -16,7 +16,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.31 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.32 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -92,7 +92,7 @@ updating, updated, update failed), and agent sessions get the same line on their
 start when the SessionStart report is on, shown to you too) with the link to the changes. The tray menu has "Update to
 X" (or "Check for updates") on demand and an "Update automatically" switch; `SMART_TOOL_AUTO_UPDATE=off` also turns
 automatic updates off, and the newer-version notice then carries the command to run. Running the command by hand also updates; `~/.smart-tool` is kept. It downloads [uv](https://docs.astral.sh/uv/) (checksum
-verified) and a private Python 3.12 into `~/.smart-tool/runtime`, with nothing added to `PATH` or the registry, then
+verified) and a private Python 3.12 into `~/.smart-tool/runtime`, with nothing added to `PATH` and, in the registry, only two per-user (HKCU) keys that make the notification buttons work, then
 copies Smart Tool to `%LOCALAPPDATA%\Programs\SmartTool` with its own virtual environment,
 installs the web runtime, registers a per-user Scheduled Task that starts the tray at logon and starts the daemon on
 `http://127.0.0.1:8765` (another free port is used, and announced, if 8765 is taken).
@@ -251,13 +251,16 @@ fails to load is listed in the setup screen with its error and does not affect t
   everything local.
 - Web queries go to the search sources listed in `NOTICE`. Their free tiers are rate limited per IP address; respect
   each service's terms of use.
-- Logs and metrics are written to `~/.smart-tool/data` and never leave the machine.
+- Logs and metrics are written to `~/.smart-tool/data` and never leave the machine. That includes the model failure log
+  (model, role, tool and the error text, up to 300 characters, which can carry the gateway's error body; never the request).
 
 ## Uninstall
 
 Turn off "Start automatically" in the setup screen, quit from the tray, remove the hook entries from
 `~/.claude/settings.json` / `~/.codex/hooks.json` (the setup screen shows them), run `claude mcp remove smart-tool -s
-user` / `codex mcp remove smart-tool`, then delete `%LOCALAPPDATA%\Programs\SmartTool` and `~/.smart-tool`.
+user` / `codex mcp remove smart-tool`, then delete `%LOCALAPPDATA%\Programs\SmartTool` and `~/.smart-tool`. Turning off "Start automatically" also removes the
+two per-user registry keys of the notification buttons (`HKCU\Software\Classes\smart-tool-action` and
+`HKCU\Software\Classes\AppUserModelId\SmartTool.Notifications`); they come back the next time a notification is shown.
 
 ## License
 

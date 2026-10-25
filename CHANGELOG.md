@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.32 - beta
+
+- Users who updated are told about the new recommended models. `model_upgrade` compares the saved `router_model`,
+  `scope_model`, `research_model` and `scout_model` with the recommended ones against the gateway's catalog and the
+  Windows tray shows a toast with "Apply now" and "Don't show again". Applying keeps the previous models so they can be
+  restored from the setup page (card "New recommended models"); a role you changed after the offer is never overwritten;
+  closing the toast reminds again after 24 h; declining silences it for this version. Embedding and rerank models are
+  never offered (changing them invalidates every index). Buttons are protocol links run by `notice_action.py`
+  (`pythonw`, no window, HKCU only, no admin), each carrying a nonce of the offer.
+- Model failures are logged and shown. `model_health` records every model call by hour, model and role (and, on
+  failure, tool, route and error text without the request content). A tool answer that hit a failing model now carries
+  a line with the model, the role, the error and the link to `/setup#models`; the Models page shows the last 24 h
+  (failures/calls) and the 20 latest failures; the tray raises one toast per model per day (5+ calls and 50%+ failures
+  in 24 h) with "Switch model" and "Mute 7 days". Endpoint: `GET /setup/models/health`.
+- Tests: `tests/test_model_upgrade.py`, `tests/test_model_health.py`; research note
+  `docs/research/2026-10-24-aviso-de-modelos-novos-e-falhas-de-modelo.md`.
+
 ## 0.9.31 - beta
 
 - `scout_model` is filled by default. The setup screen (and the daemon, when it checks the models) now fills an empty

@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 
+import toast_notice
+
 TASK_NAME = os.environ.get("SMART_TOOL_TASK_NAME", "SmartTool-Tray")
 
 
@@ -188,6 +190,8 @@ def remove():
         pass
     if _remove_startup_shortcut():
         removed.append("startup_folder")
+    if sys.platform == "win32" and toast_notice.unregister():
+        removed.append("toast_registry")
     return {"ok": True, "removed": removed}
 
 
