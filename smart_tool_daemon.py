@@ -3337,8 +3337,8 @@ _RESEARCH_PLANNER_TOOL = {
 
 _RESEARCHER_SYSTEM_PROMPT = (
     "You are the research step of a web-research loop. You receive raw search-result "
-    "snippets (title/url/snippet) for a topic and must synthesize what they show. Call "
-    "submit_findings with a structured summary: one entry per distinct claim (not per "
+    "snippets (title/url/snippet) for a topic and must synthesize what they show. Answer "
+    "with a structured summary: one entry per distinct claim (not per "
     "source), tagging confidence and whether you only saw a snippet (not the full page). "
     "List real gaps -- aspects of the topic these snippets do not cover at all."
 )
@@ -3355,7 +3355,7 @@ _RESEARCH_CRITIC_SYSTEM_PROMPT = (
     "another iteration only if: the topic explicitly asked for that aspect, or the "
     "high-confidence findings so far are too thin/contradictory to answer at all. "
     "Exhaustive completeness (primary sources, compliance detail, edge cases nobody asked "
-    "about) is never on its own a reason to continue. Call submit_decision."
+    "about) is never on its own a reason to continue. Answer with the JSON object."
 )
 
 _RESEARCH_PLANNER_SYSTEM_PROMPT = (
@@ -3364,27 +3364,12 @@ _RESEARCH_PLANNER_SYSTEM_PROMPT = (
     "and the structured findings/gaps so far. Propose ONE search-engine query targeting "
     "the single gap most relevant to the original topic -- never repeat a query already "
     "searched, and never just restate the original topic verbatim (that would return the "
-    "same pages again). Call submit_next_query."
+    "same pages again). Answer with the JSON object."
 )
 
 
 def _research_llm_call(model, token, system_prompt, user_content, tool, timeout=30):
-    response = model_client.fetch(
-        "/v1/chat/completions", token, method="POST",
-        body={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            "tools": [tool],
-            "tool_choice": {"type": "function", "function": {"name": tool["function"]["name"]}},
-            "temperature": 0,
-        },
-        timeout=timeout,
-    )
-    tool_call = response["choices"][0]["message"]["tool_calls"][0]
-    return json.loads(tool_call["function"]["arguments"])
+    return model_client.structured(model, system_prompt, user_content, tool, timeout=timeout)
 
 
 def _call_researcher(topic, raw_results, token, model, timeout=30):
@@ -3393,18 +3378,6 @@ def _call_researcher(topic, raw_results, token, model, timeout=30):
     )
     user_content = f"Topic: {topic}\n\nRaw search snippets:\n{snippets_text}"
     summary = _research_llm_call(model, token, _RESEARCHER_SYSTEM_PROMPT, user_content, _RESEARCH_FINDINGS_TOOL, timeout=timeout)
-    diversity = summary.get("source_diversity") if isinstance(summary, dict) else None
-    if (not isinstance(summary, dict) or not isinstance(summary.get("findings"), list)
-            or not isinstance(summary.get("gaps"), list) or not isinstance(diversity, dict)
-            or not isinstance(diversity.get("independent_domains"), int)
-            or not isinstance(diversity.get("conflicting_claims"), bool)):
-        raise ValueError("Researcher returned incomplete structured findings")
-    for item in summary["findings"]:
-        if (not isinstance(item, dict) or not isinstance(item.get("claim"), str)
-                or not isinstance(item.get("sources"), list)
-                or item.get("confidence") not in ("alta", "media", "baixa")
-                or item.get("depth") not in ("snippet", "pagina_completa")):
-            raise ValueError("Researcher returned a finding outside the schema")
     # O modelo pode citar uma URL real que conhece de fora dos snippets. O agente
     # chamador recebe só estas fontes, então tal claim pareceria verificável sem ser.
     # Preserva os achados sustentados e transforma os demais em gap para o planner.
@@ -3431,9 +3404,6 @@ def _call_critic(topic, budget_used, findings, token, model, timeout=30):
         f"Structured findings so far (JSON): {json.dumps(findings, ensure_ascii=False)}"
     )
     args = _research_llm_call(model, token, _RESEARCH_CRITIC_SYSTEM_PROMPT, user_content, _RESEARCH_DECISION_TOOL, timeout=timeout)
-    if (not isinstance(args, dict) or not isinstance(args.get("continue_research"), bool)
-            or not isinstance(args.get("reason"), str)):
-        raise ValueError("Critic returned an incomplete decision")
     return args["continue_research"], args["reason"]
 
 

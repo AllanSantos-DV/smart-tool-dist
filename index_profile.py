@@ -92,17 +92,9 @@ def decide(root, included, model, deadline=None):
     remaining = deadline - time.monotonic() if deadline is not None else 120
     if remaining <= 0:
         raise TimeoutError("Profile analysis deadline exceeded.")
-    response = model_client.fetch("/v1/chat/completions", model_client.get_token(), method="POST",
-                                  timeout=min(120, remaining), body={
-        "model": model, "temperature": 0, "tools": [_TOOL], "tool_choice": "required",
-        "messages": [{"role": "user", "content": _PROMPT.format(
-            root=root, rows=json.dumps(rows, ensure_ascii=False), total=total, shown=len(rows))}]})
-    calls = response["choices"][0]["message"].get("tool_calls") or []
-    try:
-        args = next((json.loads(call["function"]["arguments"] or "{}") for call in calls
-                     if call["function"]["name"] == "submit_profile"), None)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"The model returned a profile with invalid JSON: {exc}") from exc
+    args = model_client.structured(model, "", _PROMPT.format(
+        root=root, rows=json.dumps(rows, ensure_ascii=False), total=total, shown=len(rows)), _TOOL,
+        timeout=min(120, remaining))
     if not isinstance(args, dict) or not _valid(args):
         raise RuntimeError("The model did not define a valid profile of groups and languages.")
     return {"version": PROFILE_VERSION, "groups": args["groups"], "languages": args["languages"],

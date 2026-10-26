@@ -42,6 +42,11 @@ DEFAULT_CONFIG = {
     "contact": "",
     "model_adapter": "",
     "model_adapter_options": {},
+    "structured_output": {
+        "mode": "auto",
+        "output_config_routes": ["vertex_ai"],
+        "unsupported_keywords": ["maxItems", "minItems", "minLength", "maxLength", "minimum", "maximum", "pattern"],
+    },
 }
 
 # Local models from the mcp-memory sidecar: fallback = only when the gateway has no model; off = never;
@@ -59,6 +64,11 @@ DUPLICATE_MODES = ("warn", "off")
 # Router model reviewing, in the background, searches the deterministic redirect rule let run: on = propose block
 # patterns for the user to accept in the setup screen; off = no review.
 PATTERN_PROPOSAL_MODES = ("on", "off")
+# Structured output of the model calls that must return JSON (research, scout, freshness): response_format = the
+# OpenAI-style `response_format` json_schema (applied on every gateway route); output_config = Anthropic `output_config`
+# in the chat body (also reports truncation as finish_reason "length"); auto = output_config for the models whose route
+# (the id prefix before the first dot) is in `output_config_routes`, response_format for all others.
+STRUCTURED_OUTPUT_MODES = ("auto", "response_format", "output_config")
 
 
 def doc_mode(cfg=None):
@@ -81,6 +91,25 @@ def pattern_proposals(cfg=None):
     value = (cfg if cfg is not None else load_config()).get("pattern_proposals") or DEFAULT_CONFIG["pattern_proposals"]
     if value not in PATTERN_PROPOSAL_MODES:
         raise ValueError(f"Invalid pattern_proposals ({value!r}) in {CONFIG_PATH}: use on or off.")
+    return value
+
+
+def structured_output(cfg=None):
+    """`{"mode", "output_config_routes", "unsupported_keywords"}`: the stored `structured_output` object over the
+    defaults; an unknown mode, key or value type fails loudly."""
+    stored = (cfg if cfg is not None else load_config()).get("structured_output")
+    if stored is None:
+        stored = {}
+    defaults = DEFAULT_CONFIG["structured_output"]
+    if not isinstance(stored, dict) or set(stored) - set(defaults):
+        raise ValueError(f"Invalid structured_output in {CONFIG_PATH}: an object with only {', '.join(defaults)}.")
+    value = {**defaults, **stored}
+    if value["mode"] not in STRUCTURED_OUTPUT_MODES:
+        raise ValueError(f"Invalid structured_output.mode ({value['mode']!r}) in {CONFIG_PATH}: use auto, "
+                         "response_format or output_config.")
+    for key in ("output_config_routes", "unsupported_keywords"):
+        if not isinstance(value[key], list) or not all(isinstance(item, str) and item for item in value[key]):
+            raise ValueError(f"Invalid structured_output.{key} in {CONFIG_PATH}: a list of non-empty text.")
     return value
 
 

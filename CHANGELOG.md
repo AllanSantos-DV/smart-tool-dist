@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.35 - beta
+
+- Structured output in the model calls that must return JSON. The deep-research steps (researcher, critic, planner),
+  `smart_scout` (scan plan and answer), the freshness check (classify, same topic, validate), the router's search tier
+  and sufficiency decisions, the index profile and the block-pattern review no longer force a tool
+  call and parse its arguments: the request carries the JSON Schema (`output_config` on the Vertex route,
+  `response_format` on any other, Bedrock included), without `temperature`, and the answer is validated against the
+  schema (types, required fields, enums, no unknown fields). A cut answer, a refusal, an empty answer or a field outside
+  the schema is an error with its reason, not an empty result; the 8 shape checks of the researcher and the critic's are
+  gone. Format, routes and ignored keywords are the `structured_output` object of `config.json` (README, state paragraph).
+  Tests in `tests/test_structured_output.py`; measured against the gateway in
+  `docs/research/2026-10-26-saida-estrita-no-smart-tool.md`.
+
 ## 0.9.34 - beta
 
 - The shell rewrite of a redirected search coexists with other PreToolUse hooks on Bash. Hooks of one call run in

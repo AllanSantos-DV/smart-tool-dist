@@ -16,7 +16,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.34 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.35 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -99,6 +99,17 @@ installs the web runtime, registers a per-user Scheduled Task that starts the tr
 
 State lives in `~/.smart-tool`: `config.json`, your model adapters in `adapters/` and indexes, caches and logs in
 `data/`. Secrets (API keys) are encrypted with Windows DPAPI for your user.
+
+The model calls that must return JSON (the deep-research steps, `smart_scout`, the freshness check of cached
+searches, the router's tier and sufficiency decisions, the index profile and the block-pattern review) use the model's structured output instead of a forced tool call: the request carries the JSON Schema, never
+`temperature`, and the answer is validated against the schema before use. A stop other than a normal one (cut at the
+token limit, refusal), an empty answer, a missing field or a value outside an enum fails the call with its reason
+instead of passing as an empty result. The `structured_output` object of `config.json` chooses the format:
+`mode` is `auto` (default: `output_config` for the models whose route, the id prefix before the first dot, is in
+`output_config_routes`, which is `["vertex_ai"]` by default; `response_format`, applied on every gateway route, for all
+others, Bedrock included), `response_format` or `output_config`; `output_config` for a route outside the list is
+refused. `unsupported_keywords` lists the schema keywords the gateway does not apply (`maxItems`, `minLength`...); they
+are left out of the request and the code that reads the answer keeps enforcing them.
 
 ## Set up
 

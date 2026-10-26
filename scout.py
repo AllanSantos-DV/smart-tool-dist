@@ -49,7 +49,7 @@ PLAN_SYSTEM = (
     "You plan a keyword scan of a code project that has no search index yet. Given a question and the project's "
     "folders and root files, return the identifier-style terms most likely written in the code that answers it "
     "(function, class, variable, config names; split camelCase is fine; both the code's language and the question's) "
-    "and the folders worth scanning (only names from the list; the root files are always scanned). Call submit_scan_plan."
+    "and the folders worth scanning (only names from the list; the root files are always scanned). Answer with the JSON object."
 )
 PLAN_TOOL = {"type": "function", "function": {
     "name": "submit_scan_plan",
@@ -62,7 +62,7 @@ ANSWER_SYSTEM = (
     "line number). Write at most 5 short lines, citing excerpts as [E1], [E2]. Then cite the excerpts that answer the "
     "question with the narrowest line range inside each one (at most 40 lines). If no excerpt answers it, set found to "
     "false and say what is missing; never guess beyond the excerpts. Answer in the language of the question. "
-    "Call submit_scout_answer."
+    "Answer with the JSON object."
 )
 ANSWER_TOOL = {"type": "function", "function": {
     "name": "submit_scout_answer",

@@ -192,7 +192,7 @@ def _web_search_tier_system_prompt():
         lines.append(f"- '{adapter['name']}': {adapter['hint']}")
     lines.append(
         "Prefer the default order unless a later tier's recent success rate is clearly "
-        "better than an earlier one's. Call submit_tier."
+        "better than an earlier one's. Answer with the JSON object."
     )
     return "\n".join(lines)
 
@@ -216,26 +216,9 @@ def _tier_decision_tool():
 
 
 def decide_web_search_tier(query, scope, health_summary, router_model):
-    token = model_client.get_token()
-    user_content = json.dumps(
-        {"query": query, "scope": scope, "recent_success_rate": health_summary},
-        ensure_ascii=False,
-    )
-    response = model_client.fetch(
-        "/v1/chat/completions", token, method="POST",
-        body={
-            "model": router_model,
-            "messages": [
-                {"role": "system", "content": _web_search_tier_system_prompt()},
-                {"role": "user", "content": user_content},
-            ],
-            "tools": [_tier_decision_tool()],
-            "tool_choice": {"type": "function", "function": {"name": "submit_tier"}},
-            "temperature": 0,
-        },
-    )
-    tool_call = response["choices"][0]["message"]["tool_calls"][0]
-    args = json.loads(tool_call["function"]["arguments"])
+    args = model_client.structured(router_model, _web_search_tier_system_prompt(), json.dumps(
+        {"query": query, "scope": scope, "recent_success_rate": health_summary}, ensure_ascii=False),
+        _tier_decision_tool(), timeout=15)
     tier = args.get("tier", web_search_adapters.DEFAULT_TIER_ORDER[0])
     reason = args.get("reason", "")
     return tier, reason
@@ -260,38 +243,21 @@ _SEARCH_SUFFICIENCY_TOOL = {
 
 def assess_web_search_results(query, results, requested_num, scope, model, timeout=12):
     """Uma decisão curta sobre relevância/cobertura antes do fallback caro."""
-    token = model_client.get_token()
     evidence = [
         {"title": str(row.get("title") or "")[:180],
          "url": str(row.get("url") or "")[:240],
          "snippet": str(row.get("snippet") or "")[:420]}
         for row in results[:min(requested_num, 10)]
     ]
-    response = model_client.fetch(
-        "/v1/chat/completions", token, method="POST", timeout=timeout,
-        body={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": (
-                    "You assess whether a QUICK web search has enough relevant sources to answer "
-                    "the user's actual query. Call assess_search. Set need_more=true only when "
-                    "the central requested fact or aspect is absent, results are mostly off-topic "
-                    "or duplicative, or time-sensitive results are clearly stale. Do not demand "
-                    "exhaustive depth or primary sources unless the query asks for them. A few "
-                    "good snippets can be sufficient; the calling agent writes the final answer."
-                )},
-                {"role": "user", "content": json.dumps({
-                    "query": query, "scope": scope, "requested_results": requested_num,
-                    "results": evidence,
-                }, ensure_ascii=False)},
-            ],
-            "tools": [_SEARCH_SUFFICIENCY_TOOL],
-            "tool_choice": {"type": "function", "function": {"name": "assess_search"}},
-            "temperature": 0,
-        },
-    )
-    call = response["choices"][0]["message"]["tool_calls"][0]
-    args = json.loads(call["function"]["arguments"])
+    args = model_client.structured(model, (
+        "You assess whether a QUICK web search has enough relevant sources to answer "
+        "the user's actual query. Answer with the JSON object. Set need_more=true only when "
+        "the central requested fact or aspect is absent, results are mostly off-topic "
+        "or duplicative, or time-sensitive results are clearly stale. Do not demand "
+        "exhaustive depth or primary sources unless the query asks for them. A few "
+        "good snippets can be sufficient; the calling agent writes the final answer."
+    ), json.dumps({"query": query, "scope": scope, "requested_results": requested_num, "results": evidence},
+                  ensure_ascii=False), _SEARCH_SUFFICIENCY_TOOL, timeout=timeout)
     if not isinstance(args.get("need_more"), bool):
         raise ValueError("Search evaluation did not return a boolean need_more.")
     return args["need_more"], str(args.get("reason") or "")

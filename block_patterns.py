@@ -92,7 +92,7 @@ _SYSTEM_PROMPT = (
     "file), logs, test or build runs, git commands, registry or system commands, scripts that do not read code. When "
     "block=true, write a Python regex matched with re.search against the call text that catches the same kind of "
     "bulk read (not this exact path) and none of the calls allowed on purpose. Patterns already accepted or rejected "
-    "are listed; do not propose them again. Call submit_proposal."
+    "are listed; do not propose them again. Answer with the JSON object."
 )
 _PROPOSAL_TOOL = {
     "type": "function",
@@ -204,18 +204,9 @@ def _history(tool_name, regex, metrics_path):
 
 
 def _ask(tool_name, text, rule_reason, known, model):
-    token = model_client.get_token()
-    response = model_client.fetch("/v1/chat/completions", token, method="POST", timeout=REVIEW_TIMEOUT_S, body={
-        "model": model,
-        "messages": [{"role": "system", "content": _SYSTEM_PROMPT},
-                     {"role": "user", "content": json.dumps({"tool": tool_name, "call": text[:CALL_MAX_CHARS],
-                                                             "rule_allowed_because": rule_reason,
-                                                             "known_patterns": known}, ensure_ascii=False)}],
-        "tools": [_PROPOSAL_TOOL],
-        "tool_choice": {"type": "function", "function": {"name": "submit_proposal"}},
-        "temperature": 0,
-    })
-    return json.loads(response["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    return model_client.structured(model, _SYSTEM_PROMPT, json.dumps(
+        {"tool": tool_name, "call": text[:CALL_MAX_CHARS], "rule_allowed_because": rule_reason, "known_patterns": known},
+        ensure_ascii=False), _PROPOSAL_TOOL, timeout=REVIEW_TIMEOUT_S)
 
 
 def propose(tool_name, tool_input, rule_reason, model, metrics_path, redact):
