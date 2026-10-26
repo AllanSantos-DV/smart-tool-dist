@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.34 - beta
+
+- The shell rewrite of a redirected search coexists with other PreToolUse hooks on Bash. Hooks of one call run in
+  parallel on the same original input and the host documents no order between their `updatedInput`, so the Smart Tool
+  rewrite is a constant (`true` / `$null`), carries no permission decision, applies only to a content search and leaves
+  an already rewritten call alone; whichever rewrite wins, the PostToolUse still swaps the output for the answer.
+  Rule and evidence in the README and `docs/research/2026-10-19-hook-redirect-transparente.md`; test
+  `test_the_shell_rewrite_coexists_with_other_hooks_that_rewrite_the_same_call`.
+
 ## 0.9.33 - beta
 
 - Recommended models prefer the Vertex route. When the gateway lists a model on several routes, `model_defaults` now

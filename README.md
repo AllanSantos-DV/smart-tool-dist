@@ -16,7 +16,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.33 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.34 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -146,7 +146,12 @@ Redirects) and Maintenance (Setup audit, Startup).
      (without `allowed_domains`/`blocked_domains`). In Claude Code a PostToolUse entry swaps the output (WebFetch and
      WebSearch still run natively, their result is replaced); a shell search whose answer is ready within 10 s runs as a
      no-op instead, so a grep with no match does not end in exit 1. In Codex the shell search is rewritten to print the
-     answer from a file. When the Smart Tool call fails or is late, the native call and its output stay as they are; a
+     answer from a file. Coexistence with other PreToolUse hooks on Bash: they run in parallel on the same original
+     input and the host documents no order between their `updatedInput`. The Smart Tool rewrite is a constant (`true` /
+     `$null`, whatever the search), carries no permission decision (a rival `deny`/`ask` still wins) and only applies to a
+     content search, so a hook that rewrites other commands never meets it; if a rival rewrite of the same search wins,
+     its command runs and the PostToolUse still swaps the output for the answer. Two other hooks rewriting the same command
+     must be resolved in the plugin that owns them (the setup audit lists them). When the Smart Tool call fails or is late, the native call and its output stay as they are; a
      deny, with the exact call to make, is left only for a search whose query cannot be read from the command. The
      decision is a fixed rule, under a millisecond and the same every time: a content search over a project folder (`grep -r`,
      `rg`, `git grep`, the Grep tool on a folder) or over more than 20 listed files goes to `smart_search`, in Bash and
