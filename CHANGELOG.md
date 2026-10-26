@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.33 - beta
+
+- Recommended models prefer the Vertex route. When the gateway lists a model on several routes, `model_defaults` now
+  picks `vertex_ai.*` first, any other route next and `bedrock.*` only when nothing else serves the model (Bedrock was
+  chosen before because ids were taken in alphabetical order). `DEFAULTS_VERSION` is 2, so users who already hold the
+  Bedrock ids get the "New recommended models" offer again and decide whether to apply it.
+- `tests/vertex_route_probe.py` asks the live gateway: every recommended chat id must resolve (Anthropic ones on
+  Vertex) and answer a real request. Result of 2026-10-26 in `docs/research/2026-10-26-rota-vertex-nas-recomendacoes.md`.
+
 ## 0.9.32 - beta
 
 - Users who updated are told about the new recommended models. `model_upgrade` compares the saved `router_model`,

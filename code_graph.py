@@ -20,10 +20,11 @@ import index_scope
 import project_identity
 import web_search_adapters
 import web_document_graph
+import code_graph_go
 import document_text
 
-VERSION = 2
-SOURCE_EXTENSIONS = ('.py','.java','.js','.jsx','.ts','.tsx','.mjs','.cjs','.mts','.cts','.json','.html','.htm','.css','.scss','.sass','.less','.md','.markdown')
+VERSION = 3
+SOURCE_EXTENSIONS = ('.py','.go','.mod','.java','.js','.jsx','.ts','.tsx','.mjs','.cjs','.mts','.cts','.json','.html','.htm','.css','.scss','.sass','.less','.md','.markdown')
 MAX_OVERLAY_BYTES = 5 * 1024 * 1024
 MAX_FILES = 3000
 MAX_TEXT = 24 * 1024 * 1024
@@ -284,7 +285,7 @@ def _analyze(path):
 def _analyze_sources(files,sources,diagnostics,truncated):
     merged={'symbols':[],'dependencies':[],'calls':[],'unresolved':[],'diagnostics':diagnostics,'parsed':[]}
     retryable=False
-    for output in (_python_graph(sources),_javascript_graph(sources,[f['path'] for f in files]),_java_graph(sources),web_document_graph.analyze(sources,[f['path'] for f in files])):
+    for output in (_python_graph(sources),_javascript_graph(sources,[f['path'] for f in files]),_java_graph(sources),code_graph_go.analyze(sources),web_document_graph.analyze(sources,[f['path'] for f in files])):
         for key in merged:merged[key].extend(output.get(key,[]))
         truncated |= output.get('truncated',False)
         retryable |= output.get('retryable',False)

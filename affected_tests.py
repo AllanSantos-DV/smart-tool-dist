@@ -22,7 +22,7 @@ RUN_ALL = re.compile(
     r"bun\.lockb?|pyproject\.toml|setup\.cfg|setup\.py|pytest\.ini|tox\.ini|requirements[^/]*\.txt|poetry\.lock|"
     r"uv\.lock|Pipfile(\.lock)?|tsconfig[^/]*\.json|jsconfig\.json|(jest|vitest|vite|babel)\.config\.[^/]+|"
     r"\.babelrc|\.mocharc[^/]*|pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?|gradle\.properties|"
-    r"\.env[^/]*)$")
+    r"\.env[^/]*|go\.(mod|sum|work(\.sum)?))$")
 CI_CONFIG = re.compile(r"(^|/)(\.github|\.circleci|\.buildkite)/|(^|/)(\.gitlab-ci\.ya?ml|azure-pipelines\.ya?ml|"
                        r"Jenkinsfile|\.travis\.ya?ml|bitbucket-pipelines\.ya?ml|\.gitignore|\.gitattributes|"
                        r"\.editorconfig|\.mailmap|CODEOWNERS|LICENSE(\.[^/]*)?|\.npmignore)$")
@@ -31,7 +31,7 @@ NOTE = ("Selection from the indexed import graph: tests that load code through s
         "suite before committing; run_all is true when a changed file can change every test (config, lockfile, "
         "unanalyzed code). Changed files and files committed after the last indexing are read from disk, so new "
         "files and imports count before reindexing; pytest fixtures link a test to the conftest.py that defines them.")
-TEST_SOURCES = (".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".java")
+TEST_SOURCES = (".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".java", ".go")
 _PATH_LITERAL = re.compile(r"""['"`]((?:\.{0,2}/)?[\w.-]+(?:/[\w.-]+)*\.(?:py|js|mjs|cjs|ts|mts|cts|java))['"`]""")
 _STRING_LITERAL = re.compile(r"""'([^'\n]*)'|"([^"\n]*)\"""")
 _IMPORT_STATEMENT = re.compile(r"(?:^|;)\s*(?:import|from)\s+([A-Za-z_]\w*(?:\.\w+)*)")
@@ -132,6 +132,9 @@ def _commands(root, tests):
             if runner is None and re.search(rf"\bnode\s+(\./)?{re.escape(local)}\b", scripts):
                 runner = "node-script"
             groups[(folder or "", runner)].append(path)
+        elif lower.endswith(".go"):
+            folder, name = _nearest(root, path, ("go.mod",))
+            groups[(folder or "", "go" if name else None)].append(path)
         elif lower.endswith(".java"):
             folder, name = _nearest(root, path, ("pom.xml", "build.gradle", "build.gradle.kts"))
             groups[(folder or "", "maven" if name == "pom.xml" else "gradle" if name else None)].append(path)
@@ -147,6 +150,8 @@ def _commands(root, tests):
         if runner == "maven":
             names = ",".join(sorted({os.path.basename(f).rsplit(".", 1)[0] for f in files}))
             line = f"mvn test -Dtest={names} -Dsurefire.failIfNoSpecifiedTests=false"
+        elif runner == "go":
+            line = "go test " + " ".join(sorted({"./" + posixpath.dirname(f) if posixpath.dirname(f) else "." for f in local}))
         elif runner == "node-script":
             commands.extend({"cwd": folder or ".", "command": f"node {f}"} for f in sorted(local))
             continue
@@ -260,6 +265,7 @@ _TEST_CASES = {
     ".py": re.compile(r"^\s*(async\s+)?def\s+test\w*\s*\(|^\s*class\s+Test\w*|unittest\.TestCase", re.M),
     ".java": re.compile(r"@(Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate|RunWith|Suite)\b|"
                         r"\bstatic\s+\w*Test\s+suite\s*\(|\bextends\s+TestCase\b|\bvoid\s+test\w*\s*\("),
+    ".go": re.compile(r"^func\s+(Test|Benchmark|Fuzz|Example)\w*\s*\(", re.M),
     "script": re.compile(r"\b(it|test|describe|suite)(\.\w+)?\s*\(|\bDeno\.test\b|\bnode:test\b|\bassert\b"),
 }
 

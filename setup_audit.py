@@ -11,6 +11,7 @@ Usage: python setup_audit.py [--project DIR] [--no-probe] [--json]
 """
 import argparse
 import concurrent.futures
+import glob
 import hashlib
 import json
 import os
@@ -41,18 +42,22 @@ PROBE_MAX_AGE_S = 6 * 3600
 SKILL_DESCRIPTION_MAX = 1536
 SKILL_BUDGET_CHARS = 8000
 CODEX_PROJECT_DOC_MAX = 32 * 1024
+SMART_TOOL_SERVER = "smart-tool"
 CLAUDE_TOOLS = ("Bash", "Read", "Grep", "Glob", "LS", "Edit", "MultiEdit", "Write", "NotebookEdit", "WebFetch",
                 "WebSearch", "Task")
 CODEX_TOOLS = ("Bash", "apply_patch")
 DECIDING_EVENTS = ("PreToolUse",)
 DOCS = {"claude_hooks": "https://code.claude.com/docs/en/hooks.md", "codex_hooks": "https://learn.chatgpt.com/docs/hooks.md",
         "claude_skills": "https://code.claude.com/docs/en/skills.md",
+        "claude_subagents": "https://code.claude.com/docs/en/sub-agents",
         "codex_skills": "https://learn.chatgpt.com/docs/build-skills.md",
         "claude_memory": "https://code.claude.com/docs/en/memory.md",
         "codex_agents_md": "https://developers.openai.com/codex/guides/agents-md",
         "claude_mcp": "https://code.claude.com/docs/en/mcp.md", "mcp_lifecycle":
         "https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle"}
 _SCRIPT_RE = re.compile(r"""["']?([^\s"'|&;<>]+\.(?:js|cjs|mjs|py|ps1|sh|bat|cmd|exe))["']?""", re.IGNORECASE)
+# The quoted program text after -e / -c / -p / -Command / --eval: code, not a file the hook runs.
+_INLINE_CODE_RE = re.compile(r"""\s(?:-e|-c|-p|-Command|--eval)\s+(?:"(?:[^"\\]|\\.)*"|'[^']*')""", re.IGNORECASE)
 _SILENCED_RE = re.compile(r"\|\|\s*(?:true|exit\s+0)\b|2>\s*(?:/dev/null|nul)\b|;\s*exit\s+0\s*$", re.IGNORECASE)
 _IMPORT_RE = re.compile(r"(?<![\w`])@((?:~|\.{1,2})?/?[\w.\-/\\]+\.\w+)")
 
@@ -204,6 +209,20 @@ def _approvals(data, approval):
     approval["off"].update(data.get("disabledMcpjsonServers") or [])
 
 
+def _agents(snapshot, folder, scope):
+    """Subagent definitions (*.md with frontmatter) in folder: name, scope, path and `tools` (None when the field is
+    absent, which makes the agent inherit every tool, MCP included)."""
+    found = []
+    for path in sorted(glob.glob(os.path.join(folder, "*.md"))):
+        meta = _frontmatter(snapshot.read(path))
+        tools = meta.get("tools")
+        if isinstance(tools, str):
+            tools = [item.strip() for item in tools.split(",") if item.strip()]
+        found.append({"name": str(meta.get("name") or os.path.basename(path)[:-3]), "scope": scope, "path": path,
+                      "tools": [str(item) for item in tools] if isinstance(tools, list) else None})
+    return found
+
+
 def collect_claude(project, snapshot):
     """Claude Code's effective set for project: settings layers, enabled plugins, hooks, MCP, skills, CLAUDE.md."""
     layers = [(path, "managed") for path in _managed_settings()] + [
@@ -234,6 +253,8 @@ def collect_claude(project, snapshot):
     mcp += [e for e in shared if e["name"] not in unapproved]
     skills = _skills(snapshot, os.path.join(endpoint_sync.claude_dir(), "skills"), "user", disabled=disabled_skills)
     skills += _skills(snapshot, os.path.join(project, ".claude", "skills"), "project", disabled=disabled_skills)
+    agents = _agents(snapshot, os.path.join(endpoint_sync.claude_dir(), "agents"), "user")
+    agents += _agents(snapshot, os.path.join(project, ".claude", "agents"), "project")
     plugins = []
     installed = snapshot.json(os.path.join(endpoint_sync.claude_dir(), "plugins", "installed_plugins.json")) or {}
     for plugin_id, installs in (installed.get("plugins") or {}).items():
@@ -261,8 +282,62 @@ def collect_claude(project, snapshot):
         text = snapshot.read(path)
         if text is not None:
             instructions.append({"path": path, "kind": kind, "bytes": len(text.encode("utf-8")), "_text": text})
-    return {"settings": settings, "plugins": plugins, "hooks": hooks, "mcp": mcp, "skills": skills,
+    return {"settings": settings, "plugins": plugins, "hooks": hooks, "mcp": mcp, "skills": skills, "agents": agents,
             "instructions": instructions, "unapproved_mcp": unapproved}
+
+
+def _codex_plugin_root(market, name):
+    """Newest installed version folder of a Codex plugin (`plugins/cache/<marketplace>/<name>/<version>/`), skipping
+    the `latest` alias unless it is all there is; None when the plugin is not in the cache."""
+    base = os.path.join(codex_dir(), "plugins", "cache", market, name)
+    if not os.path.isdir(base):
+        return None
+    versions = [os.path.join(base, entry) for entry in os.listdir(base) if os.path.isdir(os.path.join(base, entry))]
+    real = [path for path in versions if os.path.basename(path) != "latest"]
+    return max(real or versions, key=os.path.getmtime) if versions else None
+
+
+def _codex_plugin_path(manifest, key, root, defaults):
+    """Path a Codex plugin manifest names for `key` (relative to the plugin root), else the first default that exists."""
+    named = manifest.get(key)
+    if isinstance(named, str):
+        return os.path.join(root, named)
+    return next((os.path.join(root, d) for d in defaults if os.path.exists(os.path.join(root, d))), None)
+
+
+def _collect_codex_plugins(config, snapshot):
+    """Skills, hooks and MCP servers of the Codex plugins enabled in config.toml (`[plugins."<name>@<marketplace>"]`
+    unless `enabled = false`), read from the plugin cache: manifest `.codex-plugin/plugin.json`, `skills/`,
+    `hooks/hooks.json`, `.mcp.json`. A plugin whose folder or manifest is missing is reported as not verified."""
+    plugins, hooks, mcp, skills = [], [], [], []
+    for plugin_id, options in (config.get("plugins") or {}).items():
+        if isinstance(options, dict) and options.get("enabled") is False:
+            continue
+        name, _, market = plugin_id.rpartition("@")
+        root = _codex_plugin_root(market, name) if name else None
+        if not root:
+            snapshot.unverified.append(f"Codex plugin {plugin_id}: not found under {os.path.join(codex_dir(), 'plugins', 'cache')}")
+            continue
+        manifest_path = next((p for p in (os.path.join(root, ".codex-plugin", "plugin.json"),
+                                          os.path.join(root, "plugin.json")) if os.path.exists(p)), None)
+        manifest = snapshot.json(manifest_path) if manifest_path else None
+        if manifest is None:
+            snapshot.unverified.append(f"Codex plugin {plugin_id}: no readable manifest (.codex-plugin/plugin.json) in {root}")
+            continue
+        plugins.append({"id": plugin_id, "path": root})
+        hook_file = _codex_plugin_path(manifest, "hooks", root, (os.path.join("hooks", "hooks.json"),))
+        hooks += _hooks_from(snapshot.json(hook_file) if hook_file else None, f"plugin:{name}", root)
+        mcp_file = _codex_plugin_path(manifest, "mcpServers", root, (".mcp.json", "mcp.json"))
+        plugin_mcp = snapshot.json(mcp_file) if mcp_file else None
+        if plugin_mcp is None and isinstance(manifest.get("mcpServers"), dict):
+            plugin_mcp = manifest["mcpServers"]
+        plugin_mcp = plugin_mcp or {}
+        mcp += _mcp_entries(plugin_mcp.get("mcpServers", plugin_mcp), f"plugin:{name}", mcp_file or manifest_path,
+                            f"plugin:{name}:", {"PLUGIN_ROOT": root})
+        skill_dir = _codex_plugin_path(manifest, "skills", root, ("skills",))
+        skills += [{**s, "name": f"{name}:{s['name']}"} for s in
+                   _skills(snapshot, skill_dir, f"plugin:{name}", recursive=True)] if skill_dir else []
+    return plugins, hooks, mcp, skills
 
 
 def collect_codex(project, snapshot):
@@ -274,6 +349,10 @@ def collect_codex(project, snapshot):
     skills = _skills(snapshot, os.path.join(codex_dir(), "skills"), "user", recursive=True)
     skills += _skills(snapshot, _home(".agents", "skills"), "user-agents")
     skills += _skills(snapshot, os.path.join(project, ".agents", "skills"), "project")
+    plugins, plugin_hooks, plugin_mcp, plugin_skills = _collect_codex_plugins(config, snapshot)
+    hooks += plugin_hooks
+    mcp += plugin_mcp
+    skills += plugin_skills
     instructions = []
     for name in ("AGENTS.override.md", "AGENTS.md"):
         text = snapshot.read(os.path.join(codex_dir(), name))
@@ -292,8 +371,7 @@ def collect_codex(project, snapshot):
                 instructions.append({"path": os.path.join(folder, name), "kind": "project",
                                      "bytes": len(text.encode("utf-8")), "_text": text})
                 break
-    return {"hooks": hooks, "mcp": mcp, "skills": skills, "instructions": instructions,
-            "plugins_unverified": bool(config.get("plugins"))}
+    return {"plugins": plugins, "hooks": hooks, "mcp": mcp, "skills": skills, "instructions": instructions}
 
 
 def _finding(check, severity, harness, subject, detail, source, evidence=()):
@@ -336,8 +414,9 @@ def check_hook_overlap(harness, hooks, tools):
 
 
 def _expand(token, root):
-    """A hook script path with ${CLAUDE_PLUGIN_ROOT}, ~ and environment variables expanded."""
-    token = token.replace("${CLAUDE_PLUGIN_ROOT}", root or "${CLAUDE_PLUGIN_ROOT}")
+    """A hook script path with ${CLAUDE_PLUGIN_ROOT} / ${PLUGIN_ROOT}, ~ and environment variables expanded."""
+    for variable in ("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT"):
+        token = token.replace("${%s}" % variable, root or "${%s}" % variable)
     return os.path.expandvars(os.path.expanduser(token))
 
 
@@ -348,7 +427,9 @@ def check_hook_targets(harness, hooks, mcp_names, probe):
     for hook in hooks:
         where = f"{hook['source']} {hook['event']} {hook['matcher'] or '*'}"
         if hook["type"] == "command" and hook["command"]:
-            for token in _SCRIPT_RE.findall(hook["command"]):
+            for token in _SCRIPT_RE.findall(_INLINE_CODE_RE.sub(" ", hook["command"])):
+                if not re.search(r"[\\/]", token) and shutil.which(token):
+                    continue
                 path = _expand(token, hook.get("root"))
                 if "$" in path or "%" in path:
                     continue
@@ -382,6 +463,24 @@ def _reachable(url):
             return None
     except OSError as exc:
         return str(exc)
+
+
+def check_agents(claude):
+    """Subagents whose `tools` list names no Smart Tool tool while the smart-tool server is registered: the redirect
+    leaves them alone (nothing to redirect to), so they search folders with Grep and Read at full cost. A subagent
+    with no `tools` field inherits every tool, MCP included; with the field, only what it lists."""
+    if not any(entry["name"] == SMART_TOOL_SERVER for entry in claude["mcp"]):
+        return []
+    blind = [a for a in claude.get("agents", []) if a["tools"] is not None
+             and not any(tool == "*" or tool.startswith(f"mcp__{SMART_TOOL_SERVER}") for tool in a["tools"])]
+    if not blind:
+        return []
+    names = ", ".join(sorted(a["name"] for a in blind)[:8]) + (" ..." if len(blind) > 8 else "")
+    return [_finding("agent_without_smart_tool", "warn", "claude", "subagents without Smart Tool",
+                     f"{len(blind)} subagent(s) list tools but none of mcp__{SMART_TOOL_SERVER}__*: {names}. Add "
+                     f"mcp__{SMART_TOOL_SERVER}__smart_search and mcp__{SMART_TOOL_SERVER}__smart_search_result to "
+                     "their `tools`, or drop the `tools` line to inherit every tool.", DOCS["claude_subagents"],
+                     [a["path"] for a in blind[:8]])]
 
 
 def check_skills(harness, skills):
@@ -635,6 +734,7 @@ def run(project, probe=True, save=True, probe_max_age=0, trigger="manual"):
         results = (probe_mcp(data["mcp"], project, max_age=probe_max_age) if probe
                    else [None] * len(data["mcp"]))
         findings += check_mcp(harness, data["mcp"], results)
+    findings += check_agents(claude)
     findings += check_instructions(project, claude, codex)
     unverified = list(snapshot.unverified)
     if not probe:
@@ -642,8 +742,6 @@ def run(project, probe=True, save=True, probe_max_age=0, trigger="manual"):
     for name in claude["unapproved_mcp"]:
         unverified.append(f".mcp.json server '{name}' is not approved in Claude Code, so it is neither loaded nor "
                           "started here")
-    if codex.get("plugins_unverified"):
-        unverified.append("Codex plugins (their skills and hooks) are not collected yet")
     unverified += ["skill trigger overlap and contradictions between instructions need a model (not run)",
                    "the order between two parallel rewrites is undocumented and cannot be checked"]
     key = hashlib.sha256(json.dumps(sorted(snapshot.files.items())).encode()).hexdigest()[:16]

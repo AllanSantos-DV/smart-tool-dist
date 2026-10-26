@@ -12,10 +12,12 @@ KINDS = ("code", "test", "doc")
 RETRY_AFTER_S = 3600
 MAX_DIRS = 90
 PROSE = {"md", "txt", "docx", "rst", "adoc"}
-# Data and markup inside a documentation folder are reports, not code (GitHub Linguist treats docs/ as documentation).
+# Data and markup inside a documentation, design or data-dump folder are reports and mockups, not code (GitHub Linguist
+# treats docs/ as documentation; a design/ HTML or a probe's JSON result pushed hook_decision.py out of the code block).
 DOC_DATA = {"html", "htm", "json", "csv", "xml", "yaml", "yml", "svg"}
 _NAME_DOC = re.compile(r"(^|/)(readme|changelog|license|licence|contributing|install|history|authors)(\.[^/]*)?$", re.I)
 _DIR_DOC = re.compile(r"(^|/)(docs?|adrs?|documentation)/", re.I)
+_DIR_DOC_DATA = re.compile(r"(^|/)(docs?|adrs?|documentation|designs?|references?|mockups?|prototypes?|data|datasets?|reports?|results?)/", re.I)
 _TEST = re.compile(r"(^|/)(tests?|__tests__|spec|specs|e2e|fixtures?|testdata|test-utils?)(/|$)|(^|/)test_[^/]+\.py$|"
                    r"(^|/)conftest\.py$|_test\.(py|go)$|\.(test|spec)(-d)?\.[cm]?[jt]sx?$|(^|/)[^/]*[a-z0-9](?-i:Tests?)\.java$|"
                    r"(^|/)src/test/|(^|/)test[-_][^/]*\.[cm]?[jt]sx?$|[-_]test\.[cm]?[jt]sx?$", re.I)
@@ -151,7 +153,7 @@ def kind(path, profile):
         return _model_kind(path, groups or [{"path": ".", "kind": "doc"}])
     if _TEST.search(path):
         return "test"
-    if ext in DOC_DATA and _DIR_DOC.search(path) and _explicit_kind(path, groups) != "code":
+    if ext in DOC_DATA and _DIR_DOC_DATA.search(path) and _explicit_kind(path, groups) != "code":
         return "doc"
     if not ext and _NAME_DOC.search(path):
         return "doc"

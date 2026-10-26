@@ -16,7 +16,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.32 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.33 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -111,8 +111,18 @@ Redirects) and Maintenance (Setup audit, Startup).
    URL ending where the API starts, like the OpenAI SDK `base_url` (`https://api.openai.com/v1`,
    `https://openrouter.ai/api/v1`, `http://localhost:11434/v1`), and an optional API key. Saving tests `/models` first.
 2. **Models**: embedding, rerank (optional; without it results use the hybrid order), the router model (small, no
-   reasoning: web search tier order and result checks), the index classification model (also reviews block patterns) and the research model. Any id the gateway
-   accepts works; the catalog is shown as suggestions.
+   reasoning: web search tier order and result checks), the index classification model (also reviews block patterns), the
+   scout model (the short answer of `smart_scout`) and the research model. Any id the gateway accepts works; the catalog is
+   shown as suggestions. Empty roles are filled with the recommended models the gateway offers.
+
+   When a new version recommends other models than the ones you use, a Windows notification (**Apply now**, **Don't
+   show again**) and the **New recommended models** card on this page offer them: nothing changes until you apply, the
+   models you had are kept, and **Switch back to my previous models** undoes it. The **Model failures (last 24 h)** table
+   lists every failed gateway call by role, model and tool; a model that fails half of its calls (5 or more) also raises a
+   notification and a tray alert. A failure inside a tool call also comes back as a warning line in the tool answer;
+   calls made by a hook or by background work (index scope and profile, block-pattern proposals) have no answer to
+   carry it, so they show only in the table, the log and the notification. The local embedder is not in that table or in
+   the usage meter: it is a sidecar on your machine with no price, and its state is the **Local models** section.
 3. **Agents**: register the MCP server in Claude Code or Codex (runs their official `mcp add` command), install the
    hook and choose its behavior under **Agent rules**. A hook written by an older Smart Tool shows as outdated, with
    what an update changes; updating previews the entry and rewrites only Smart Tool's, after a backup.
@@ -177,11 +187,13 @@ Redirects) and Maintenance (Setup audit, Startup).
    plus changed tests and tests using a pytest fixture whose `conftest.py` imports the changed code, ordered with the
    likeliest failures first, and the command to run them. Changed files are read from disk, so new files and imports
    count before the project is reindexed. `run_all` is true, with
-   the reason, when a configuration or lockfile changed or a changed code file is outside the import graph.
+   the reason, when a configuration or lockfile changed or a changed code file is outside the import graph. Go is read
+   by package: a file that imports a package depends on every file of it, so a changed package selects the tests of every
+   package that imports it (`go test ./pkg ...`); the Go and Rust documentation and duplicate hooks stay silent.
 
    `project_manage` with `action=setup_audit` and a `project_root` (or `python setup_audit.py --project <folder>`)
-   reports what Claude Code and Codex actually load for that folder (settings layers, enabled plugins, hooks, MCP
-   servers, skills, CLAUDE.md and AGENTS.md) and where they collide: several hooks deciding on the same tool in
+   reports what Claude Code and Codex actually load for that folder (settings layers, enabled plugins of both,
+   hooks, MCP servers, skills, CLAUDE.md and AGENTS.md) and where they collide: several hooks deciding on the same tool in
    parallel, hook scripts that do not exist or hide their errors, hooks calling an MCP server that is not configured,
    MCP servers that do not start or offer the same tools twice (a gateway re-exposing a server also registered
    directly), skills sharing a name or over the description budget, an AGENTS.md only Codex reads, broken `@imports`

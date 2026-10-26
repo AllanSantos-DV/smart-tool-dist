@@ -11,7 +11,7 @@ import model_catalog
 # first and price second (docs/research/2026-10-24-modelos-do-scout-e-dos-outros-papeis.md): the router answers pages
 # and the scout reads code excerpts, where Claude Haiku 5.5 answered every request and led the no-index path; scope and
 # research pick the GPT-5.4 nano, as accurate there at about half the price and without the long reasoning of the mini.
-RECOMMENDED_MODELS = {
+_CHOICES = {
     "router_model": ("chat", "claude-haiku-5-5"),
     "scope_model": ("chat", "gpt-5.4-nano"),
     "scout_model": ("chat", "claude-haiku-5-5"),
@@ -19,10 +19,18 @@ RECOMMENDED_MODELS = {
     "embedding_model": ("embedding", "text-embedding-3-small"),
     "rerank_model": ("rerank", "rerank-3-5"),
 }
+RECOMMENDED_MODELS = {role: _CHOICES[role] for role in config.MODEL_ROLES}
+
+
+def _route_rank(model_id):
+    """Vertex first (the owner's gateway is stable there), Bedrock only when nothing else serves the model."""
+    route = re.split(r"[/.:]", model_id)[0].lower()
+    return 0 if route.startswith("vertex") else 2 if route.startswith("bedrock") else 1
 
 
 def _matching(catalog, name):
-    return next((model_id for model_id in sorted(catalog) if re.split(r"[/.:]", model_id)[-1] == name
+    return next((model_id for model_id in sorted(catalog, key=lambda found: (_route_rank(found), found))
+                 if re.split(r"[/.:]", model_id)[-1] == name
                  or model_id.endswith(("/" + name, "." + name)) or model_id == name), None)
 
 

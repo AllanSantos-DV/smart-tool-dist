@@ -14,7 +14,7 @@ import config
 import model_catalog
 import model_defaults
 
-DEFAULTS_VERSION = 1
+DEFAULTS_VERSION = 2
 ROLES = ("router_model", "scope_model", "scout_model", "research_model")
 REMIND_EVERY_S = 24 * 3600
 

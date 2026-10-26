@@ -20,6 +20,9 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 # RLock: update_config() chama load/save sob o mesmo lock; Lock travaria a própria thread.
 _LOCK = threading.RLock()
 
+# The config fields that select a gateway model; every per-role table (recommended models, failure log) keys on these.
+MODEL_ROLES = ("router_model", "scope_model", "scout_model", "research_model", "embedding_model", "rerank_model")
+
 DEFAULT_CONFIG = {
     "router_model": "",
     "scope_model": "",

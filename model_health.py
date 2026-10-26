@@ -23,7 +23,6 @@ MUTE_S = 7 * 24 * 3600
 KEEP_S = 7 * 24 * 3600
 KEEP_FAILURES = 500
 ERROR_CHARS = 300
-_ROLES = ("router_model", "scope_model", "scout_model", "research_model", "embedding_model", "rerank_model")
 _PATHS = ("/v1/chat/completions", "/v1/embeddings", "/v1/rerank")
 _TOOL = contextvars.ContextVar("model_health_tool", default=None)
 _COLLECTED = contextvars.ContextVar("model_health_collected", default=None)
@@ -60,7 +59,7 @@ def _tables(db):
 def role_of(model, cfg=None):
     """Name of the config field that selects `model` ('other' when none does)."""
     cfg = cfg if cfg is not None else config.load_config()
-    return next((field for field in _ROLES if cfg.get(field) == model), "other")
+    return next((field for field in config.MODEL_ROLES if cfg.get(field) == model), "other")
 
 
 def error_text(exc):
