@@ -16,7 +16,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.41 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.42 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -191,7 +191,10 @@ Redirects) and Maintenance (Setup audit, Startup).
 
    **Dependency check on edit**: an edit of `package.json`, `requirements*.txt` or `go.mod` that adds or changes a dependency lists the OSV advisory IDs of up to 5 of them (exact version, or the lower bound of `^`, `~`, `~=` and `>=`), answered from a 6 h disk cache or one 2.5 s batch call that sends only package names and versions; when OSV cannot answer, the reminder says the check was skipped and the edit goes on. `dependency_mode` in `config.json`: `warn` (default) or `off`.
 
-   **PDFs** inside a project are indexed as text with `[page N]` markers (20 MiB, 300 pages and 20 s per file; a scanned, password-protected or corrupt PDF is skipped with the reason), so `smart_search` returns the page that holds a passage.
+   **PDFs** inside a project are indexed as text with `[page N]` markers (20 MiB, 300 pages and 20 s per file; a scanned, password-protected or corrupt PDF is skipped with the reason), so `smart_search` returns the page that holds a passage. **Presentations and workbooks** (`.pptx`, `.xlsx`) are indexed the
+   same way: text of each slide under `[slide N]` with the speaker notes under `[notes N]`, each sheet under `[sheet NAME]` with one
+   tab-separated line per row (cached formula values; 100,000 rows or 1 MiB of text at most). Older formats (`.ppt`, `.xls`,
+   `.xlsm`) are not read.
 
    **Block patterns waiting for you** are shown in one approval panel: 8 per page, the ones that would have blocked
    the most logged calls first, a filter over pattern, reason and example, and bulk accept or reject of the selected
@@ -232,9 +235,10 @@ Redirects) and Maintenance (Setup audit, Startup).
    folder (or the nearest audited parent) without auditing again, and fails with what to do when none is stored. On
    its first `smart_search` of a session, and once per folder, the agent also gets one short line (under 100 tokens)
    when the stored report holds errors or warnings; a clean report adds nothing. Optionally, **Report at session
-   start (Claude Code)** on the Setup audit page moves that line to the start of every new session: it previews the
-   exact SessionStart entry, adds it to `~/.claude/settings.json` only after you confirm (backup first), and **Turn
-   off** removes only that entry. It is off by default; while it is on, the search no longer repeats the line. The
+   start** on the Setup audit page (Claude Code or Codex) moves that line to the start of every new session: it
+   previews the exact SessionStart entry, adds it to `~/.claude/settings.json` or `~/.codex/hooks.json` only after you
+   confirm (backup first), and **Turn off** removes only that entry. Codex runs a new hook only after you approve it in
+   `/hooks`; until then the page shows "waiting for your approval" and the search keeps repeating the line. It is off by default; while it is on, the search no longer repeats the line. The
    hook script (`hooks/session_audit.py`) only reads the stored report from the running service and prints nothing
    when the service is down.
 4. **Local models** (optional): if the mcp-memory embedding sidecar is installed on the machine, its local embedder

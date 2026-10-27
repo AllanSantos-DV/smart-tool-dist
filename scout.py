@@ -102,7 +102,7 @@ def is_intent_question(question):
 
 def disk_lines(root, path, start, end):
     """`[(line_number, text)]` of lines `start..end` of the file as it is on disk now, or None when the file cannot be
-    read by the index rules (secret, dotfile, too large, binary, gone) or holds no line text (docx, pdf)."""
+    read by the index rules (secret, dotfile, too large, binary, gone) or holds no line text (docx, pdf, pptx, xlsx)."""
     if document_text.location_kind(path) != "source_line":
         return None
     data, encoding = indexer.read_indexable(root, path)

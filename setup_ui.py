@@ -325,21 +325,25 @@ def handle_integration_save(body):
 def handle_audit(body):
     """Setup audit panel: `index` lists the registered projects with their last audit summary; `report` returns the
     last stored report of one of them; `run` audits it now (MCP servers contacted unless probe is false). Only
-    registered project folders are accepted. The opt-in session-start report in Claude Code: `hook_state`,
+    registered project folders are accepted. The opt-in session-start report in Claude Code or Codex (`client`, default
+    claude; Codex runs it only after /hooks approval, state `waiting_approval`): `hook_state`,
     `hook_preview` (the exact entry and a token), `hook_install` (with that token, after a backup) and `hook_remove`
     (only Smart Tool's entry, after a backup)."""
     if not isinstance(body, dict):
         raise SetupError("Invalid request.")
     roots = sorted({p["root"] for p in project_store.all_projects() if p.get("root")}, key=str.casefold)
     try:
+        client = body.get("client", "claude")
         if body.get("action") == "hook_state":
-            return {"state": client_hooks.audit_state(), "file": client_hooks.CLIENTS["claude"]["files"][0]}
+            state = client_hooks.audit_state(client)
+            detail = {"detail": "installed, waiting for your approval in /hooks"} if state == client_hooks.AUDIT_WAITING else {}
+            return {"state": state, "file": client_hooks.CLIENTS[client]["files"][0], **detail}
         if body.get("action") == "hook_preview":
-            return client_hooks.audit_preview()
+            return client_hooks.audit_preview(client)
         if body.get("action") == "hook_install":
-            return client_hooks.audit_install(body.get("token"), True)
+            return client_hooks.audit_install(body.get("token"), True, client)
         if body.get("action") == "hook_remove":
-            return client_hooks.audit_remove()
+            return client_hooks.audit_remove(client)
         if body.get("action") == "index":
             stored = setup_audit.index()
             found = {root: stored[setup_audit.index_key(root)] for root in roots if setup_audit.index_key(root) in stored}
@@ -809,8 +813,9 @@ _PAGE_TEMPLATE = """<!doctype html>
       <header class="page-head"><h2 id="h-audit" tabindex="-1">Setup audit</h2>
         <p>What Claude Code and Codex load for a project, and where they collide: hooks deciding on the same tool at once, hooks or MCP servers that do not work, tools offered twice, skills and instructions one agent never sees. It runs on its own for the registered projects and never changes anything.</p></header>
       <div class="card">
-        <div class="card-head"><h3>Report at session start (Claude Code)</h3><span class="pill" id="audit-hook-pill" data-tone="busy">Checking</span></div>
-        <p class="lede">Off by default. When on, every new Claude Code session starts with one short line about the stored audit of its folder (errors and warnings only, nothing runs). It adds a SessionStart entry to <span class="mono" id="audit-hook-file"></span>, written after a backup, and turning it off removes only that entry. Without it, the agent gets the same line once, on its first search.</p>
+        <div class="card-head"><h3>Report at session start</h3><span class="pill" id="audit-hook-pill" data-tone="busy">Checking</span></div>
+        <div class="field"><label for="sel-audit-hook-client">Client</label><select id="sel-audit-hook-client"><option value="claude">Claude Code</option><option value="codex">Codex</option></select></div>
+        <p class="lede">Off by default. When on, every new session starts with one short line about the stored audit of its folder (errors and warnings only, nothing runs). It adds a SessionStart entry to <span class="mono" id="audit-hook-file"></span>, written after a backup, and turning it off removes only that entry. Codex runs a new hook only after you approve it in /hooks. Without it, the agent gets the same line once, on its first search.</p>
         <div class="actions"><button type="button" class="primary" id="btn-audit-hook-on" hidden>Turn on</button><button type="button" id="btn-audit-hook-off" hidden>Turn off</button></div>
         <div id="audit-hook-confirm" hidden>
           <p class="hint" id="audit-hook-where"></p>
@@ -1886,14 +1891,17 @@ async function loadAudit() {
   }
   renderOverview();
 }
+function auditHookClient() { return $("sel-audit-hook-client").value; }
+$("sel-audit-hook-client").addEventListener("change", () => { setMsg("audit-hook-msg", "", ""); loadAuditHook(); });
 async function loadAuditHook() {
   try {
-    const hook = await post("/setup/audit", { action: "hook_state" });
+    const hook = await post("/setup/audit", { action: "hook_state", client: auditHookClient() });
     $("audit-hook-file").textContent = hook.file;
-    const on = hook.state === "current";
+    const on = hook.state === "current" || hook.state === "waiting_approval";
     const pillEl = $("audit-hook-pill");
-    pillEl.textContent = on ? "On" : hook.state === "outdated" ? "Outdated" : "Off";
-    pillEl.dataset.tone = on ? "ok" : hook.state === "outdated" ? "warn" : "idle";
+    pillEl.textContent = hook.state === "waiting_approval" ? "Waiting for approval in /hooks" : on ? "On" : hook.state === "outdated" ? "Outdated" : "Off";
+    pillEl.dataset.tone = hook.state === "waiting_approval" || hook.state === "outdated" ? "warn" : on ? "ok" : "idle";
+    if (hook.detail) setMsg("audit-hook-msg", "", hook.detail + ".");
     $("btn-audit-hook-on").hidden = on;
     $("btn-audit-hook-on").textContent = hook.state === "outdated" ? "Update" : "Turn on";
     $("btn-audit-hook-off").hidden = hook.state === "missing";
@@ -1904,7 +1912,7 @@ async function loadAuditHook() {
 $("btn-audit-hook-on").addEventListener("click", async () => {
   setMsg("audit-hook-msg", "", "Preparing the change…");
   try {
-    const plan = await post("/setup/audit", { action: "hook_preview" });
+    const plan = await post("/setup/audit", { action: "hook_preview", client: auditHookClient() });
     setMsg("audit-hook-msg", "", "");
     $("audit-hook-where").textContent = "Adds this entry under " + plan.event + " in " + plan.file + ".";
     $("audit-hook-preview").textContent = JSON.stringify(plan.change, null, 2);
@@ -1912,10 +1920,10 @@ $("btn-audit-hook-on").addEventListener("click", async () => {
     $("btn-audit-hook-write").onclick = async () => {
       $("btn-audit-hook-write").disabled = true;
       try {
-        const result = await post("/setup/audit", { action: "hook_install", token: plan.token });
+        const result = await post("/setup/audit", { action: "hook_install", token: plan.token, client: auditHookClient() });
         $("audit-hook-confirm").hidden = true;
         await loadAuditHook();
-        setMsg("audit-hook-msg", "ok", "Turned on. Backup: " + (result.backup || "none, the file was new") + ".");
+        setMsg("audit-hook-msg", "ok", "Turned on. Backup: " + (result.backup || "none, the file was new") + "." + (result.after_install ? " " + result.after_install : ""));
       } catch (error) {
         setMsg("audit-hook-msg", "error", error.message);
       } finally {
@@ -1929,7 +1937,7 @@ $("btn-audit-hook-on").addEventListener("click", async () => {
 $("btn-audit-hook-cancel").addEventListener("click", () => { $("audit-hook-confirm").hidden = true; });
 $("btn-audit-hook-off").addEventListener("click", async () => {
   try {
-    const result = await post("/setup/audit", { action: "hook_remove" });
+    const result = await post("/setup/audit", { action: "hook_remove", client: auditHookClient() });
     await loadAuditHook();
     setMsg("audit-hook-msg", "ok", "Turned off. Backup: " + (result.backup || "none") + ".");
   } catch (error) {

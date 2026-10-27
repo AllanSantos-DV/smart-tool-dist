@@ -11,7 +11,7 @@ PROFILE_VERSION = 2
 KINDS = ("code", "test", "doc")
 RETRY_AFTER_S = 3600
 MAX_DIRS = 90
-PROSE = {"md", "txt", "docx", "pdf", "rst", "adoc"}
+PROSE = {"md", "txt", "docx", "pptx", "xlsx", "pdf", "rst", "adoc"}
 # Data and markup inside a documentation, design or data-dump folder are reports and mockups, not code (GitHub Linguist
 # treats docs/ as documentation; a design/ HTML or a probe's JSON result pushed hook_decision.py out of the code block).
 DOC_DATA = {"html", "htm", "json", "csv", "xml", "yaml", "yml", "svg"}

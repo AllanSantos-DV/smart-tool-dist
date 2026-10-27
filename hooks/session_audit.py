@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SessionStart hook of Claude Code (opt-in, from the setup screen): forwards the payload to the Smart Tool daemon
+"""SessionStart hook of Claude Code and Codex (opt-in, from the setup screen): forwards the payload to the Smart Tool daemon
 (POST /hooks/session-audit) and prints its answer, the stored setup audit notice of the session folder as additional
 context. Never starts the daemon or an audit: daemon down or any error means empty output, so a session start is
 never delayed or blocked.

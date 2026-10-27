@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.42 - beta
+
+- Presentations and workbooks of the project are searchable. `.pptx` text comes out per slide under `[slide N]`, with the
+  speaker notes under `[notes N]`; `.xlsx` per sheet under `[sheet NAME]`, one tab-separated line per row, cached formula
+  values (nothing is calculated), shared and inline strings resolved. They go through the same zip and XML guards as
+  `.docx` and `.pdf` (10 MiB, 2000 entries, no encryption, no DOCTYPE or ENTITY, 8 MiB of XML, 1 MiB of text), plus 100,000
+  rows and 16,384 columns for a workbook; a corrupt, hostile or oversized file is skipped with the reason and the rest of the
+  project is indexed. `document_text.VERSION` is 3: `.docx` and `.pdf` already indexed are read once more. Measurement
+  before and after in `docs/research/data/office-probe-*.json`; tests in `tests/test_office_index.py`. A CSV of 1 MiB is
+  indexed and searched in 4 ms; one of 20 MiB is refused as `over size limit` in the index stats, without stalling.
+- The session-start audit report works in Codex. The Setup audit page turns on the SessionStart hook for Claude Code or
+  Codex (preview, confirm, backup, remove only ours); Codex runs a new hook only after you approve it in `/hooks`, so the page
+  shows "installed, waiting for your approval in /hooks" until the approval is found in `config.toml`, and the first-search
+  audit line keeps showing until then. Research with the primary sources in
+  `docs/research/2026-10-27-codex-sessionstart-hook.md`; tests in `tests/test_codex_audit_hook.py`.
+- Review fixes: a workbook cell reference past column XFD, a negative shared-string index, a corrupt deflate stream and
+  a newline in a sheet name no longer escape as `MemoryError`, `zlib.error`, a wrong text or a forged `[sheet ...]` line;
+  the tests of the Codex hook ignore `CODEX_HOME` and `CLAUDE_CONFIG_DIR` so they never write outside their temporary home.
+
 ## 0.9.41 - beta
 
 - Far fewer calls to the embedding and rerank models. Measured on a real machine (24 h): 8303 embedding and 1473 rerank

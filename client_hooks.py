@@ -1,9 +1,11 @@
+import hashlib
 import json
 import os
 import secrets
 import shutil
 import sys
 import time
+import tomllib
 
 import daemon_launcher
 import endpoint_sync
@@ -14,6 +16,9 @@ AUDIT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks",
 AUDIT_MARKER = "session_audit.py"
 AUDIT_MATCHER = "startup|resume|clear"
 AUDIT_TIMEOUT_S = 10
+AUDIT_CLIENTS = ("claude", "codex")
+AUDIT_ON = "current"
+AUDIT_WAITING = "waiting_approval"
 HTTP_PATH = "/hooks/pretool"
 POST_PATH = "/hooks/posttool"
 # A redirected shell search waits for its answer in the PreToolUse (smart_tool_daemon.HOOK_SHELL_BUDGET_S).
@@ -282,9 +287,16 @@ def _audit_entry():
                        "timeout": AUDIT_TIMEOUT_S}]}
 
 
-def _audit_plan():
-    """(path, data, groups) of Claude Code's settings with our SessionStart entry already removed from groups."""
-    path = os.path.realpath(CLIENTS["claude"]["files"][0])
+def _audit_client(client):
+    """The client's config spec; only Claude Code and Codex fire a SessionStart hook whose output the model reads."""
+    if client not in AUDIT_CLIENTS:
+        raise ValueError(f"The session-start audit report is only available for Claude Code or Codex, not {client!r}.")
+    return CLIENTS[client]
+
+
+def _audit_plan(client="claude"):
+    """(path, data, groups) of the client's hooks file with our SessionStart entry already removed from groups."""
+    path = os.path.realpath(_audit_client(client)["files"][0])
     try:
         with open(path, encoding="utf-8") as stream:
             data = json.load(stream)
@@ -299,10 +311,52 @@ def _audit_plan():
     return path, data, groups
 
 
-def audit_state():
-    """The SessionStart audit hook in Claude Code's settings: `current` (our entry equals this version's), `outdated`
-    (an entry of ours that differs) or `missing`."""
-    path = CLIENTS["claude"]["files"][0]
+def _codex_hash(event, group, index=0):
+    """Codex's approval hash (`sha256:` of the key-sorted compact JSON of the normalized hook identity, as in
+    openai/codex hooks/src/engine/discovery.rs `hook_hash`) of the handler at `index` in a hooks.json group."""
+    handler = group["hooks"][index]
+    normalized = {"type": handler["type"], "command": handler["command"], "timeout": handler.get("timeout", 600),
+                  "async": bool(handler.get("async", False))}
+    if handler.get("statusMessage") is not None:
+        normalized["statusMessage"] = handler["statusMessage"]
+    identity = {"event_name": event, "hooks": [normalized]}
+    if group.get("matcher") is not None:
+        identity["matcher"] = group["matcher"]
+    text = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _codex_approved(groups):
+    """Our SessionStart handler is trusted in Codex's config.toml: the entry keyed by hooks.json path, event, group
+    and handler index holds the hash of the definition as it is now (a missing or different hash means /hooks has not
+    approved it, so Codex does not run it). An unreadable config.toml raises ValueError."""
+    spec = CLIENTS["codex"]
+    try:
+        with open(spec["files"][1], encoding="utf-8") as stream:
+            hooks = tomllib.loads(stream.read()).get("hooks")
+            states = hooks.get("state") if isinstance(hooks, dict) else None
+            states = states if isinstance(states, dict) else {}
+    except FileNotFoundError:
+        return False
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"{spec['files'][1]} is not valid TOML: {exc}")
+    paths = {spec["files"][0], os.path.realpath(spec["files"][0])}
+    for group_index, group in enumerate(groups):
+        if not _ours(group, _audit_hook):
+            continue
+        handler_index = next(i for i, hook in enumerate(group["hooks"]) if _audit_hook(hook))
+        for path in paths:
+            trusted = (states.get(f"{path}:session_start:{group_index}:{handler_index}") or {}).get("trusted_hash")
+            if trusted == _codex_hash("session_start", group, handler_index):
+                return True
+    return False
+
+
+def audit_state(client="claude"):
+    """The SessionStart audit hook in the client's hooks file: `current` (our entry equals this version's and, in
+    Codex, was approved in /hooks), `waiting_approval` (Codex only: written but not approved, so it does not run yet),
+    `outdated` (an entry of ours that differs) or `missing`."""
+    path = _audit_client(client)["files"][0]
     try:
         with open(path, encoding="utf-8") as stream:
             data = json.load(stream)
@@ -312,52 +366,61 @@ def audit_state():
     found = [group for group in groups if _ours(group, _audit_hook)] if isinstance(groups, list) else []
     if not found:
         return "missing"
-    return "current" if _audit_entry() in found else "outdated"
+    if _audit_entry() not in found:
+        return "outdated"
+    return "current" if client != "codex" or _codex_approved(groups) else AUDIT_WAITING
 
 
 def audit_hook_installed(client):
-    """The Claude Code session-start audit report is on, so a search need not repeat it. An unreadable settings file
-    counts as off here; `audit_state` raises for it on the setup screen."""
-    if client != "claude":
+    """The session-start audit report is on and running (Codex: approved in /hooks), so a search need not repeat it.
+    An unreadable config file counts as off here; `audit_state` raises for it on the setup screen."""
+    if client not in AUDIT_CLIENTS:
         return False
     try:
-        return audit_state() == "current"
+        return audit_state(client) == "current"
     except (OSError, ValueError):
         return False
 
 
-def audit_preview():
-    """The change that turns the SessionStart audit report on in Claude Code, with a token for `audit_install`."""
-    path, _data, _groups = _audit_plan()
+def _audit_after(client):
+    """{after_install: ...} for a client whose new hooks need the user's approval, else nothing."""
+    note = CLIENTS[client].get("after_install")
+    return {"after_install": note} if note else {}
+
+
+def audit_preview(client="claude"):
+    """The change that turns the SessionStart audit report on in the client, with a token for `audit_install`."""
+    path, _data, _groups = _audit_plan(client)
     entry = _audit_entry()
-    if audit_state() == "current":
+    if audit_state(client) in (AUDIT_ON, AUDIT_WAITING):
         return {"installed": True, "file": path, "change": None}
     token = secrets.token_urlsafe(12)
-    _PREVIEWS[token] = {"client": "audit", "at": time.time()}
+    _PREVIEWS[token] = {"client": f"audit:{client}", "at": time.time()}
     return {"installed": False, "file": path, "event": "SessionStart", "change": entry, "token": token,
-            "expires_s": PREVIEW_TTL_S}
+            "expires_s": PREVIEW_TTL_S, **_audit_after(client)}
 
 
-def audit_install(token, confirm):
-    """Writes the SessionStart audit entry into Claude Code's settings with a backup; needs the `audit_preview` token
-    (10 min) and confirm=True. Returns {installed, changed, file, backup}."""
+def audit_install(token, confirm, client="claude"):
+    """Writes the SessionStart audit entry into the client's hooks file with a backup; needs the `audit_preview` token
+    (10 min) and confirm=True. Returns {installed, changed, file, backup}, plus `after_install` in Codex: the hook
+    runs only after the user approves it in /hooks."""
     planned = _PREVIEWS.pop(token or "", None)
-    if confirm is not True or not planned or planned["client"] != "audit" or time.time() - planned["at"] > PREVIEW_TTL_S:
+    if confirm is not True or not planned or planned["client"] != f"audit:{client}" or time.time() - planned["at"] > PREVIEW_TTL_S:
         raise ValueError("Turning the audit report on requires the preview token (valid for 10 min) and confirm=true.")
-    path, data, groups = _audit_plan()
-    if audit_state() == "current":
+    path, data, groups = _audit_plan(client)
+    if audit_state(client) in (AUDIT_ON, AUDIT_WAITING):
         return {"installed": True, "changed": False, "file": path}
     groups.append(_audit_entry())
-    backup = _write_checked(path, data, lambda: audit_state() == "current", "The audit hook")
-    return {"installed": True, "changed": True, "file": path, "backup": backup}
+    backup = _write_checked(path, data, lambda: audit_state(client) in (AUDIT_ON, AUDIT_WAITING), "The audit hook")
+    return {"installed": True, "changed": True, "file": path, "backup": backup, **_audit_after(client)}
 
 
-def audit_remove():
-    """Takes only our SessionStart entry out of Claude Code's settings (after a backup); nothing else is touched."""
-    path, data, groups = _audit_plan()
-    if audit_state() == "missing":
+def audit_remove(client="claude"):
+    """Takes only our SessionStart entry out of the client's hooks file (after a backup); nothing else is touched."""
+    path, data, groups = _audit_plan(client)
+    if audit_state(client) == "missing":
         return {"installed": False, "changed": False, "file": path}
     if not groups:
         del data["hooks"]["SessionStart"]
-    backup = _write_checked(path, data, lambda: audit_state() == "missing", "The removal")
+    backup = _write_checked(path, data, lambda: audit_state(client) == "missing", "The removal")
     return {"installed": False, "changed": True, "file": path, "backup": backup}
