@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autostart
 import config
 import daemon_launcher
+import setup_audit
 import toast_notice
 import update_check
 import version
@@ -114,7 +115,8 @@ def _poll_loop(icon):
 
 
 def _show_notices(icon, notices):
-    """Shows a toast for each pending notice: the new-default-models offer and each model over the failure limit."""
+    """Shows a toast for each pending notice: the new-default-models offer, each model over the failure limit and each
+    project whose scheduled setup audit found new errors or warnings."""
     offer = notices.get("upgrade")
     if offer:
         lines = [f"{role}: {change['current']} -> {change['new']}" for role, change in offer["changes"].items()]
@@ -129,6 +131,10 @@ def _show_notices(icon, notices):
             f"{row['model']} is failing", [f"{row['errors']} of {row['calls']} calls failed in 24 h as {row['role']}.", last[:160]],
             [("Switch model", toast_notice.action_uri("open-setup", section="models")),
              ("Mute 7 days", toast_notice.action_uri("mute-model", model=row["model"]))], tag="model-failing:" + row["model"])
+    for row in notices.get("audit") or []:
+        title, lines = setup_audit.toast_text(row)
+        toast_notice.show(title, lines, [("Open the audit", toast_notice.action_uri("open-setup", section="audit"))],
+                          tag="setup-audit:" + row["project"])
 
 
 def _notice_loop(icon):

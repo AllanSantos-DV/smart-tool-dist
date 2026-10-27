@@ -12,6 +12,7 @@ Market pattern copied (docs/research/2026-10-24-scout-modelo-leve-no-smart-tool.
 excerpts, never an agent prompt, so no agent context is reopened per call.
 """
 import os
+import re
 
 import document_text
 import index_scope
@@ -35,6 +36,8 @@ PLAN_MAX_FOLDERS = 6
 OUTLINE_MAX_DIRS = 300
 OUTLINE_MAX_ROOT_FILES = 200
 _FIELDS = {"project_root", "question", "terms", "max_files"}
+DECISION_NOTES_MAX = 3
+_INTENT = re.compile(r"\b(why|por\s*qu[êe]|rationale|reason|motivo|raz[ãa]o|decid\w*|decis[ãa]o)\b", re.IGNORECASE)
 
 PLAN_SYSTEM = (
     "You plan a keyword scan of a code project that has no search index yet. Given a question and the project's "
@@ -91,9 +94,15 @@ def arguments(raw):
     return {"project_root": root, "question": question.strip(), "terms": (terms or "").strip(), "max_files": max_files}
 
 
+def is_intent_question(question):
+    """The question asks why something is as it is (why, reason, rationale, decided; por que, motivo, decisão): the
+    answer may sit in the notes the project keeps about its own intent, not in the code."""
+    return bool(_INTENT.search(question or ""))
+
+
 def disk_lines(root, path, start, end):
     """`[(line_number, text)]` of lines `start..end` of the file as it is on disk now, or None when the file cannot be
-    read by the index rules (secret, dotfile, too large, binary, gone) or holds no line text (docx)."""
+    read by the index rules (secret, dotfile, too large, binary, gone) or holds no line text (docx, pdf)."""
     if document_text.location_kind(path) != "source_line":
         return None
     data, encoding = indexer.read_indexable(root, path)
@@ -250,12 +259,13 @@ def valid_answer(raw, items):
     return raw["found"], answer, citations
 
 
-def render(question, source, items, citations=None, answer=None, found=None, model_note="", warnings=(), others=()):
+def render(question, source, items, citations=None, answer=None, found=None, model_note="", warnings=(), others=(),
+           notes=()):
     """The text returned to the agent. Lexical mode (`citations` None): every evidence window, within
     LITERAL_BUDGET_CHARS, after the model's answer when there is one (a model that cited nothing never leaves the
     answer without lines). Model mode: the model's answer, then only the cited ranges (sliced from the windows read
     from disk), and the uncited excerpts as `path:lines` pointers. `others` are candidates not shown, listed as
-    pointers."""
+    pointers. `notes` are the dossier hits for a question about intent: ids with one excerpt each, after the evidence."""
     out = [f"question: {question}", f"source: {source}", f"model: {model_note or 'none (literal lines only)'}"]
     if answer is not None:
         out.append(("answer: " if found else "answer (not found in the excerpts): ") + answer)
@@ -280,6 +290,9 @@ def render(question, source, items, citations=None, answer=None, found=None, mod
                 and citations is not None] + list(others)
     if pointers:
         out.append("other candidates (not shown): " + ", ".join(pointers))
+    if notes:
+        out.append("decision notes (project notes, not code):")
+        out += [f"- [{note['id']}] {note['source']}: {note['title']}: {note['snippet']}" for note in notes]
     for warning in warnings:
         out.append(f"warning: {warning}")
     return "\n".join(out) + "\n"

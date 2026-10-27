@@ -5,7 +5,7 @@ A local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharpe
 | Tool | What it does |
 |---|---|
 | `smart_search` / `smart_search_result` | Semantic + lexical search over an indexed project, results split into code, tests and docs, with the likeliest functions per chunk |
-| `smart_scout` | Answers a question about the code with the lines that answer it: reads the candidate files inside Smart Tool and returns `path:lines` with the literal text, so the files never enter the agent's context; with a `scout_model`, a small model also writes a short answer and keeps only the lines that support it |
+| `smart_scout` | Answers a question about the code with the lines that answer it: reads the candidate files inside Smart Tool and returns `path:lines` with the literal text, so the files never enter the agent's context; with a `scout_model`, a small model also writes a short answer and keeps only the lines that support it; a question about why something is as it is (why, reason, decided) also lists up to three decision notes from the notes the project keeps about its intent, as ids with one excerpt each |
 | `web_search` / `web_search_result` | Web search across several sources in parallel, in the query language and in English, with a cache shared across sessions; `depth="research"` runs a multi-round research loop |
 | `web_fetch` | Reads a known URL and returns only the answer to your prompt, written by a small model; pages are cached for 24 h. Pages over 60,000 characters are not cut: the model reads the parts closest to the prompt (needs an `embedding_model`) |
 | `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage; `graph` with `symbol` tells what changing a function touches: callers, calls, the tests that reach it and the files that import it |
@@ -16,7 +16,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.39 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.40 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -181,12 +181,17 @@ Redirects) and Maintenance (Setup audit, Startup).
    `@override`) functions are exempt, as in pydocstyle, eslint-plugin-jsdoc and Checkstyle, and a JSDoc above a set of
    TypeScript overloads documents the implementation:
    - **Remind** (default): the edit runs and the agent is told which touched functions have no docstring, and which
-     documented ones changed their signature, with their callers.
+     documented ones changed their signature, with their callers, the tests calling them and the command that runs those tests
+  (from the code graph, only when it is already cached: the hook never waits for an analysis).
    - **Require**: an edit that leaves a touched function without a docstring is blocked until it adds one.
    - **Off**: no checks.
 
    A documented function edited only in its body is not mentioned. `project_manage` with `action=docs` lists the
    public functions still without a docstring, for documenting a project that started without them.
+
+   **Dependency check on edit**: an edit of `package.json` that adds or changes a dependency lists the OSV advisory IDs of up to 5 of them (exact version, or the lower bound of `^`, `~` and `>=`), answered from a 6 h disk cache or one 2.5 s batch call that sends only package names and versions; when OSV cannot answer, the reminder says the check was skipped and the edit goes on. `dependency_mode` in `config.json`: `warn` (default) or `off`.
+
+   **PDFs** inside a project are indexed as text with `[page N]` markers (20 MiB, 300 pages and 20 s per file; a scanned, password-protected or corrupt PDF is skipped with the reason), so `smart_search` returns the page that holds a passage.
 
    **Block patterns waiting for you** are shown in one approval panel: 8 per page, the ones that would have blocked
    the most logged calls first, a filter over pattern, reason and example, and bulk accept or reject of the selected
@@ -219,7 +224,9 @@ Redirects) and Maintenance (Setup audit, Startup).
    two minutes after it starts and then every 30 minutes (MCP servers shared by several projects are contacted once
    and their result reused for 6 hours; Run now always contacts them again), and the setup screen's **Setup audit**
    panel shows each project's last report: findings by severity, what is new, what was resolved, the tokens each MCP
-   server's tools cost and what was not verified.
+   server's tools cost and what was not verified. When a scheduled run finds new errors or warnings, a Windows
+   notification from the tray names the folder and up to three of them, once per finding, with a button that opens the
+   panel; manual runs and info findings stay silent.
 
    The agent hears about it without asking for it. `setup_audit` with `mode=last` returns the stored report for the
    folder (or the nearest audited parent) without auditing again, and fails with what to do when none is stored. On

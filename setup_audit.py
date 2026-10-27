@@ -865,11 +865,53 @@ def _save_locked(report):
     atomic_io.write_secret_text(last_path, json.dumps(report, indent=1, ensure_ascii=False))
     changes = report.get("changes") or {}
     data = index()
-    data[index_key(report["project"])] = {"summary": report["summary"], "new": len(changes.get("new", [])),
-                                          "resolved": len(changes.get("resolved", [])),
-                                          "checked_at": report["checked_at"], "trigger": report["trigger"],
-                                          "snapshot_key": report["snapshot_key"]}
+    key = index_key(report["project"])
+    entry = {"project": report["project"], "summary": report["summary"], "new": len(changes.get("new", [])),
+             "resolved": len(changes.get("resolved", [])), "checked_at": report["checked_at"],
+             "trigger": report["trigger"], "snapshot_key": report["snapshot_key"],
+             "pending": _pending_notice(data.get(key), report)}
+    data[key] = entry
     _write_index(data)
+
+
+def _pending_notice(previous, report):
+    """The new errors and warnings of a scheduled run not yet told to the user, added to those a former run left
+    unannounced (by finding id). A manual run adds none: the user is looking at its result."""
+    pending = list((previous or {}).get("pending") or [])
+    if report["trigger"] == "schedule":
+        known = {item["id"] for item in pending}
+        pending += [{"id": f["id"], "severity": f["severity"], "check": f["check"], "subject": f["subject"]}
+                    for f in report["findings"]
+                    if f.get("new") and f["severity"] in ("error", "warn") and f["id"] not in known]
+    return pending
+
+
+def notices_due():
+    """[{project, errors, warnings, items}] for the projects whose scheduled audits found new errors or warnings since
+    the last call; marks them announced, so each finding is told once (the tray toast)."""
+    with _INDEX_LOCK:
+        data = index()
+        due = []
+        for entry in data.values():
+            pending = entry.get("pending") or []
+            if pending:
+                due.append({"project": entry["project"], "errors": sum(i["severity"] == "error" for i in pending),
+                            "warnings": sum(i["severity"] == "warn" for i in pending), "items": pending})
+                entry["pending"] = []
+        if due:
+            _write_index(data)
+    return due
+
+
+def toast_text(row):
+    """(title, lines) of the toast for one `notices_due` row."""
+    total = row["errors"] + row["warnings"]
+    title = f"Setup audit: {total} new problem{'s' if total != 1 else ''} in the agent configuration"
+    lines = [os.path.basename(row["project"].rstrip("\\/")) or row["project"]]
+    lines += [f"{item['severity']}: {item['check']} - {item['subject']}"[:120] for item in row["items"][:3]]
+    if len(row["items"]) > 3:
+        lines.append(f"and {len(row['items']) - 3} more")
+    return title, lines
 
 
 class Scheduler:

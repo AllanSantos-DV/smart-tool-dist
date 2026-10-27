@@ -201,11 +201,13 @@ def handle_health_get():
 
 
 def handle_notices():
-    """What the tray should show now: the model offer (once a day until answered) and models over the failure limit
-    (once a day each). Fetching marks them announced, so each toast is shown once per reminder period."""
+    """What the tray should show now: the model offer (once a day until answered), models over the failure limit
+    (once a day each) and the new errors or warnings of the scheduled setup audit (once per finding). Fetching marks
+    them announced, so each toast is shown once per reminder period."""
     upgrade = _checked_upgrade()
     offer = model_upgrade.due() if upgrade["state"] == "pending" else None
-    return {"upgrade": offer, "failing": model_health.alerts_due(), "check_error": upgrade["check_error"]}
+    return {"upgrade": offer, "failing": model_health.alerts_due(), "audit": setup_audit.notices_due(),
+            "check_error": upgrade["check_error"]}
 
 
 def handle_local_models_get():

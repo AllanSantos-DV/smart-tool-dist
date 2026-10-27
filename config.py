@@ -37,6 +37,7 @@ DEFAULT_CONFIG = {
     "hook_mode": "redirect",
     "doc_mode": "remind",
     "duplicate_mode": "warn",
+    "dependency_mode": "warn",
     "auto_update": True,
     "pattern_proposals": "on",
     "contact": "",
@@ -61,6 +62,9 @@ DOC_MODES = ("require", "remind", "off")
 # Edit hook on functions that copy one already indexed (exact or near-identical body): warn = let the edit run and
 # point to the existing function; off = say nothing. Never blocks: near matches are leads, not defects.
 DUPLICATE_MODES = ("warn", "off")
+# Edit hook on package.json: warn = let the edit run and list the added or changed dependencies that have OSV advisories;
+# off = say nothing and make no network call.
+DEPENDENCY_MODES = ("warn", "off")
 # Router model reviewing, in the background, searches the deterministic redirect rule let run: on = propose block
 # patterns for the user to accept in the setup screen; off = no review.
 PATTERN_PROPOSAL_MODES = ("on", "off")
@@ -82,6 +86,13 @@ def duplicate_mode(cfg=None):
     value = (cfg if cfg is not None else load_config()).get("duplicate_mode") or DEFAULT_CONFIG["duplicate_mode"]
     if value not in DUPLICATE_MODES:
         raise ValueError(f"Invalid duplicate_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
+    return value
+
+
+def dependency_mode(cfg=None):
+    value = (cfg if cfg is not None else load_config()).get("dependency_mode") or DEFAULT_CONFIG["dependency_mode"]
+    if value not in DEPENDENCY_MODES:
+        raise ValueError(f"Invalid dependency_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
     return value
 
 

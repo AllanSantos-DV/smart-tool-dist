@@ -20,14 +20,13 @@ import ipaddress
 import json
 import socket
 import ssl
-import subprocess
-import sys
 import threading
 import time
 import urllib.parse
 
 import trafilatura
 
+import document_text
 import model_client
 import research_cache
 
@@ -212,46 +211,19 @@ def thin(text):
     return len(stripped) < PLACEHOLDER_SCAN_CHARS and any(p in stripped[:600].lower() for p in PLACEHOLDERS)
 
 
-PDF_SCRIPT = """
-import io, json, sys
-import pypdf
-reader = pypdf.PdfReader(io.BytesIO(sys.stdin.buffer.read()))
-if reader.is_encrypted and reader.decrypt("") == pypdf.PasswordType.NOT_DECRYPTED:
-    print(json.dumps({"encrypted": True}))
-    sys.exit()
-limit, budget = int(sys.argv[1]), int(sys.argv[2])
-pages, size = [], 0
-for page in reader.pages[:limit]:
-    pages.append((page.extract_text() or "").strip()[:budget - size])
-    size += len(pages[-1])
-    if size >= budget:
-        break
-print(json.dumps({"pages": pages, "count": len(reader.pages)}))
-"""
-
-
 def pdf_text(body, url, deadline):
     """Text of a PDF (pypdf, pure Python), page by page up to PDF_MAX_PAGES. The native WebFetch reads PDFs and the hook
     sends it here, so a PDF used to be a dead end (9 times in 10 days of transcripts). A hostile PDF can make pypdf
     parse for minutes, so it runs in a subprocess killed at the request's deadline (at most PDF_TIMEOUT_S)."""
     timeout = min(PDF_TIMEOUT_S, _left(deadline))
     try:
-        done = subprocess.run([sys.executable, "-I", "-c", PDF_SCRIPT, str(PDF_MAX_PAGES), str(PAGE_STORE_MAX_CHARS)],
-                              input=body, capture_output=True, timeout=timeout,
-                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except subprocess.TimeoutExpired:
+        return document_text.run_pdf(body, timeout, PDF_MAX_PAGES, PAGE_STORE_MAX_CHARS)
+    except document_text.PdfTimeout:
         raise FetchError(f"PDF not read in {timeout:.0f}s ({url}).") from None
-    if done.returncode:
-        detail = (done.stderr.decode("utf-8", "replace").strip().splitlines() or ["no output"])[-1]
-        raise FetchError(f"PDF could not be read ({url}): {detail}"[:300])
-    result = json.loads(done.stdout)
-    if result.get("encrypted"):
-        raise FetchError(f"PDF protected by a password is not read by web_fetch ({url}).")
-    pages = result["pages"]
-    text = "\n\n".join(f"[page {number}]\n{page}" for number, page in enumerate(pages, 1) if page)
-    if result["count"] > len(pages):
-        text += f"\n\n[pages {len(pages) + 1}-{result['count']} not read]"
-    return text
+    except document_text.PdfUnreadable as exc:
+        raise FetchError(f"PDF could not be read ({url}): {exc.detail}"[:300]) from None
+    except document_text.PdfEncrypted:
+        raise FetchError(f"PDF protected by a password is not read by web_fetch ({url}).") from None
 
 
 def read_page(url, deadline, render):

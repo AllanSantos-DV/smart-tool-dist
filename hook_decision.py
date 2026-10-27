@@ -12,9 +12,11 @@ chamada não dá para montar. Nenhuma decisão aqui é sobre periculosidade, só
 """
 import os
 
+import affected_tests
 import code_graph
 import code_impact
 import config
+import dependency_notice
 import doc_check
 import duplicates
 import edit_preview
@@ -182,7 +184,16 @@ def _impact_line(root, rel, name):
     counts = found["counts"]
     tests = ", ".join(f"{t['function']} ({t['path']})" for t in found["tests"])
     calls = f"; tests calling it: {tests}" if tests else ""
-    return f" {counts['callers']} caller(s){calls}; project_manage affected_tests lists every test to run after the edit."
+    return (f" {counts['callers']} caller(s){calls}{_run_command(root, found['tests'])}; project_manage affected_tests "
+            "lists every test to run after the edit.")
+
+
+def _run_command(root, tests):
+    """`; run them: <command>` for the test files of `tests`, one command per runner and folder, or "" when no runner
+    is known for them."""
+    commands = affected_tests._commands(root, sorted({t["path"] for t in tests})) if tests else []
+    runnable = [f"cd {c['cwd']} && {c['command']}" if c["cwd"] != "." else c["command"] for c in commands if c["command"]]
+    return f"; run them: {' ; '.join(runnable)}" if runnable else ""
 
 
 def _doc_lines(findings):
@@ -215,19 +226,35 @@ def _duplicate_lines(findings):
             + " If the copy is intentional (moving the function, a deliberate fork), go ahead.")
 
 
-def _edit_review(payload, doc_mode, duplicate_mode):
+def _edit_review(payload, doc_mode, duplicate_mode, dependency_mode):
     """Checks of an edit before it runs. Docstrings follow doc_mode, in code files of registered projects only (tests,
     docs and files outside a project are left out, as in the docs coverage): missing ones deny the edit in require mode and become a reminder in remind mode; a
     documented function whose signature changed always gets a reminder. Copies of indexed functions follow
-    duplicate_mode and only add context, never deny."""
+    duplicate_mode and only add context, never deny. An edit of a package.json follows dependency_mode: advisories
+    of the added or changed dependencies are added as context, never a denial."""
     with code_graph.pending_scope():
-        return _edit_review_scoped(payload, doc_mode, duplicate_mode)
+        return _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode)
 
 
-def _edit_review_scoped(payload, doc_mode, duplicate_mode):
+def _dependency_part(before, after):
+    """The dependency notice of one package.json edit, or the "dependency check skipped" line when it cannot run.
+
+    Parameters: before (str or None) text before the edit; after (str) text after it.
+    Returns: str, empty when there is nothing to say.
+    """
+    try:
+        return dependency_notice.notice(before, after)
+    except dependency_notice.DependencyCheckError as exc:
+        return f"{dependency_notice.PREFIX}dependency check skipped: {exc}"
+
+
+def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode):
     """`_edit_review` inside one `code_graph.pending_scope`, so the pending-changes scan runs once per review."""
-    doc_findings, duplicate_findings, failures = [], [], []
+    doc_findings, duplicate_findings, failures, dependency_parts = [], [], [], []
     for path, before, after in edit_preview.preview(payload.get("tool_name"), payload.get("tool_input"), payload.get("cwd")):
+        if dependency_mode != "off" and os.path.basename(path) == "package.json":
+            dependency_parts += [part for part in (_dependency_part(before, after),) if part]
+            continue
         if not doc_check.supported(path):
             continue
         root = _project_of(path)
@@ -242,7 +269,7 @@ def _edit_review_scoped(payload, doc_mode, duplicate_mode):
             except (ValueError, RuntimeError) as exc:
                 failures.append(f"Smart Tool duplicates check skipped: {exc}")
     parts = ([_doc_lines(doc_findings)] if doc_findings else []) + \
-        ([_duplicate_lines(duplicate_findings)] if duplicate_findings else []) + failures
+        ([_duplicate_lines(duplicate_findings)] if duplicate_findings else []) + failures + dependency_parts
     if not parts:
         return {}
     message = " ".join(parts)
@@ -253,16 +280,17 @@ def _edit_review_scoped(payload, doc_mode, duplicate_mode):
 
 def decide(payload, client, web_route, jobs):
     """Hook output for one PreToolUse payload: edits follow doc_mode (require | remind | off) and duplicate_mode
-    (warn | off), the other tools follow hook_mode (redirect | advise | off). In redirect mode the Smart Tool call that
+    (warn | off) and dependency_mode (warn | off), the other tools follow hook_mode (redirect | advise | off). In redirect mode the Smart Tool call that
     replaces a redirected one starts in `jobs` under the call's tool_use_id (see `_redirect`); only a search whose
     query cannot be built, or a client that sends no tool_use_id, is denied with the exact call to make, and never in a
     subagent whose tool list has no Smart Tool MCP tool: it has nothing to switch to."""
     cfg = config.load_config()
     if isinstance(payload, dict) and payload.get("tool_name") in EDIT_TOOLS:
-        doc_mode, duplicate_mode = config.doc_mode(cfg), config.duplicate_mode(cfg)
-        if doc_mode == "off" and duplicate_mode == "off":
+        doc_mode, duplicate_mode, dependency_mode = (config.doc_mode(cfg), config.duplicate_mode(cfg),
+                                                     config.dependency_mode(cfg))
+        if doc_mode == "off" and duplicate_mode == "off" and dependency_mode == "off":
             return {}
-        return _edit_review(payload, doc_mode, duplicate_mode)
+        return _edit_review(payload, doc_mode, duplicate_mode, dependency_mode)
     if isinstance(payload, dict) and str(payload.get("tool_name")).startswith(f"mcp__{SMART_TOOL_SERVER}__"):
         if payload["tool_name"] == SMART_SEARCH_TOOL:
             router.CLIENT.set(client)

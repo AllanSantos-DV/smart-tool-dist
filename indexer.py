@@ -129,7 +129,7 @@ def read_indexable(root, rel_path):
         size = os.path.getsize(full)
         if name.endswith(".svg") and size > MAX_SVG_INDEXABLE_BYTES:
             return None, SKIP_GRAPHIC
-        limit = document_text.MAX_ARCHIVE_BYTES if name.endswith('.docx') else MAX_INDEXABLE_BYTES
+        limit = document_text.size_limit(name) if document_text.is_extracted(name) else MAX_INDEXABLE_BYTES
         if size > limit:
             return None, SKIP_TOO_LARGE
         with open(full, "rb") as f:
@@ -138,9 +138,9 @@ def read_indexable(root, rel_path):
         return None, SKIP_UNREADABLE
     if len(data) > limit:
         return None, SKIP_TOO_LARGE
-    if name.endswith('.docx'):
+    if document_text.is_extracted(name):
         try:
-            data = document_text.extract_docx(data)
+            data = document_text.extract(name, data)
         except document_text.DocumentError as exc:
             return None, str(exc)
     prefix = data[:_SNIFF_BYTES]
@@ -507,7 +507,7 @@ def _stat_candidate(root, rel):
             return None, SKIP_UNREADABLE
     except OSError:
         return None, SKIP_UNREADABLE
-    if stat.st_size > (document_text.MAX_ARCHIVE_BYTES if name.endswith('.docx') else MAX_INDEXABLE_BYTES):
+    if stat.st_size > (document_text.size_limit(name) if document_text.is_extracted(name) else MAX_INDEXABLE_BYTES):
         return None, SKIP_TOO_LARGE
     if name.endswith(".svg") and stat.st_size > MAX_SVG_INDEXABLE_BYTES:
         return None, SKIP_GRAPHIC
@@ -523,7 +523,7 @@ def _stable_read(root, rel):
         if data is None:
             return None, encoding, before
         after, _ = _stat_candidate(root, rel)
-        if after == before and (str(rel).lower().endswith('.docx') or len(data) == before[1]):
+        if after == before and (document_text.is_extracted(rel) or len(data) == before[1]):
             return data, encoding, before
     return None, "file changed while reading", None
 
@@ -621,7 +621,7 @@ def _reindex(root, included_paths, embed_batch, chunk_lines=CHUNK_LINES, on_prog
                 continue
             observed[rel] = stat
             force_file = any(rel.casefold() == p or rel.casefold().startswith(p + "/") for p in forced)
-            extractor_changed = rel.lower().endswith('.docx') and meta.get('document_extractor_version') != document_text.VERSION
+            extractor_changed = document_text.is_extracted(rel) and meta.get('document_extractor_version') != document_text.VERSION
             if (full_check or building or force_file or extractor_changed or old_state.get(rel) != stat):
                 candidates.append(rel)
             else:

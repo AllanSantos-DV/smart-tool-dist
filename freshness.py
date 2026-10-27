@@ -72,32 +72,71 @@ def npm_registry_evidence(package):
         return None
 
 
-def npm_advisories(package, package_version):
-    """IDs conhecidos pela OSV para a versão; None significa checagem indisponível."""
-    if (not package or not package_version
-            or not re.fullmatch(r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+", package)):
-        return None
-    body = json.dumps({"package": {"name": package, "ecosystem": "npm"},
-                       "version": package_version}).encode("utf-8")
-    request = urllib.request.Request(
-        "https://api.osv.dev/v1/query", data=body, method="POST",
+NPM_NAME_RE = re.compile(r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+")
+
+
+def _osv_query(package, package_version):
+    """One OSV query object: the package (npm) and the version asked about."""
+    return {"package": {"name": package, "ecosystem": "npm"}, "version": package_version}
+
+
+def _osv_request(endpoint, payload):
+    """The POST request to an OSV endpoint (`query` or `querybatch`) with the product's headers and User-Agent."""
+    return urllib.request.Request(
+        "https://api.osv.dev/v1/" + endpoint, data=json.dumps(payload).encode("utf-8"), method="POST",
         headers={"Content-Type": "application/json", "Accept": "application/json",
                  "User-Agent": version.user_agent(config.load_config().get("contact"))},
     )
+
+
+def _osv_ids(data):
+    """Sorted advisory IDs of one OSV result object; None when it is incomplete (next_page_token) or malformed, since
+    neither confirms the absence of a record."""
+    if isinstance(data, dict) and data.get("next_page_token"):
+        return None  # Página incompleta não confirma ausência de aviso novo.
+    rows = data.get("vulns", []) if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return None
+    ids = [row.get("id") for row in rows if isinstance(row, dict)]
+    if any(not isinstance(advisory, str) or not advisory for advisory in ids):
+        return None
+    return sorted(set(ids))
+
+
+def npm_advisories(package, package_version):
+    """IDs conhecidos pela OSV para a versão; None significa checagem indisponível."""
+    if not package or not package_version or not NPM_NAME_RE.fullmatch(package):
+        return None
+    request = _osv_request("query", _osv_query(package, package_version))
     try:
         with urllib.request.urlopen(request, timeout=7) as response:
-            data = json.load(response)
-        if isinstance(data, dict) and data.get("next_page_token"):
-            return None  # Página incompleta não confirma ausência de aviso novo.
-        rows = data.get("vulns", []) if isinstance(data, dict) else None
-        if not isinstance(rows, list):
-            return None
-        ids = [row.get("id") for row in rows if isinstance(row, dict)]
-        if any(not isinstance(advisory, str) or not advisory for advisory in ids):
-            return None
-        return sorted(set(ids))
+            return _osv_ids(json.load(response))
     except Exception:
         return None
+
+
+def npm_advisories_batch(packages, timeout):
+    """Advisory IDs for each (package, version) of `packages` from one OSV `querybatch` call.
+
+    Parameters: packages (list of (name, version)); timeout (float) seconds for the request.
+    Returns: list in the same order, each the sorted ID list or None when that package's answer is incomplete
+    (next_page_token) or malformed, so it is unverified and not clean.
+    Raises: RuntimeError when the service cannot be reached, answers badly or answers a different number of results.
+    """
+    if any(not NPM_NAME_RE.fullmatch(name) or not package_version for name, package_version in packages):
+        raise ValueError(f"Invalid npm package query: {packages!r}")
+    request = _osv_request("querybatch", {"queries": [_osv_query(name, package_version)
+                                                      for name, package_version in packages]})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.load(response)
+    except Exception as exc:
+        raise RuntimeError(f"OSV querybatch failed: {exc}") from exc
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list) or len(results) != len(packages):
+        raise RuntimeError(f"OSV querybatch answered {len(results) if isinstance(results, list) else 'no'} results "
+                           f"for {len(packages)} queries")
+    return [_osv_ids(result) for result in results]
 
 
 def npm_osv_evidence(package, version):

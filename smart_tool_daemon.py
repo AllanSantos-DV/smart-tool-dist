@@ -529,7 +529,7 @@ TOOLS = [
         "description": (
             "Reads a known URL and returns only the answer to the prompt, written by the gateway's mini model - use instead of "
             "the native WebFetch. The page is cached for 24 h: another prompt on the same URL does not download it again. "
-            "JavaScript-built pages are rendered in the browser. Does not read localhost, internal networks or PDFs."
+            "JavaScript-built pages are rendered in the browser. Reads PDFs as text, page by page; does not read localhost or internal networks."
         ),
         "inputSchema": {
             "type": "object",
@@ -1706,6 +1706,11 @@ def _handle_smart_scout(arguments):
         others = list(dict.fromkeys(f"{row['path']}:{row['lines']}" for row in rows
                                     if row["path"] not in shown))[:SCOUT_MAX_POINTERS]
         source = _SCOUT_SOURCES[found["source"]]
+        notes = []
+        if scout.is_intent_question(question):
+            dossier_answer = dossier.query(root, query, max_hits=scout.DECISION_NOTES_MAX)
+            notes = dossier_answer["hits"]
+            warnings += [f"decision notes: {reason}" for reason in dossier_answer["reasons"]]
         text = None
         if model and items:
             calls += 1
@@ -1716,7 +1721,8 @@ def _handle_smart_scout(arguments):
                 found_answer, answer, citations = scout.valid_answer(raw, items)
                 note = f"{model} ({calls} call{'s' if calls > 1 else ''})"
                 if citations:
-                    text = scout.render(question, source, items, citations, answer, found_answer, note, warnings, others)
+                    text = scout.render(question, source, items, citations, answer, found_answer, note, warnings, others,
+                                        notes)
                 else:
                     shown_items = scout.evidence(root, rows, terms, max_files,
                                                  scout.LEXICAL_WINDOW_LINES)[:scout.UNCITED_WINDOWS]
@@ -1724,14 +1730,14 @@ def _handle_smart_scout(arguments):
                             if item["path"] not in {kept["path"] for kept in shown_items}]
                     text = scout.render(question, source, shown_items, None, answer, found_answer, note,
                                         warnings + ["the scout_model cited no lines; the best keyword windows are shown "
-                                                    "instead."], rest + others)
+                                                    "instead."], rest + others, notes)
             except Exception as exc:
                 warnings.append(f"scout_model {model} failed writing the answer ({_project_error(exc)}): literal lines "
                                 "only, no answer.")
                 failure = "answer"
                 items = scout.evidence(root, rows, terms, max_files, scout.LEXICAL_WINDOW_LINES)
         if text is None:
-            text = scout.render(question, source, items, warnings=warnings, others=others)
+            text = scout.render(question, source, items, warnings=warnings, others=others, notes=notes)
     _metric("scout", source=found["source"], model=bool(model) and failure is None, model_calls=calls, failure=failure,
             files=len({item["path"] for item in items}), chars=len(text), elapsed_s=round(time.monotonic() - started, 2))
     return _sanitize_text(text)

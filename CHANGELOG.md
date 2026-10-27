@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.9.40 - beta
+
+- PDFs of the project are searchable. `smart_search` indexes the text layer of a `.pdf` inside the project scope and
+  returns the page (`[page N]`) with the passage. The extractor is the one `web_fetch` already used, now in
+  `document_text`: `pypdf` in an isolated subprocess killed after 20 s, at most 20 MiB, 300 pages and 1,000,000
+  characters per file. A scanned PDF (no text layer), a password-protected one, a corrupt one or one that overruns the
+  deadline is skipped with the reason in the index stats and the rest of the project is indexed as usual. The secret,
+  minified and long-line guards apply to the extracted text. `document_text.VERSION` is 2: every `.docx` already indexed
+  is read once more. Tests in `tests/test_pdf_index.py`; measurement before and after in
+  `docs/research/data/pdf-probe-*.json`.
+- Editing `package.json` warns about known-vulnerable dependencies. Added or changed entries of `dependencies`,
+  `devDependencies`, `peerDependencies` and `optionalDependencies` (at most 5 per edit) are checked against OSV with one
+  `querybatch` call (2.5 s timeout, answers cached on disk for 6 h); the edit reminder lists the advisory IDs per
+  `package@version`, or says `dependency check skipped: <reason>` when OSV cannot be reached, and the edit goes on.
+  Only package names and versions leave the machine. `dependency_mode` in `config.json` (`warn` by default, `off`)
+  turns it off. Tests in `tests/test_dependency_notice.py`; measurement in `docs/research/data/dependency-probe-*.json`.
+- A scheduled setup audit that finds new errors or warnings raises one Windows toast per project with an "Open the
+  audit" button; the first audit, manual runs and info findings stay silent (`tests/test_audit_toast.py`).
+- `smart_scout` answers a question about intent (why, reason, decided) with up to three decision notes from the project
+  notes next to the code lines (`tests/test_scout.py`).
+- The edit reminder gives the command that runs the tests calling the edited function (`tests/test_edit_review_cache.py`).
+
 ## 0.9.39 - beta
 
 - Two-letter technical terms (`ui`, `db`, `id`) count again in the shared `focus_terms`, used by `smart_search
