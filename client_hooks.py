@@ -58,18 +58,18 @@ def _entries(client):
     return entries
 
 
-def _ours(group):
-    return isinstance(group, dict) and isinstance(group.get("hooks"), list) and any(map(_our_hook, group["hooks"]))
+def _ours(group, is_ours=_our_hook):
+    return isinstance(group, dict) and isinstance(group.get("hooks"), list) and any(map(is_ours, group["hooks"]))
 
 
-def _without_ours(groups):
+def _without_ours(groups, is_ours=_our_hook):
     """Drops only our hook entries; a group shared with other hooks keeps them and disappears only when emptied."""
     kept = []
     for group in groups:
-        if not _ours(group):
+        if not _ours(group, is_ours):
             kept.append(group)
             continue
-        others = [hook for hook in group["hooks"] if not _our_hook(hook)]
+        others = [hook for hook in group["hooks"] if not is_ours(hook)]
         if others:
             kept.append({**group, "hooks": others})
     return kept
@@ -276,10 +276,6 @@ def _audit_hook(hook):
     return isinstance(hook, dict) and AUDIT_MARKER in str(hook.get("command", ""))
 
 
-def _audit_ours(group):
-    return isinstance(group, dict) and isinstance(group.get("hooks"), list) and any(map(_audit_hook, group["hooks"]))
-
-
 def _audit_entry():
     return {"matcher": AUDIT_MATCHER,
             "hooks": [{"type": "command", "command": f"{_shell_safe(sys.executable)} {_shell_safe(AUDIT_SCRIPT)}",
@@ -299,15 +295,7 @@ def _audit_plan():
     groups = data["hooks"].setdefault("SessionStart", [])
     if not isinstance(groups, list):
         raise ValueError(f"{path}: hooks.SessionStart is not a list; nothing was changed.")
-    kept = []
-    for group in groups:
-        if not _audit_ours(group):
-            kept.append(group)
-            continue
-        others = [hook for hook in group["hooks"] if not _audit_hook(hook)]
-        if others:
-            kept.append({**group, "hooks": others})
-    groups[:] = kept
+    groups[:] = _without_ours(groups, _audit_hook)
     return path, data, groups
 
 
@@ -321,7 +309,7 @@ def audit_state():
     except FileNotFoundError:
         return "missing"
     groups = ((data.get("hooks") or {}).get("SessionStart") or []) if isinstance(data, dict) else []
-    found = [group for group in groups if _audit_ours(group)] if isinstance(groups, list) else []
+    found = [group for group in groups if _ours(group, _audit_hook)] if isinstance(groups, list) else []
     if not found:
         return "missing"
     return "current" if _audit_entry() in found else "outdated"

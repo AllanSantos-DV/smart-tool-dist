@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.38 - beta
+
+- One definition of a search term. `smart_search mode=dossier` now takes its terms from `dossier.focus_terms`, the
+  function `smart_scout` already used for its windows (`scout.focus_terms` is the same function): words of 3+ characters,
+  question words dropped, camelCase split. A note is no longer ranked by "why" or "the", an identifier like
+  `SessionStart` finds the note that writes "session start", and a query made only of question words is refused.
+  Words of 2 characters no longer count in dossier queries. Ranking cases in `tests/test_dossier.py`.
+- One copy of the hook-entry removal in `client_hooks.py`: the session-start audit entry and the redirect entries share
+  `_ours` and `_without_ours`, which take the predicate that says which hooks are ours.
+
 ## 0.9.37 - beta
 
 - The site no longer sends a human reader to the repository. The "Release notes" links (hero and footer) go to a

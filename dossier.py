@@ -16,13 +16,29 @@ TITLE_CHARS = 80
 MAX_FILE_BYTES = 512 * 1024
 BACKLOG_FILES = ("docs/BACKLOG.md", "BACKLOG.md")
 INSTRUCTION_FILES = (("CLAUDE.md", "claude_md"), (".claude/CLAUDE.md", "claude_md"), ("AGENTS.md", "agents_md"))
-_TERM = re.compile(r"[\w]{2,}", re.UNICODE)
+_WORD = re.compile(r"[\w]{3,}", re.UNICODE)
+_STOPWORDS = {
+    "the", "and", "for", "how", "what", "where", "which", "does", "with", "from", "that", "this", "are", "when", "who",
+    "why", "into", "used", "use", "uses", "its", "has", "have", "code", "project", "file", "files",
+    "como", "onde", "qual", "quais", "que", "quem", "por", "para", "com", "uma", "dos", "das", "nos", "nas", "pelo",
+    "pela", "ele", "ela", "isso", "esse", "essa", "este", "esta", "fica", "ficam", "usa", "usado", "usada", "sobre",
+    "entre", "depois", "antes", "quando", "cada", "seu", "sua", "seus", "suas", "não", "sem", "mais", "código",
+    "projeto", "arquivo", "arquivos", "decide", "funciona",
+}
 _UNIT_START = re.compile(r"#{1,6}\s|[-*]\s")
 
 
-def _terms(query):
-    """Up to 24 distinct casefolded word terms of the query."""
-    return list(dict.fromkeys(term.casefold() for term in _TERM.findall(query or "")))[:24]
+def focus_terms(*texts):
+    """Casefolded content words of the texts (3+ characters, common question words dropped), camelCase split, in
+    order: what a window is scored by."""
+    found = []
+    for text in texts:
+        spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", text or "")
+        for word in _WORD.findall(spaced):
+            folded = word.casefold()
+            if folded not in _STOPWORDS and folded not in found:
+                found.append(folded)
+    return found[:24]
 
 
 def _sources(root):
@@ -78,7 +94,7 @@ def query(root, text, timeout_ms=DEFAULT_TIMEOUT_MS, max_hits=DEFAULT_MAX_HITS):
     was found until then."""
     started = time.monotonic()
     deadline = started + timeout_ms / 1000
-    terms = _terms(text)
+    terms = focus_terms(text)
     reasons, scanned, unreadable, scored = [], 0, [], []
     for rel, kind in _sources(root):
         if time.monotonic() > deadline:
@@ -116,7 +132,7 @@ def answer(arguments):
         raise ValueError("smart_search mode=dossier requires 'project_root' pointing to an existing folder")
     text = next((arguments[key] for key in ("query_identifiers", "query_comments", "doc_query")
                  if isinstance(arguments.get(key), str) and arguments[key].strip()), "")
-    if not _terms(text):
+    if not focus_terms(text):
         raise ValueError("smart_search mode=dossier requires 'query_identifiers' (or 'doc_query') with at least one word.")
     timeout_ms = _bounded(arguments, "timeout_ms", DEFAULT_TIMEOUT_MS, 1, MAX_TIMEOUT_MS)
     max_hits = _bounded(arguments, "max_hits", DEFAULT_MAX_HITS, 1, MAX_HITS)

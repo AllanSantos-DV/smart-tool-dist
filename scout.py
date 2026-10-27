@@ -12,11 +12,11 @@ Market pattern copied (docs/research/2026-10-24-scout-modelo-leve-no-smart-tool.
 excerpts, never an agent prompt, so no agent context is reopened per call.
 """
 import os
-import re
 
 import document_text
 import index_scope
 import indexer
+from dossier import focus_terms  # noqa: F401  (one definition of a search term, shared with smart_search mode=dossier)
 
 MAX_QUESTION_CHARS = 2000
 MAX_TERMS_CHARS = 400
@@ -35,15 +35,6 @@ PLAN_MAX_FOLDERS = 6
 OUTLINE_MAX_DIRS = 300
 OUTLINE_MAX_ROOT_FILES = 200
 _FIELDS = {"project_root", "question", "terms", "max_files"}
-_WORD = re.compile(r"[\w]{3,}", re.UNICODE)
-_STOPWORDS = {
-    "the", "and", "for", "how", "what", "where", "which", "does", "with", "from", "that", "this", "are", "when", "who",
-    "why", "into", "used", "use", "uses", "its", "has", "have", "code", "project", "file", "files",
-    "como", "onde", "qual", "quais", "que", "quem", "por", "para", "com", "uma", "dos", "das", "nos", "nas", "pelo",
-    "pela", "ele", "ela", "isso", "esse", "essa", "este", "esta", "fica", "ficam", "usa", "usado", "usada", "sobre",
-    "entre", "depois", "antes", "quando", "cada", "seu", "sua", "seus", "suas", "não", "sem", "mais", "código",
-    "projeto", "arquivo", "arquivos", "decide", "funciona",
-}
 
 PLAN_SYSTEM = (
     "You plan a keyword scan of a code project that has no search index yet. Given a question and the project's "
@@ -98,19 +89,6 @@ def arguments(raw):
     if type(max_files) is not int or not 1 <= max_files <= MAX_FILES:
         raise ValueError(f"max_files must be an integer from 1 to {MAX_FILES}")
     return {"project_root": root, "question": question.strip(), "terms": (terms or "").strip(), "max_files": max_files}
-
-
-def focus_terms(*texts):
-    """Casefolded content words of the texts (3+ characters, common question words dropped), camelCase split, in
-    order: what a window is scored by."""
-    found = []
-    for text in texts:
-        spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", text or "")
-        for word in _WORD.findall(spaced):
-            folded = word.casefold()
-            if folded not in _STOPWORDS and folded not in found:
-                found.append(folded)
-    return found[:24]
 
 
 def disk_lines(root, path, start, end):
