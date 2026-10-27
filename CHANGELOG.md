@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.43 - beta
+
+- The session-start audit report (Claude Code and Codex) is also given after a compaction and after a fork, the two
+  starts that drop the earlier context; an installed hook shows as outdated until "Update hook" on the setup page, and
+  Codex asks for approval again in `/hooks`. The index scope prompt names PPTX, XLSX and PDF next to DOCX.
+
 ## 0.9.42 - beta
 
 - Presentations and workbooks of the project are searchable. `.pptx` text comes out per slide under `[slide N]`, with the
