@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.39 - beta
+
+- Two-letter technical terms (`ui`, `db`, `id`) count again in the shared `focus_terms`, used by `smart_search
+  mode=dossier` and `smart_scout`. Two-letter English and Portuguese function words (`is`, `of`, `de`, `em`, ...) are
+  dropped like the question words. Tests in `tests/test_dossier.py`.
+- The npm registry and OSV checks of `freshness` no longer raise. `npm_registry_evidence` read a local `version` before
+  assigning it (UnboundLocalError on every call) and `npm_advisories` shadowed the `version` module with its parameter;
+  both return evidence or `None` as documented. Tests in `tests/test_npm_evidence.py`.
+
 ## 0.9.38 - beta
 
 - One definition of a search term. `smart_search mode=dossier` now takes its terms from `dossier.focus_terms`, the

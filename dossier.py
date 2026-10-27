@@ -16,7 +16,7 @@ TITLE_CHARS = 80
 MAX_FILE_BYTES = 512 * 1024
 BACKLOG_FILES = ("docs/BACKLOG.md", "BACKLOG.md")
 INSTRUCTION_FILES = (("CLAUDE.md", "claude_md"), (".claude/CLAUDE.md", "claude_md"), ("AGENTS.md", "agents_md"))
-_WORD = re.compile(r"[\w]{3,}", re.UNICODE)
+_WORD = re.compile(r"[\w]{2,}", re.UNICODE)
 _STOPWORDS = {
     "the", "and", "for", "how", "what", "where", "which", "does", "with", "from", "that", "this", "are", "when", "who",
     "why", "into", "used", "use", "uses", "its", "has", "have", "code", "project", "file", "files",
@@ -24,13 +24,15 @@ _STOPWORDS = {
     "pela", "ele", "ela", "isso", "esse", "essa", "este", "esta", "fica", "ficam", "usa", "usado", "usada", "sobre",
     "entre", "depois", "antes", "quando", "cada", "seu", "sua", "seus", "suas", "não", "sem", "mais", "código",
     "projeto", "arquivo", "arquivos", "decide", "funciona",
+    "is", "in", "to", "of", "on", "at", "by", "an", "as", "it", "or", "be", "do", "if", "so", "we", "no", "up", "me", "my",
+    "he", "us", "am", "de", "da", "em", "na", "os", "um", "se", "ao", "ou", "eu", "te", "é", "já", "só",
 }
 _UNIT_START = re.compile(r"#{1,6}\s|[-*]\s")
 
 
 def focus_terms(*texts):
-    """Casefolded content words of the texts (3+ characters, common question words dropped), camelCase split, in
-    order: what a window is scored by."""
+    """Casefolded content words of the texts (2+ characters, common question and function words dropped), camelCase
+    split, in order: what a window is scored by."""
     found = []
     for text in texts:
         spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", text or "")

@@ -62,23 +62,23 @@ def npm_registry_evidence(package):
     try:
         with urllib.request.urlopen(request, timeout=7) as response:
             data = json.load(response)
-        version = data.get("version") if isinstance(data, dict) else None
-        if not isinstance(version, str) or not version or len(version) > 80:
+        latest = data.get("version") if isinstance(data, dict) else None
+        if not isinstance(latest, str) or not latest or len(latest) > 80:
             return None
         return {"title": f"npm registry: {package}", "url": url,
-                "snippet": f"Latest version published on the npm registry: {version}",
-                "tier": "npm_registry", "npm_package": package, "npm_version": version}
+                "snippet": f"Latest version published on the npm registry: {latest}",
+                "tier": "npm_registry", "npm_package": package, "npm_version": latest}
     except Exception:
         return None
 
 
-def npm_advisories(package, version):
+def npm_advisories(package, package_version):
     """IDs conhecidos pela OSV para a versão; None significa checagem indisponível."""
-    if (not package or not version
+    if (not package or not package_version
             or not re.fullmatch(r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+", package)):
         return None
     body = json.dumps({"package": {"name": package, "ecosystem": "npm"},
-                       "version": version}).encode("utf-8")
+                       "version": package_version}).encode("utf-8")
     request = urllib.request.Request(
         "https://api.osv.dev/v1/query", data=body, method="POST",
         headers={"Content-Type": "application/json", "Accept": "application/json",
