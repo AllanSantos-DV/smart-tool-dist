@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.37 - beta
+
+- The site no longer sends a human reader to the repository. The "Release notes" links (hero and footer) go to a
+  new release-notes section on the page itself, and "How it works, step by step" jumps to the tools section instead
+  of the README on GitHub. Guard tests in `tests/test_pages.py`: no `href`/`src` of the site may contain `/blob/`,
+  `README` or the owner's repositories, and the release-notes section must lead with the current version.
+
 ## 0.9.36 - beta
 
 - The "Smart Tool was updated" notice links to the public site (`update_check.SITE_URL`, the GitHub Pages page)
