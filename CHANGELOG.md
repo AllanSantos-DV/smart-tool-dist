@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.36 - beta
+
+- The "Smart Tool was updated" notice links to the public site (`update_check.SITE_URL`, the GitHub Pages page)
+  instead of the CHANGELOG blob of the distribution repository. Test `NoticeLinksTest` fails if an update notice links
+  to a README, a `/blob/` path or github.com.
+
 ## 0.9.35 - beta
 
 - Structured output in the model calls that must return JSON. The deep-research steps (researcher, critic, planner),

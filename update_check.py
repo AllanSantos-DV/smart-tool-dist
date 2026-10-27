@@ -20,7 +20,7 @@ import version
 PACKAGE = "@allansantos-dev/smart-tool"
 REGISTRY_URL = "https://registry.npmjs.org/@allansantos-dev%2Fsmart-tool/latest"
 UPDATE_COMMAND = f"npx --yes {PACKAGE}@latest install"
-CHANGELOG_URL = "https://github.com/AllanSantos-DV/smart-tool-dist/blob/main/CHANGELOG.md"
+SITE_URL = "https://allansantos-dv.github.io/smart-tool/"
 STATE_PATH = os.path.join(paths.DATA_DIR, "update-state.json")
 ENV_OPT_OUT = "SMART_TOOL_AUTO_UPDATE"
 RETRY_AFTER_S = 24 * 3600
@@ -118,7 +118,7 @@ def notices(now=None):
     updated = state.get("updated") or {}
     if updated.get("to") == version.VERSION and now - updated.get("at", 0) < UPDATED_NOTICE_S:
         found.append((f"updated:{version.VERSION}",
-                      f"Smart Tool was updated from {updated['from']} to {version.VERSION}. Changes: {CHANGELOG_URL}"))
+                      f"Smart Tool was updated from {updated['from']} to {version.VERSION}. Changes: {SITE_URL}"))
     failed = failed_update()
     latest = state.get("latest")
     if failed:
