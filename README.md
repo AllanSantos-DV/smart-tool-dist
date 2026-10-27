@@ -16,7 +16,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.40 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.41 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -129,7 +129,7 @@ Redirects) and Maintenance (Setup audit, Startup).
    When a new version recommends other models than the ones you use, a Windows notification (**Apply now**, **Don't
    show again**) and the **New recommended models** card on this page offer them: nothing changes until you apply, the
    models you had are kept, and **Switch back to my previous models** undoes it. The **Model failures (last 24 h)** table
-   lists every failed gateway call by role, model and tool; a model that fails half of its calls (5 or more) also raises a
+   groups the failed gateway calls by type (429, 503, other 5xx, timeout, connection, authentication) and role, with the count, the first and last time and one sample, and shows the calls per purpose; a model that fails half of its calls (5 or more) also raises a
    notification and a tray alert. A failure inside a tool call also comes back as a warning line in the tool answer;
    calls made by a hook or by background work (index scope and profile, block-pattern proposals) have no answer to
    carry it, so they show only in the table, the log and the notification. The local embedder is not in that table or in
@@ -189,7 +189,7 @@ Redirects) and Maintenance (Setup audit, Startup).
    A documented function edited only in its body is not mentioned. `project_manage` with `action=docs` lists the
    public functions still without a docstring, for documenting a project that started without them.
 
-   **Dependency check on edit**: an edit of `package.json` that adds or changes a dependency lists the OSV advisory IDs of up to 5 of them (exact version, or the lower bound of `^`, `~` and `>=`), answered from a 6 h disk cache or one 2.5 s batch call that sends only package names and versions; when OSV cannot answer, the reminder says the check was skipped and the edit goes on. `dependency_mode` in `config.json`: `warn` (default) or `off`.
+   **Dependency check on edit**: an edit of `package.json`, `requirements*.txt` or `go.mod` that adds or changes a dependency lists the OSV advisory IDs of up to 5 of them (exact version, or the lower bound of `^`, `~`, `~=` and `>=`), answered from a 6 h disk cache or one 2.5 s batch call that sends only package names and versions; when OSV cannot answer, the reminder says the check was skipped and the edit goes on. `dependency_mode` in `config.json`: `warn` (default) or `off`.
 
    **PDFs** inside a project are indexed as text with `[page N]` markers (20 MiB, 300 pages and 20 s per file; a scanned, password-protected or corrupt PDF is skipped with the reason), so `smart_search` returns the page that holds a passage.
 

@@ -1,10 +1,12 @@
-"""Vulnerable-dependency notice for an edit of package.json, built before the edit runs.
+"""Vulnerable-dependency notice for an edit of a dependency manifest, built before the edit runs.
 
-Compares the dependency tables of the file before and after the edit, asks OSV (one `querybatch` call, short timeout)
-about the added or changed ones only, and answers from a disk cache of (package, version) -> advisory IDs for 6 hours.
-Only package names and versions leave the machine. The caller (`hook_decision`) turns a `DependencyCheckError` into
+Manifests: package.json (OSV ecosystem npm), requirements*.txt (PyPI: `==` pins and the lower bound of `>=` and `~=`)
+and go.mod (Go: `require` lines with a plain vX.Y.Z). Compares the dependencies of the file before and after the edit,
+asks OSV (one `querybatch` call, short timeout) about the added or changed ones only, and answers from a disk cache of
+(ecosystem, package, version) -> advisory IDs for 6 hours. Only package names and versions leave the machine. The caller (`hook_decision`) turns a `DependencyCheckError` into
 "dependency check skipped: <reason>" and lets the edit go on.
 """
+import collections
 import json
 import os
 import re
@@ -23,13 +25,17 @@ TABLES = ("dependencies", "devDependencies", "peerDependencies", "optionalDepend
 PREFIX = "Smart Tool dependencies: "
 _SPECIFIER_RE = re.compile(r"(\^|~|>=|>|=)?\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?"
                            r"((?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)")
+_REQUIREMENTS_FILE_RE = re.compile(r"requirements[A-Za-z0-9._-]*\.txt")
+_REQUIREMENT_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*([^;]*)")
+_PIP_VERSION_RE = re.compile(r"[0-9][0-9A-Za-z.+!_-]*")
+_GO_VERSION_RE = re.compile(r"v\d+\.\d+\.\d+")
 
 
 class DependencyCheckError(RuntimeError):
     """The check could not run (OSV unreachable or answering badly, unreadable cache, current file not JSON)."""
 
 
-def _tables(text):
+def _npm_pairs(text):
     """The (name, specifier) pairs of every dependency table in a package.json text.
 
     Parameters: text (str) file content.
@@ -49,32 +55,91 @@ def _tables(text):
     return pairs
 
 
-def changed_dependencies(before, after):
-    """Dependencies added or whose specifier changed between two package.json texts.
+def _requirements_pairs(text):
+    """The (name, specifier) pairs of a requirements.txt text; options, includes, editable and URL lines are skipped.
 
-    Parameters: before (str or None) text before the edit, None when the file did not exist; after (str) text after.
-    Returns: list of (name, specifier); empty when `after` is not valid JSON (the user is mid-edit).
-    Raises: DependencyCheckError when `before` exists but is not valid JSON.
+    Parameters: text (str) file content.
+    Returns: dict (name, specifier) -> None in file order; the specifier is the version clauses without spaces ("" when
+    the line only names the package).
     """
-    now = _tables(after)
+    pairs = {}
+    for raw in text.splitlines():
+        line = raw.split(" #")[0].split(";")[0].strip().rstrip("\\").strip()
+        if not line or line.startswith(("#", "-")):
+            continue
+        line = " ".join(word for word in line.split() if not word.startswith("--"))
+        match = _REQUIREMENT_RE.fullmatch(line)
+        if not match:
+            continue
+        specifier = "".join(match.group(2).split())
+        if specifier and specifier[0] not in "=<>!~":
+            continue
+        pairs[(match.group(1), specifier)] = None
+    return pairs
+
+
+def _go_pairs(text):
+    """The (module, version) pairs of the `require` lines of a go.mod text, single-line and block; replace, exclude and
+    the other directives are skipped.
+
+    Parameters: text (str) file content.
+    Returns: dict (module, version) -> None in file order.
+    """
+    pairs, block = {}, None
+    for raw in text.splitlines():
+        tokens = raw.split("//")[0].split()
+        if not tokens:
+            continue
+        if block is None:
+            if tokens[0] == "require" and len(tokens) == 3:
+                pairs[(tokens[1], tokens[2])] = None
+            elif tokens[-1] == "(":
+                block = tokens[0]
+        elif tokens == [")"]:
+            block = None
+        elif block == "require" and len(tokens) == 2:
+            pairs[(tokens[0], tokens[1])] = None
+    return pairs
+
+
+def ecosystem_of(path):
+    """The OSV ecosystem of a manifest file name.
+
+    Parameters: path (str) file path.
+    Returns: "npm" for package.json, "PyPI" for requirements*.txt, "Go" for go.mod; None for any other file.
+    """
+    name = os.path.basename(path)
+    if name == "package.json":
+        return "npm"
+    if name == "go.mod":
+        return "Go"
+    return "PyPI" if _REQUIREMENTS_FILE_RE.fullmatch(name) else None
+
+
+def changed_dependencies(before, after, ecosystem="npm"):
+    """Dependencies added or whose specifier changed between two manifest texts.
+
+    Parameters: before (str or None) text before the edit, None when the file did not exist; after (str) text after;
+    ecosystem (str) one of ECOSYSTEMS.
+    Returns: list of (name, specifier); empty when `after` is a package.json that is not valid JSON (mid-edit).
+    Raises: DependencyCheckError when `before` exists but is a package.json that is not valid JSON.
+    """
+    parse = _ECOSYSTEMS[ecosystem].parse
+    now = parse(after)
     if now is None:
         return []
     if before is None or not before.strip():
         old = {}
     else:
-        old = _tables(before)
+        old = parse(before)
         if old is None:
             raise DependencyCheckError("current package.json is not valid JSON")
     return [pair for pair in now if pair not in old]
 
 
-def queried_version(specifier):
-    """The version to ask OSV about for a specifier.
-
-    Parameters: specifier (str) the value in the dependency table.
-    Returns: str, the exact version or the lower bound of a ^, ~, >= or > range; None when the specifier cannot be
-    reduced safely (tags, `*`, URLs, file:, git, workspace:, npm: aliases, x-ranges, compound ranges).
-    """
+def _npm_version(specifier):
+    """The npm case of `queried_version`: the exact version or the lower bound of a ^, ~, >= or > range; None for tags,
+    `*`, URLs, file:, git, workspace:, npm: aliases, x-ranges and compound ranges."""
     match = _SPECIFIER_RE.fullmatch(specifier.strip())
     if not match:
         return None
@@ -85,6 +150,42 @@ def queried_version(specifier):
     if None in parts:
         return None
     return ".".join(parts) + (tail or "")
+
+
+def _pip_version(specifier):
+    """The PyPI case of `queried_version`: the `==` version, else the first `>=` or `~=` lower bound; None for no
+    specifier, `===`, wildcards, `<`, `>`, `!=` alone and anything that is not a version."""
+    clauses = specifier.split(",")
+    for operators in (("==",), (">=", "~=")):
+        for clause in clauses:
+            for operator in operators:
+                if clause.startswith(operator) and _PIP_VERSION_RE.fullmatch(clause[len(operator):]):
+                    return clause[len(operator):]
+    return None
+
+
+def _go_version(specifier):
+    """The Go case of `queried_version`: a plain vX.Y.Z; None for pseudo-versions, pre-releases and +incompatible."""
+    return specifier if _GO_VERSION_RE.fullmatch(specifier) else None
+
+
+def queried_version(specifier, ecosystem="npm"):
+    """The version to ask OSV about for a specifier.
+
+    Parameters: specifier (str) the value in the dependency table; ecosystem (str) one of ECOSYSTEMS.
+    Returns: str, the exact version or the lower bound of the range; None when the specifier cannot be reduced safely.
+    """
+    return _ECOSYSTEMS[ecosystem].version(specifier)
+
+
+_Ecosystem = collections.namedtuple("_Ecosystem", "parse version label exact")
+_ECOSYSTEMS = {
+    "npm": _Ecosystem(_npm_pairs, _npm_version, lambda name, spec: f"{name}@{spec}", lambda spec, version: spec == version),
+    "PyPI": _Ecosystem(_requirements_pairs, _pip_version, lambda name, spec: f"{name}{spec}",
+                       lambda spec, version: spec == "==" + version),
+    "Go": _Ecosystem(_go_pairs, _go_version, lambda name, spec: f"{name}@{spec}", lambda spec, version: spec == version),
+}
+ECOSYSTEMS = tuple(_ECOSYSTEMS)
 
 
 def _load_cache():
@@ -111,26 +212,27 @@ def _fresh_ids(entry, now):
     return entry["ids"] if now - entry["at"] < CACHE_TTL_S else None
 
 
-def _advisories(queries):
+def _advisories(ecosystem, queries):
     """Advisory IDs for (name, version) pairs, from the cache and one OSV batch for the rest.
 
-    Parameters: queries (list of (name, version)).
+    Parameters: ecosystem (str) one of ECOSYSTEMS; queries (list of (name, version)).
     Returns: tuple (list of IDs or None per query in order, str cache-write problem or "").
     Raises: DependencyCheckError when the cache is corrupt or OSV cannot answer.
     """
     cache, now = _load_cache(), time.time()
-    found = {query: _fresh_ids(cache.get("@".join(query)), now) for query in queries}
+    key = lambda query: f"{ecosystem}:{query[0]}@{query[1]}"  # noqa: E731
+    found = {query: _fresh_ids(cache.get(key(query)), now) for query in queries}
     missing = [query for query in queries if found[query] is None]
     if not missing:
         return [found[query] for query in queries], ""
     try:
-        answered = freshness.npm_advisories_batch(missing, OSV_TIMEOUT_S)
+        answered = freshness.advisories_batch(ecosystem, missing, OSV_TIMEOUT_S)
     except RuntimeError as exc:
         raise DependencyCheckError(str(exc)) from exc
     for query, ids in zip(missing, answered):
         found[query] = ids
         if ids is not None:
-            cache["@".join(query)] = {"ids": ids, "at": now}
+            cache[key(query)] = {"ids": ids, "at": now}
     cache = {key: entry for key, entry in cache.items() if _fresh_ids(entry, now) is not None}
     try:
         os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
@@ -140,28 +242,30 @@ def _advisories(queries):
     return [found[query] for query in queries], ""
 
 
-def notice(before, after):
-    """The dependency notice for one package.json edit.
+def notice(before, after, ecosystem="npm"):
+    """The dependency notice for one manifest edit.
 
-    Parameters: before (str or None) file text before the edit; after (str) text after it.
+    Parameters: before (str or None) file text before the edit; after (str) text after it; ecosystem (str) one of
+    ECOSYSTEMS, from `ecosystem_of`.
     Returns: str, "Smart Tool dependencies: ..." lines for the changed dependencies that have advisories or could not
     be verified, "" when there is nothing to say.
     Raises: DependencyCheckError when the check could not run.
     """
-    changed = changed_dependencies(before, after)
+    spec = _ECOSYSTEMS[ecosystem]
+    changed = changed_dependencies(before, after, ecosystem)
     handled, extra = changed[:MAX_PACKAGES], len(changed) - MAX_PACKAGES
     lines, queries = {}, []
     for name, specifier in handled:
-        version = queried_version(specifier) if freshness.NPM_NAME_RE.fullmatch(name) else None
+        version = spec.version(specifier) if freshness.NAME_RES[ecosystem].fullmatch(name) else None
         if version is None:
-            lines[(name, specifier)] = f"`{name}@{specifier}` specifier not verified."
+            lines[(name, specifier)] = f"`{spec.label(name, specifier)}` specifier not verified."
         else:
             queries.append((name, specifier, version))
     problem = ""
     if queries:
-        ids, problem = _advisories([(name, version) for name, _specifier, version in queries])
+        ids, problem = _advisories(ecosystem, [(name, version) for name, _specifier, version in queries])
         for (name, specifier, version), advisories in zip(queries, ids):
-            label = f"`{name}@{specifier}`" + ("" if version == specifier else f" (checked {version})")
+            label = f"`{spec.label(name, specifier)}`" + ("" if spec.exact(specifier, version) else f" (checked {version})")
             if advisories is None:
                 lines[(name, specifier)] = f"{label} advisory check incomplete, not verified."
             elif advisories:

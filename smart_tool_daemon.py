@@ -676,69 +676,97 @@ def _embed_retry_delay(exc, attempt):
     return min(8, 2 ** (attempt - 1)) + random.uniform(0, .25)
 
 
+def _wait_to_retry(exc, attempt, deadline=None, cancel_check=None):
+    """Sleeps the wait the gateway asked for (`Retry-After`, else exponential with jitter) before the next attempt;
+    raises TimeoutError when that wait does not fit in `deadline`."""
+    delay = _embed_retry_delay(exc, attempt)
+    if deadline is not None and delay >= _research_time_left(deadline):
+        raise TimeoutError("Not enough time left to honor the gateway backoff.")
+    if cancel_check:
+        until = time.monotonic() + delay
+        while time.monotonic() < until:
+            cancel_check()
+            time.sleep(min(.2, max(0, until - time.monotonic())))
+    else:
+        time.sleep(delay)
+
+
+def _embed_request(model, batch, token, deadline=None, on_retry=None, cancel_check=None):
+    """Vectors of one embeddings request in input order, repeating a transient failure up to EMBED_MAX_ATTEMPTS times."""
+    for attempt in range(1, EMBED_MAX_ATTEMPTS + 1):
+        if cancel_check:
+            cancel_check()
+        timeout = (min(EMBED_REQUEST_TIMEOUT_S, _research_time_left(deadline))
+                   if deadline is not None else EMBED_REQUEST_TIMEOUT_S)
+        try:
+            response = model_client.fetch(
+                "/v1/embeddings", token, method="POST", body={"model": model, "input": batch},
+                timeout=timeout,
+            )
+        except Exception as exc:
+            if attempt >= EMBED_MAX_ATTEMPTS or not _transient_embed_error(exc):
+                raise
+            if on_retry:
+                on_retry(attempt + 1, len(batch))
+            _wait_to_retry(exc, attempt, deadline, cancel_check)
+            continue
+        if cancel_check:
+            cancel_check()
+        rows = response.get("data", []) if isinstance(response, dict) else []
+        if not isinstance(rows, list) or len(rows) != len(batch):
+            raise RuntimeError("The gateway returned a different number of embeddings than the input.")
+        ordered = [None] * len(batch)
+        for row in rows:
+            if not isinstance(row, dict):
+                raise indexer.IndexVectorError("Invalid embedding row.")
+            idx = row.get("index", 0 if len(batch) == 1 else None)
+            if type(idx) is not int or not 0 <= idx < len(batch) or ordered[idx] is not None:
+                raise indexer.IndexVectorError("Embedding indexes missing, duplicated or outside the batch.")
+            ordered[idx] = row.get("embedding")
+        return ordered
+
+
 def _embed(model, texts, token, deadline=None, on_retry=None, cancel_check=None):
+    """One vector per text. A request the gateway refuses for its size (HTTP 400 or 413) is split in two halves, each
+    sent once; a half that is refused again raises."""
     if local_embedder.is_local(model):
         return local_embedder.embed(model, texts, deadline=deadline, cancel_check=cancel_check, on_retry=on_retry)
     vectors = []
     dimensions = None
     for batch in _embed_batches(texts):
-        max_attempts = EMBED_MAX_ATTEMPTS if deadline is None or on_retry is not None else 1
-        for attempt in range(1, max_attempts + 1):
-            if cancel_check:
-                cancel_check()
-            timeout = (min(EMBED_REQUEST_TIMEOUT_S, _research_time_left(deadline))
-                       if deadline is not None else EMBED_REQUEST_TIMEOUT_S)
-            try:
-                response = model_client.fetch(
-                    "/v1/embeddings", token, method="POST", body={"model": model, "input": batch},
-                    timeout=timeout,
-                )
-            except Exception as exc:
-                if attempt >= max_attempts or not _transient_embed_error(exc):
-                    raise
-                if on_retry:
-                    on_retry(attempt + 1, len(batch))
-                delay = _embed_retry_delay(exc, attempt)
-                if deadline is not None and delay >= _research_time_left(deadline):
-                    raise TimeoutError("Not enough time left to honor the gateway backoff.")
-                if cancel_check:
-                    until = time.monotonic() + delay
-                    while time.monotonic() < until:
-                        cancel_check()
-                        time.sleep(min(.2, max(0, until - time.monotonic())))
-                else:
-                    time.sleep(delay)
-                continue
-            if cancel_check:
-                cancel_check()
-            rows = response.get("data", []) if isinstance(response, dict) else []
-            if not isinstance(rows, list) or len(rows) != len(batch):
-                raise RuntimeError("The gateway returned a different number of embeddings than the input.")
-            ordered = [None] * len(batch)
-            for row in rows:
-                if not isinstance(row, dict):
-                    raise indexer.IndexVectorError("Invalid embedding row.")
-                idx = row.get("index", 0 if len(batch) == 1 else None)
-                if type(idx) is not int or not 0 <= idx < len(batch) or ordered[idx] is not None:
-                    raise indexer.IndexVectorError("Embedding indexes missing, duplicated or outside the batch.")
-                vector = row.get("embedding")
-                dimensions = indexer.validate_vector(vector, dimensions)
-                ordered[idx] = vector
-            vectors.extend(ordered)
-            break
+        try:
+            ordered = _embed_request(model, batch, token, deadline, on_retry, cancel_check)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (400, 413) or len(batch) < 2:
+                raise
+            half = len(batch) // 2
+            ordered = (_embed_request(model, batch[:half], token, deadline, on_retry, cancel_check)
+                       + _embed_request(model, batch[half:], token, deadline, on_retry, cancel_check))
+        for vector in ordered:
+            dimensions = indexer.validate_vector(vector, dimensions)
+        vectors.extend(ordered)
     return vectors
 
 
 def _rerank(model, query, documents, top_n, token, deadline=None):
+    """Rows `{index, relevance_score}` of the best `top_n` documents. Only an HTTP answer that is worth repeating
+    (429, 5xx) is asked again, after the wait of `_wait_to_retry`; a timeout fails at once so a search does not stall."""
     if not documents:
         return []
     top_n = min(top_n, len(documents))
-    timeout = min(15, _research_time_left(deadline)) if deadline is not None else 15
-    response = model_client.fetch(
-        "/v1/rerank", token, method="POST",
-        body={"model": model, "query": query, "documents": documents, "top_n": top_n},
-        timeout=timeout,
-    )
+    for attempt in range(1, EMBED_MAX_ATTEMPTS + 1):
+        timeout = min(15, _research_time_left(deadline)) if deadline is not None else 15
+        try:
+            response = model_client.fetch(
+                "/v1/rerank", token, method="POST",
+                body={"model": model, "query": query, "documents": documents, "top_n": top_n},
+                timeout=timeout,
+            )
+            break
+        except urllib.error.HTTPError as exc:
+            if attempt >= EMBED_MAX_ATTEMPTS or not _transient_embed_error(exc):
+                raise
+            _wait_to_retry(exc, attempt, deadline)
     rows = response.get("results", []) if isinstance(response, dict) else []
     if not isinstance(rows, list) or not rows:
         raise ValueError("The reranker returned no valid results.")
@@ -1054,7 +1082,9 @@ def _prepare_project_index(arguments, job_id, cfg, token, query_vector=None, pre
         return result
     model = model or local_embedder.resolve(cfg.get("embedding_model"), indexer.info(root).get("model_id"))
     lexical = model == indexer.LEXICAL_MODEL
-    if not lexical and query_vector is None:
+    current = indexer.info(root)
+    known_dimensions = current.get("dimensions") if current.get("model_id") == model else None
+    if not lexical and query_vector is None and not known_dimensions:
         _update_job(job_id, phase="model_probe")
         query_vector = _embed(model, ["Smart Tool: indexing dimension check."], token,
                               deadline=_job_deadline(job_id), cancel_check=checkpoint,
@@ -1062,7 +1092,6 @@ def _prepare_project_index(arguments, job_id, cfg, token, query_vector=None, pre
                                   retry_attempt=attempt, batch_items=items))[0]
     checkpoint()
     _update_job(job_id, phase="indexing")
-    current = indexer.info(root)
     full_check = bool(arguments.get("full_check") or project.get("needs_full_check") or
                       time.time() - current.get("full_scan_at", 0) >= project_monitor.FULL_CHECK_S)
     stats = indexer.reindex(
@@ -1072,7 +1101,7 @@ def _prepare_project_index(arguments, job_id, cfg, token, query_vector=None, pre
                                  job_id, phase="indexing_retry", retry_attempt=attempt, batch_items=items)),
         on_progress=lambda processed, total: _update_job(
             job_id, phase="indexing", processed_files=processed, total_files=total),
-        model_id=model, expected_dimensions=None if lexical else len(query_vector),
+        model_id=model, expected_dimensions=None if lexical else known_dimensions or len(query_vector),
         force_rebuild=bool(arguments.get("force_rebuild")), full_check=full_check,
         changed_paths=set(arguments.get("changed_paths") or []) | set(project.get('dirty_paths', [])), cancel_check=checkpoint,
     )
@@ -1108,6 +1137,33 @@ EMPTY_RESULT_NOTICE = ("No matches. Do not fall back to Grep, Read of folders or
                        "identifier terms, another group, or a wider top_k, and if it stays empty report that the code was not found.")
 LEXICAL_WARNING = ("No embedding model: index and search are lexical only (exact words, no synonyms or cross-language matches). "
                    "Configure an embedding_model for semantic search.")
+
+
+def _rerank_blocks(model, groups, queries, found, vectors, token, deadline=None):
+    """`({group: rows}, {group: error})` of the blocks that have candidates and a query vector. One rerank request goes
+    out per distinct query, not per block: the candidates of the blocks that share a query travel together and come back
+    split by block (`index` is the position inside the block's candidates). A reranker scores each document against the
+    query on its own, so a block gets the order and scores a request of its own would give."""
+    ranked, failed = {}, {}
+    by_query = {}
+    for group in groups:
+        if found[group] and vectors.get(queries[group]) is not None:
+            by_query.setdefault(queries[group], []).append(group)
+    for query, members in by_query.items():
+        owners = [(group, position) for group in members for position in range(len(found[group]))]
+        documents = [found[group][position][4] for group, position in owners]
+        try:
+            rows = _rerank(model, query, documents, len(documents), token, deadline=deadline)
+        except Exception as exc:
+            failed.update({group: _project_error(exc) for group in members})
+            continue
+        ranked.update({group: [] for group in members})
+        for row in rows:
+            group, position = owners[row["index"]]
+            ranked[group].append({"index": position, "relevance_score": row["relevance_score"]})
+        failed.update({group: "ValueError: The reranker returned no result for this block."
+                       for group in members if not ranked[group]})
+    return ranked, failed
 
 
 def _perform_smart_search(arguments, job_id):
@@ -1220,22 +1276,22 @@ def _perform_smart_search_isolated(arguments, job_id):
                                    include=lambda path, group=group: index_profile.kind(path, profile) == group)
              for group in groups}
 
+    reranked, rerank_failed = {}, {}
+    if cfg.get("rerank_model"):
+        _update_job(job_id, phase="reranking")
+        reranked, rerank_failed = _rerank_blocks(cfg["rerank_model"], groups, queries, found, vectors, token,
+                                                 deadline=_job_deadline(job_id))
+
     def search_block(group):
         top_k = limits[group]
         query, vector, candidates = queries[group], vectors.get(queries[group]), found[group]
         ordered = [(score, "hybrid" if vector is not None else "lexical", row) for score, *row in candidates[:top_k]]
         problem = None
-        if cfg.get("rerank_model") and candidates and vector is not None:
-            _update_job(job_id, phase="reranking")
-            try:
-                reranked = _rerank(cfg["rerank_model"], query, [c[4] for c in candidates], top_k, token,
-                                   deadline=_job_deadline(job_id))
-                if not reranked or any(type(item.get("index")) is not int or not 0 <= item["index"] < len(candidates)
-                                       for item in reranked):
-                    raise ValueError("Invalid index in the reranker response.")
-                ordered = [(float(item["relevance_score"]), "rerank", candidates[item["index"]][1:]) for item in reranked]
-            except Exception as exc:
-                problem = f"Rerank unavailable for {group}; hybrid lexical/vector order kept. " + _project_error(exc)
+        if group in rerank_failed:
+            problem = f"Rerank unavailable for {group}; hybrid lexical/vector order kept. " + rerank_failed[group]
+        elif group in reranked:
+            ordered = [(float(item["relevance_score"]), "rerank", candidates[item["index"]][1:])
+                       for item in reranked[group][:top_k]]
         exact = indexer.overlay_exact_keys(overlay, query)
         if exact:
             pinned = [(c[0], "overlay", c[1:]) for c in candidates if tuple(c[1:4]) in exact][:2]

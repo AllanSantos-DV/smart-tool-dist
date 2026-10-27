@@ -256,6 +256,10 @@ def handle_integration_get():
     except ValueError as exc:
         duplicate_mode, duplicate_error = "", str(exc)
     try:
+        dependency_mode, dependency_error = config.dependency_mode(), ""
+    except ValueError as exc:
+        dependency_mode, dependency_error = "", str(exc)
+    try:
         proposals_mode, proposals_error = config.pattern_proposals(), ""
     except ValueError as exc:
         proposals_mode, proposals_error = "", str(exc)
@@ -267,6 +271,8 @@ def handle_integration_get():
             "hook_modes": list(config.HOOK_MODES), "doc_mode": doc_mode, "doc_mode_error": doc_error,
             "doc_modes": list(config.DOC_MODES), "duplicate_mode": duplicate_mode,
             "duplicate_mode_error": duplicate_error, "duplicate_modes": list(config.DUPLICATE_MODES),
+            "dependency_mode": dependency_mode, "dependency_mode_error": dependency_error,
+            "dependency_modes": list(config.DEPENDENCY_MODES),
             "pattern_proposals": proposals_mode, "pattern_proposals_error": proposals_error,
             "block_patterns": {"proposals": stored["proposals"], "accepted": stored["accepted"],
                                "rejected": len(stored["rejected"]), "error": patterns_error},
@@ -285,10 +291,11 @@ def handle_integration_save(body):
         except (OSError, ValueError) as exc:
             raise SetupError(str(exc))
         return handle_integration_get()
-    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "duplicate_mode", "pattern_proposals"):
+    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "duplicate_mode", "dependency_mode", "pattern_proposals"):
         action = body["action"]
         allowed = {"hook_mode": config.HOOK_MODES, "doc_mode": config.DOC_MODES,
-                   "duplicate_mode": config.DUPLICATE_MODES, "pattern_proposals": config.PATTERN_PROPOSAL_MODES}[action]
+                   "duplicate_mode": config.DUPLICATE_MODES, "dependency_mode": config.DEPENDENCY_MODES,
+                   "pattern_proposals": config.PATTERN_PROPOSAL_MODES}[action]
         if body.get("mode") not in allowed:
             raise SetupError(f"Invalid mode: use {', '.join(allowed)}.")
         try:
@@ -740,7 +747,7 @@ _PAGE_TEMPLATE = """<!doctype html>
 
       <div class="card" id="health-card">
         <div class="card-head"><h3>Model failures (last 24 h)</h3><span class="pill" id="health-pill" data-tone="busy">Checking</span></div>
-        <p class="lede">Every failed call to a gateway model, by role and tool. A model that fails half of its calls (5 or more) also raises a Windows notification.</p>
+        <p class="lede">Failed calls to a gateway model, grouped by type (429, 503, timeout, ...) and role, with the latest lines of each group. A model that fails half of its calls (5 or more) also raises a Windows notification.</p>
         <div id="health-table"></div>
       </div>
 
@@ -1153,15 +1160,29 @@ for (const [id, action] of [["btn-upgrade-apply", "apply"], ["btn-upgrade-declin
     }
   });
 }
+const FAILURE_TYPES = { "429": "429 Too Many Requests", "503": "503 Service Unavailable", "5xx": "Other 5xx", timeout: "Timeout",
+  connection: "Connection", auth: "Authentication (401/403)", other: "Other" };
+const PURPOSE_LABELS = { index_embedding: "Indexing", query_embedding: "Query", rerank: "Rerank", embedding_probe: "Model check", scope: "Scope" };
+function healthHtml(data) {
+  const when = (at) => esc(new Date(at * 1000).toLocaleString());
+  const models = data.models.map((row) => `<tr><td>${esc(row.role)}</td><td>${esc(row.model)}</td><td>${row.errors} / ${row.calls}</td><td>${Math.round(row.rate * 100)}%</td></tr>`).join("");
+  const purposes = data.calls_by_purpose.map((row) => `<tr><td>${esc(PURPOSE_LABELS[row.purpose] || row.purpose)}</td><td>${row.attempts}</td><td>${row.errors}</td></tr>`).join("");
+  const groups = data.groups.map((group) => {
+    const rows = group.rows.map((row) => `<tr><td>${when(row.at)}</td><td>${esc(row.model)}</td><td>${esc(row.tool || "-")}</td><td>${esc(row.error)}</td></tr>`).join("");
+    return `<details class="more health-group" data-type="${esc(group.type)}"><summary>${esc(FAILURE_TYPES[group.type] || group.type)} · ${esc(group.role)} · ${plural(group.count, "failure")} · ${when(group.first_at)} to ${when(group.last_at)}</summary>`
+      + `<p class="mono">${esc(group.sample)}</p><table><tr><th>When</th><th>Model</th><th>Tool</th><th>Error</th></tr>${rows}</table>`
+      + (group.count > group.rows.length ? `<p>Showing the latest ${group.rows.length} of ${group.count}.</p>` : "") + "</details>";
+  }).join("");
+  return (models ? `<table><tr><th>Role</th><th>Model</th><th>Failed / calls</th><th>Rate</th></tr>${models}</table>` : "<p>No model call in the last 24 hours.</p>")
+    + (purposes ? `<h4>Calls by purpose</h4><table><tr><th>Purpose</th><th>Calls</th><th>Failed</th></tr>${purposes}</table>` : "")
+    + (groups ? `<h4>Failures by type</h4>${groups}` : "");
+}
 async function loadHealth() {
   try {
     const data = await getJSON("/setup/models/health");
     const failing = data.models.filter((row) => row.failing).length;
     setPill("health-pill", failing ? "bad" : "ok", failing ? plural(failing, "model") + " failing" : "No problem");
-    const models = data.models.map((row) => `<tr><td>${esc(row.role)}</td><td>${esc(row.model)}</td><td>${row.errors} / ${row.calls}</td><td>${Math.round(row.rate * 100)}%</td></tr>`).join("");
-    const failures = data.failures.map((row) => `<tr><td>${esc(new Date(row.at * 1000).toLocaleString())}</td><td>${esc(row.role)}</td><td>${esc(row.model)}</td><td>${esc(row.tool || "-")}</td><td>${esc(row.error)}</td></tr>`).join("");
-    $("health-table").innerHTML = (models ? `<table><tr><th>Role</th><th>Model</th><th>Failed / calls</th><th>Rate</th></tr>${models}</table>` : "<p>No model call in the last 24 hours.</p>")
-      + (failures ? `<table><tr><th>When</th><th>Role</th><th>Model</th><th>Tool</th><th>Error</th></tr>${failures}</table>` : "");
+    $("health-table").innerHTML = healthHtml(data);
   } catch (error) {
     setPill("health-pill", "bad", "Unavailable");
     $("health-table").textContent = "Could not read the failure log: " + error.message;
@@ -1270,6 +1291,10 @@ const RULES = [
     intro: "Compares the functions an edit writes with the indexed code: identical bodies, and near-identical ones with only local names changed. It never blocks.",
     options: [["warn", "Warn", "The edit runs; the agent is told when a function copies one already in the project.", true],
               ["off", "Off", "No duplicate checks."]] },
+  { key: "dependency_mode", title: "Vulnerable dependencies on edit", applies: "Applies on the next edit.",
+    intro: "Looks up the dependencies an edit of a dependency manifest adds or changes in the OSV advisory database. It never blocks.",
+    options: [["warn", "Warn", "The edit runs; the agent is told which added or changed dependencies have known advisories.", true],
+              ["off", "Off", "No dependency checks and no network call."]] },
   { key: "pattern_proposals", title: "Block patterns proposed by a model", applies: "Applies to the next review.",
     intro: "Afterwards, never delaying a call, the scope model (else the router model) reviews searches the fixed rule let through and may propose block patterns. Nothing blocks until you accept it on the Redirects page.",
     options: [["on", "On", "Review in the background and list proposals for you.", true],

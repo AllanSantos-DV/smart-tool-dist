@@ -97,6 +97,19 @@ def _record_job(job_id,payload):
         db.execute('DELETE FROM usage_index_jobs WHERE at<?',(time.time()-366*86400,))
 
 
+def calls_by_purpose(since,purposes):
+    """Attempts and errors of every project per purpose in `purposes`, from the UTC day of the epoch time `since` on
+    (the table keeps days, not hours). Purposes with no call are left out."""
+    day=datetime.datetime.fromtimestamp(since,datetime.timezone.utc).date().isoformat()
+    marks=','.join('?' for _ in purposes)
+    with project_store._LOCK,project_store._db() as db:
+        _tables(db)
+        rows=db.execute('SELECT purpose,SUM(attempts),SUM(errors) FROM usage_daily WHERE day>=? AND purpose IN ('+marks+') GROUP BY purpose',
+                        (day,*purposes)).fetchall()
+    found={purpose:{'purpose':purpose,'attempts':attempts,'errors':errors} for purpose,attempts,errors in rows}
+    return [found[purpose] for purpose in purposes if purpose in found]
+
+
 def summary(project_id,days=30,view_id=None):
     if type(days) is not int or not 1<=days<=366:raise ValueError('Choose a period from 1 to 366 days.')
     with project_store._LOCK,project_store._db() as db:

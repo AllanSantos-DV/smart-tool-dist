@@ -40,10 +40,13 @@ _PROJECT_TYPE_EXCLUDES = (
     (("Podfile",), ("Pods",)),
 )
 
+# Files a tool writes while it works and replaces or deletes right after (atomic-write temp, backup, editor swap).
+TRANSIENT_FILES = {"*.tmp", "*.bak", "*.swp", "*~"}
+
 # Mesmo critério do `_ALWAYS_EXCLUDE`, para arquivo: o significado não varia por
 # projeto. Lockfile é grafo de dependência resolvido por ferramenta — nunca é fonte de
 # resposta numa busca semântica, e é grande o bastante pra dominar o índice.
-_ALWAYS_EXCLUDE_FILES = {
+_ALWAYS_EXCLUDE_FILES = TRANSIENT_FILES | {
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "npm-shrinkwrap.json",
     "poetry.lock", "pdm.lock", "uv.lock", "Pipfile.lock", "Cargo.lock",
     "composer.lock", "go.sum", "Gemfile.lock", "packages.lock.json",
@@ -108,6 +111,11 @@ def normalize_include(include):
         elif base not in bases:
             bases.append(base)
     return bases, dropped
+
+
+def is_transient(name):
+    """Whether a file name is a temporary, backup or editor-swap file (`*.tmp`, `*.bak`, `*.swp`, `*~`)."""
+    return any(fnmatch.fnmatch(name.casefold(), pattern) for pattern in TRANSIENT_FILES)
 
 
 def always_excluded(name):

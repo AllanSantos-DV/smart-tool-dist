@@ -20,6 +20,8 @@ IDLE_TICK_S = 5
 # A folder that changes all the time (a tool's state folder) is indexed at most this often by the monitor; the changes
 # keep accumulating and one job covers them, and a search meanwhile reads the stale files straight from disk.
 MIN_JOB_GAP_S = 60
+# While the changes do not stop, each job lengthens the wait for the next one; a wait that passes unused resets it.
+JOB_GAP_STEPS_S = (MIN_JOB_GAP_S, 120, 240, 480, 900)
 FULL_CHECK_S = 86400
 MAX_EVENT_PATHS = 1000
 
@@ -27,7 +29,8 @@ MAX_EVENT_PATHS = 1000
 def relevant_path(path):
     parts = path.replace("\\", "/").strip("/").split("/")
     return bool(parts and all(part not in ("", ".", "..") and not part.startswith(".")
-                              and not index_scope.always_excluded(part) for part in parts))
+                              and not index_scope.always_excluded(part) for part in parts)
+                and not index_scope.is_transient(parts[-1]))
 
 
 def snapshot(root, scope):
@@ -58,6 +61,7 @@ class ProjectMonitor:
         self._git_checked = {}
         self._pending = {}
         self._next_job = {}
+        self._gap_level = {}
         self._filters = {}
         self._views = {}
         self._lock = threading.RLock()
@@ -155,6 +159,17 @@ class ProjectMonitor:
             project_store.update(key, watch_backend="windows_events", watch_error="")
             watcher.start()
 
+    def _job_gap(self, key, now):
+        """Wait before the next job of a project, called when a job is enqueued at `now`: one step longer than the last
+        one when the previous wait was used up at once (at most twice its length went by), the first step otherwise."""
+        level, at = self._gap_level.get(key, (0, None))
+        if at is None or now - at >= 2 * JOB_GAP_STEPS_S[level]:
+            level = 0
+        else:
+            level = min(level + 1, len(JOB_GAP_STEPS_S) - 1)
+        self._gap_level[key] = (level, now)
+        return JOB_GAP_STEPS_S[level]
+
     def tick(self):
         now = time.monotonic()
         projects = project_store.all_projects()
@@ -223,7 +238,7 @@ class ProjectMonitor:
             except Exception as exc:
                 project_store.update(key, status="error", last_error=str(exc)[:300], next_retry_at=time.time() + 60)
                 continue
-            self._next_job[key] = now + MIN_JOB_GAP_S
+            self._next_job[key] = now + self._job_gap(key, now)
             with self._lock:
                 # Um evento recebido durante o submit continua pendente para a próxima geração.
                 if self._pending.get(key) is pending and pending.get("revision", 0) == revision:

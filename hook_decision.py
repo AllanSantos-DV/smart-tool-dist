@@ -230,20 +230,21 @@ def _edit_review(payload, doc_mode, duplicate_mode, dependency_mode):
     """Checks of an edit before it runs. Docstrings follow doc_mode, in code files of registered projects only (tests,
     docs and files outside a project are left out, as in the docs coverage): missing ones deny the edit in require mode and become a reminder in remind mode; a
     documented function whose signature changed always gets a reminder. Copies of indexed functions follow
-    duplicate_mode and only add context, never deny. An edit of a package.json follows dependency_mode: advisories
+    duplicate_mode and only add context, never deny. An edit of a package.json, requirements*.txt or go.mod follows dependency_mode: advisories
     of the added or changed dependencies are added as context, never a denial."""
     with code_graph.pending_scope():
         return _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode)
 
 
-def _dependency_part(before, after):
-    """The dependency notice of one package.json edit, or the "dependency check skipped" line when it cannot run.
+def _dependency_part(before, after, ecosystem):
+    """The dependency notice of one manifest edit, or the "dependency check skipped" line when it cannot run.
 
-    Parameters: before (str or None) text before the edit; after (str) text after it.
+    Parameters: before (str or None) text before the edit; after (str) text after it; ecosystem (str) from
+    `dependency_notice.ecosystem_of`.
     Returns: str, empty when there is nothing to say.
     """
     try:
-        return dependency_notice.notice(before, after)
+        return dependency_notice.notice(before, after, ecosystem)
     except dependency_notice.DependencyCheckError as exc:
         return f"{dependency_notice.PREFIX}dependency check skipped: {exc}"
 
@@ -252,8 +253,9 @@ def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode):
     """`_edit_review` inside one `code_graph.pending_scope`, so the pending-changes scan runs once per review."""
     doc_findings, duplicate_findings, failures, dependency_parts = [], [], [], []
     for path, before, after in edit_preview.preview(payload.get("tool_name"), payload.get("tool_input"), payload.get("cwd")):
-        if dependency_mode != "off" and os.path.basename(path) == "package.json":
-            dependency_parts += [part for part in (_dependency_part(before, after),) if part]
+        ecosystem = dependency_notice.ecosystem_of(path)
+        if dependency_mode != "off" and ecosystem:
+            dependency_parts += [part for part in (_dependency_part(before, after, ecosystem),) if part]
             continue
         if not doc_check.supported(path):
             continue

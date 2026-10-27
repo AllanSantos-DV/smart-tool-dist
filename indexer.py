@@ -31,8 +31,10 @@ CHUNK_MAX_CHARS = 8000
 CHUNK_OVERLAP_LINES = 12
 CHUNKER_VERSION = 3
 SCHEMA_VERSION = 2
-REINDEX_BATCH_MAX_CHARS = 32_000
-REINDEX_BATCH_MAX_ITEMS = 32
+# An embeddings request holds up to 128 items and 120,000 characters (about 30,000 tokens): far under the 2048 items and
+# 300,000 tokens per request that OpenAI and Azure accept (docs/research/2026-10-27-excesso-de-chamadas-embed-rerank.md).
+REINDEX_BATCH_MAX_CHARS = 120_000
+REINDEX_BATCH_MAX_ITEMS = 128
 # Embedding requests in flight per flush. Measured 2026-10-03 (docs/spikes/embed_parallel_spike.py, 30 batches,
 # 3 interleaved rounds): 1 worker 33-50 s, 2 workers 19-27 s, 4 workers 11-20 s (~2.8x), no 429 from the gateway.
 EMBED_WORKERS = 4

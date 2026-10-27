@@ -38,8 +38,7 @@ SELECT_BUDGET_CHARS = 15_000
 CHUNK_CHARS = 2_000
 PAGE_FORMAT = 2
 MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024
-PDF_MAX_PAGES = 300
-PDF_TIMEOUT_S = 30
+PDF_INTERACTIVE_TIMEOUT_S = 30  # Override of document_text.PDF_TIMEOUT_S: a person waits for this answer, the indexer does not.
 MAX_REDIRECTS = 5
 HTTP_TIMEOUT_S = 20
 READ_CHUNK = 64 * 1024
@@ -212,12 +211,13 @@ def thin(text):
 
 
 def pdf_text(body, url, deadline):
-    """Text of a PDF (pypdf, pure Python), page by page up to PDF_MAX_PAGES. The native WebFetch reads PDFs and the hook
-    sends it here, so a PDF used to be a dead end (9 times in 10 days of transcripts). A hostile PDF can make pypdf
-    parse for minutes, so it runs in a subprocess killed at the request's deadline (at most PDF_TIMEOUT_S)."""
-    timeout = min(PDF_TIMEOUT_S, _left(deadline))
+    """Text of a PDF (pypdf, pure Python), page by page, with the page and character caps of document_text. The native
+    WebFetch reads PDFs and the hook sends it here, so a PDF used to be a dead end (9 times in 10 days of transcripts).
+    A hostile PDF can make pypdf parse for minutes, so it runs in a subprocess killed at the request's deadline (at most
+    PDF_INTERACTIVE_TIMEOUT_S, passed to document_text.run_pdf instead of the indexer's document_text.PDF_TIMEOUT_S)."""
+    timeout = min(PDF_INTERACTIVE_TIMEOUT_S, _left(deadline))
     try:
-        return document_text.run_pdf(body, timeout, PDF_MAX_PAGES, PAGE_STORE_MAX_CHARS)
+        return document_text.run_pdf(body, timeout, document_text.PDF_MAX_PAGES, document_text.PDF_MAX_CHARS)
     except document_text.PdfTimeout:
         raise FetchError(f"PDF not read in {timeout:.0f}s ({url}).") from None
     except document_text.PdfUnreadable as exc:

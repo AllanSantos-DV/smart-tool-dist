@@ -9,6 +9,7 @@ import usage_meter
 
 import config
 import gateway
+import model_breaker
 import model_health
 
 OFFLINE = contextvars.ContextVar("model_offline", default=None)
@@ -26,18 +27,24 @@ def get_token():
 
 
 def fetch(path, token, method="GET", body=None, timeout=15):
+    """One gateway request; returns the parsed JSON. A call that names a model first passes that model's circuit and
+    request cap (model_breaker, CircuitOpen when paused), and every attempt is metered. HTTP errors propagate."""
     if OFFLINE.get():
         raise RuntimeError(OFFLINE.get())
-    started=time.monotonic();result=None;headers=None;failure=None
-    try:
-        result,headers=_fetch(path,token,method,body,timeout)
-        return result
-    except Exception as exc:
-        failure=exc
-        raise
-    finally:
-        usage_meter.record(path,body,result,headers,failure,time.monotonic()-started)
-        model_health.record(path,body,failure)
+    model=body.get("model") if isinstance(body,dict) else None
+    model_breaker.guard(model)
+    with model_breaker.slot(model):
+        started=time.monotonic();result=None;headers=None;failure=None
+        try:
+            result,headers=_fetch(path,token,method,body,timeout)
+            return result
+        except Exception as exc:
+            failure=exc
+            raise
+        finally:
+            model_breaker.note(model,failure)
+            usage_meter.record(path,body,result,headers,failure,time.monotonic()-started)
+            model_health.record(path,body,failure)
 
 
 def _fetch(path, _token, method="GET", body=None, timeout=15):

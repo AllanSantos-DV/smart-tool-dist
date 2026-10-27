@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.41 - beta
+
+- Far fewer calls to the embedding and rerank models. Measured on a real machine (24 h): 8303 embedding and 1473 rerank
+  calls, 0.3% of them failing; the volume came from four places, all cut: (1) an indexing job no longer embeds a fixed
+  text to learn the vector size when the index already stores it for the same model (1300 calls a day); (2) embedding
+  batches carry up to 128 chunks and 120,000 characters instead of 32,000 characters (3.8 chunks per call before); a
+  request the gateway refuses for its size is split in two halves once; (3) one rerank call per search instead of one
+  per block (code, test, doc); the blocks keep the order the separate calls gave; (4) a project in `eager` mode whose
+  files change all the time waits longer between jobs (60, 120, 240, 480 up to 900 s, back to 60 s after a quiet
+  period), and `*.tmp`, `*.bak`, `*.swp` and `*~` files no longer mark a project as changed or enter the index.
+  Measurement before and after in `docs/research/data/call-volume-*.json`, findings and sources in
+  `docs/research/2026-10-27-excesso-de-chamadas-embed-rerank.md`. Tests in `tests/test_call_volume.py`.
+- A model that answers 429 or 503 three times in a row opens a circuit for 30 s: calls to it fail at once and the search
+  answers from the lexical index with the usual warning, instead of repeating requests. At most 6 requests are in
+  flight per model. Rerank and the model check wait the gateway's `Retry-After` (or a jittered exponential delay) before
+  asking again, like embeddings.
+- The setup Models page groups the failures by type (429, 503, other 5xx, timeout, connection, authentication, other):
+  one row per type and role with the count, first and last time, one sample message, and the latest 20 lines on
+  expand. The summary shows the calls per purpose (indexing, query, rerank, model check). `dependency_mode` has its own
+  card in the setup rules.
+- The dependency notice also reads `requirements*.txt` (PyPI, `==` pins and the lower bound of `>=` and `~=`) and `go.mod`
+  (Go, `require` lines with a plain `vX.Y.Z`). `web_fetch` reads PDFs with the same page and character caps as the
+  indexer (`document_text`).
+
 ## 0.9.40 - beta
 
 - PDFs of the project are searchable. `smart_search` indexes the text layer of a `.pdf` inside the project scope and

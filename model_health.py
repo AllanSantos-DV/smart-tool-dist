@@ -3,17 +3,19 @@ rerank). Never stores request content: the model, the role, the tool that was ru
 text and the time.
 
 Three consumers read it: the tool answer (a warning line when a call of that very tool failed), the setup screen
-(rate table and recent failures) and the tray (one toast per model per day when the rate passes the limit).
+(rate table, failures by type and calls per purpose) and the tray (one toast per model per day when the rate passes the limit).
 """
 import contextlib
 import contextvars
 import io
 import os
+import re
 import sqlite3
 import time
 
 import config
 import project_store
+import usage_meter
 
 WINDOW_S = 24 * 3600
 ALERT_MIN_CALLS = 5
@@ -23,10 +25,17 @@ MUTE_S = 7 * 24 * 3600
 KEEP_S = 7 * 24 * 3600
 KEEP_FAILURES = 500
 ERROR_CHARS = 300
+SAMPLE_CHARS = 160
+GROUP_ROWS = 20
+PURPOSES = ("index_embedding", "query_embedding", "rerank", "embedding_probe", "scope")
 _PATHS = ("/v1/chat/completions", "/v1/embeddings", "/v1/rerank")
 _TOOL = contextvars.ContextVar("model_health_tool", default=None)
 _COLLECTED = contextvars.ContextVar("model_health_collected", default=None)
 _SCHEMA = set()
+_STATUS = re.compile(r"HTTP(?: Error)? (\d{3})")
+_TIMEOUT = re.compile(r"timed out|timeout|WinError 10060|Errno 110\b", re.I)
+_CONNECTION = re.compile(r"URLError|ConnectionError|ConnectionRefused|ConnectionReset|refused|reset|getaddrinfo|"
+                         r"WinError 1006[01]|WinError 10054|Name or service|unreachable", re.I)
 
 
 @contextlib.contextmanager
@@ -54,6 +63,22 @@ def _tables(db):
     db.execute("CREATE TABLE IF NOT EXISTS model_failures(at REAL,model TEXT,role TEXT,tool TEXT,path TEXT,error TEXT)")
     db.execute("CREATE TABLE IF NOT EXISTS model_alerts(model TEXT PRIMARY KEY,last_notified REAL,muted_until REAL)")
     _SCHEMA.add(project_store.DB_PATH)
+
+
+def classify(error):
+    """Failure type of a stored error text: '429', '503', '5xx' (any other 5xx), 'auth' (401/403), 'timeout',
+    'connection' or 'other'. An HTTP status in the text wins over words in the response body."""
+    status = _STATUS.search(error or "")
+    if status:
+        code = int(status.group(1))
+        if code in (429, 503):
+            return str(code)
+        if code in (401, 403):
+            return "auth"
+        return "5xx" if code >= 500 else "other"
+    if _TIMEOUT.search(error or ""):
+        return "timeout"
+    return "connection" if _CONNECTION.search(error or "") else "other"
 
 
 def role_of(model, cfg=None):
@@ -111,8 +136,24 @@ def warning_text(failures, setup_url):
             f"{first['error']}. Pick another model: {setup_url}/setup#models")
 
 
+def _groups(rows):
+    """Failure rows (latest first) as one entry per (type, role): count, first and last time, the latest message cut to
+    SAMPLE_CHARS and the latest GROUP_ROWS raw rows. Largest group first."""
+    groups = {}
+    for row in rows:
+        group = groups.setdefault((classify(row["error"]), row["role"]), {
+            "type": classify(row["error"]), "role": row["role"], "count": 0, "first_at": row["at"], "last_at": row["at"],
+            "sample": row["error"][:SAMPLE_CHARS], "rows": []})
+        group["count"] += 1
+        group["first_at"] = row["at"]
+        if len(group["rows"]) < GROUP_ROWS:
+            group["rows"].append(row)
+    return sorted(groups.values(), key=lambda group: (-group["count"], -group["last_at"]))
+
+
 def summary(now=None):
-    """Per model and role over the last 24 h, plus the 20 latest failures."""
+    """Per model and role over the last 24 h, every kept failure of the window grouped by type and role, and the calls
+    per purpose of the usage meter (its days are UTC, so that part covers the window's days, not its exact hours)."""
     now = now or time.time()
     with project_store._LOCK, _db() as db:
         _tables(db)
@@ -121,7 +162,7 @@ def summary(now=None):
             "SELECT model,role,SUM(calls) AS calls,SUM(errors) AS errors FROM model_calls WHERE hour>=? "
             "GROUP BY model,role ORDER BY SUM(errors) DESC,SUM(calls) DESC", (int((now - WINDOW_S) // 3600),))]
         failures = [dict(row) for row in db.execute(
-            "SELECT at,model,role,tool,path,error FROM model_failures WHERE at>=? ORDER BY at DESC LIMIT 20", (now - WINDOW_S,))]
+            "SELECT at,model,role,tool,path,error FROM model_failures WHERE at>=? ORDER BY at DESC", (now - WINDOW_S,))]
         for row in models:
             last = db.execute("SELECT error FROM model_failures WHERE model=? AND role=? ORDER BY at DESC LIMIT 1",
                               (row["model"], row["role"])).fetchone()
@@ -129,7 +170,8 @@ def summary(now=None):
     for row in models:
         row["rate"] = round(row["errors"] / row["calls"], 3) if row["calls"] else 0.0
         row["failing"] = row["calls"] >= ALERT_MIN_CALLS and row["rate"] >= ALERT_RATE
-    return {"window_hours": WINDOW_S // 3600, "models": models, "failures": failures}
+    return {"window_hours": WINDOW_S // 3600, "models": models, "groups": _groups(failures),
+            "calls_by_purpose": usage_meter.calls_by_purpose(now - WINDOW_S, PURPOSES)}
 
 
 def alerts_due(now=None):

@@ -73,11 +73,13 @@ def npm_registry_evidence(package):
 
 
 NPM_NAME_RE = re.compile(r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+")
+NAME_RES = {"npm": NPM_NAME_RE, "PyPI": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*"),
+            "Go": re.compile(r"[A-Za-z0-9][A-Za-z0-9._~/-]*")}
 
 
-def _osv_query(package, package_version):
-    """One OSV query object: the package (npm) and the version asked about."""
-    return {"package": {"name": package, "ecosystem": "npm"}, "version": package_version}
+def _osv_query(ecosystem, package, package_version):
+    """One OSV query object: the package in `ecosystem` and the version asked about."""
+    return {"package": {"name": package, "ecosystem": ecosystem}, "version": package_version}
 
 
 def _osv_request(endpoint, payload):
@@ -107,7 +109,7 @@ def npm_advisories(package, package_version):
     """IDs conhecidos pela OSV para a versão; None significa checagem indisponível."""
     if not package or not package_version or not NPM_NAME_RE.fullmatch(package):
         return None
-    request = _osv_request("query", _osv_query(package, package_version))
+    request = _osv_request("query", _osv_query("npm", package, package_version))
     try:
         with urllib.request.urlopen(request, timeout=7) as response:
             return _osv_ids(json.load(response))
@@ -115,17 +117,21 @@ def npm_advisories(package, package_version):
         return None
 
 
-def npm_advisories_batch(packages, timeout):
+def advisories_batch(ecosystem, packages, timeout):
     """Advisory IDs for each (package, version) of `packages` from one OSV `querybatch` call.
 
-    Parameters: packages (list of (name, version)); timeout (float) seconds for the request.
+    Parameters: ecosystem (str) "npm", "PyPI" or "Go"; packages (list of (name, version)); timeout (float) seconds for
+    the request.
     Returns: list in the same order, each the sorted ID list or None when that package's answer is incomplete
     (next_page_token) or malformed, so it is unverified and not clean.
-    Raises: RuntimeError when the service cannot be reached, answers badly or answers a different number of results.
+    Raises: ValueError for an unknown ecosystem or an invalid name or version; RuntimeError when the service cannot be
+    reached, answers badly or answers a different number of results.
     """
-    if any(not NPM_NAME_RE.fullmatch(name) or not package_version for name, package_version in packages):
-        raise ValueError(f"Invalid npm package query: {packages!r}")
-    request = _osv_request("querybatch", {"queries": [_osv_query(name, package_version)
+    if ecosystem not in NAME_RES:
+        raise ValueError(f"Unknown OSV ecosystem: {ecosystem!r}")
+    if any(not NAME_RES[ecosystem].fullmatch(name) or not package_version for name, package_version in packages):
+        raise ValueError(f"Invalid {ecosystem} package query: {packages!r}")
+    request = _osv_request("querybatch", {"queries": [_osv_query(ecosystem, name, package_version)
                                                       for name, package_version in packages]})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
