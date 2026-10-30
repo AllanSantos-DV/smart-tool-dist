@@ -50,6 +50,7 @@ import indexer
 import index_views
 import index_inventory
 import usage_meter
+import document_read
 import document_text
 import dossier
 import scout
@@ -60,6 +61,7 @@ import project_identity
 import project_store
 import project_scheduler
 import project_monitor
+import requester
 import research_metrics
 import research_cache
 import router
@@ -350,7 +352,9 @@ SERVER_INSTRUCTIONS = (
     "project_manage action=affected_tests lists the tests to run. When smart_search returns nothing, retry smart_search with "
     "other terms; do not switch to Grep, Read of folders or shell search. To answer a question that would mean reading "
     "several files, call smart_scout: it reads them inside Smart Tool and returns only the lines that answer, as "
-    "path:lines with the literal text."
+    "path:lines with the literal text. To read a PDF, Word, PowerPoint or Excel file, call read_document (load it with "
+    "ToolSearch if it is not in your tool list): it returns the page count, size and estimated tokens first, then the "
+    "text of only the pages, slides or sheets you ask for, in far fewer tokens than the whole file."
 )
 
 TOOLS = [
@@ -538,6 +542,31 @@ TOOLS = [
                 "prompt": {"type": "string", "description": "What to extract or answer from the page"},
             },
             "required": ["url", "prompt"],
+        },
+    },
+    {
+        "name": "read_document",
+        "description": (
+            "Reads a PDF, Word (.docx), PowerPoint (.pptx) or Excel (.xlsx) file as compact text, a range at a time, "
+            "inside Smart Tool so the file never enters your context whole. The answer opens with the facts: type, "
+            "size, page, slide, sheet or part count and the estimated tokens of all the text; then comes the text of "
+            "the range you asked for (default: from the start, up to max_chars) with a `next:` line naming the range "
+            "to continue. PDF pages come with the layout noise removed (ligatures, hyphenation, wrapped lines); docx "
+            "as markdown (headings, lists, tables) in parts of about 6,000 characters because a docx has no fixed "
+            "pages; pptx per slide with the speaker notes; xlsx per sheet, one tab-separated line per row with the "
+            "cached formula values. Use info_only first to size a large file and pick the pages you need. A scanned "
+            "PDF (no text layer) fails with that reason; there is no OCR. Not for plain text or code: use Read."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute path of the .pdf, .docx, .pptx or .xlsx file"},
+                "range": {"type": "string", "description": "Pages, slides, docx parts or sheets to read: `3`, `3-5`, `7-` (to the end), `-4` (the first four) or a comma list like `1,4-6`; a sheet name also works for a workbook. Default: from the first one"},
+                "max_chars": {"type": "integer", "minimum": 1000, "maximum": document_read.MAX_CHARS_LIMIT, "default": document_read.DEFAULT_MAX_CHARS, "description": "Cap of the text returned (about four characters per token)"},
+                "info_only": {"type": "boolean", "default": False, "description": "Return only the facts (type, size, counts, estimated tokens), no text"},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
         },
     },
     {
@@ -2615,14 +2644,15 @@ def _fan_out_web_search(query, num, budget_s=None, site_domains=()):
     for tier_name in web_search_adapters.FAN_OUT_TIERS:
         fut = WEB_SEARCH_EXECUTOR.submit(_run_tier, tier_name, query, num)
         futures[fut] = tier_name
+    who = requester.current()  # the callbacks run in the pool's threads, outside this request's context
 
     def _record_on_done(tier_name):
         def _cb(fut):
             try:
                 fut.result()
-                _record_tier_health(tier_name, success=True)
+                _record_tier_health(tier_name, success=True, who=who)
             except Exception as exc:
-                _record_tier_failure(tier_name, exc)
+                _record_tier_failure(tier_name, exc, who)
         return _cb
 
     for fut, tier_name in futures.items():
@@ -2690,7 +2720,7 @@ def _handle_web_search_body(arguments):
         job_id = uuid.uuid4().hex
         _set_job(job_id, status="pending", result=None, error=None, created_at=time.time())
         try:
-            DEEP_JOB_EXECUTOR.submit(_run_deep_job, job_id, query, scope)
+            DEEP_JOB_EXECUTOR.submit(contextvars.copy_context().run, _run_deep_job, job_id, query, scope)
         except Exception as exc:
             # Se o submit() em si falhar (pool fechado/saturado), o job já foi
             # registrado como "pending" — sem isto, ficaria assim pra sempre,
@@ -2702,7 +2732,7 @@ def _handle_web_search_body(arguments):
         job_id = uuid.uuid4().hex
         _set_job(job_id, status="pending", result=None, error=None, created_at=time.time())
         try:
-            RESEARCH_JOB_EXECUTOR.submit(_run_research_job, job_id, query, num, scope)
+            RESEARCH_JOB_EXECUTOR.submit(contextvars.copy_context().run, _run_research_job, job_id, query, num, scope)
         except Exception as exc:
             _set_job(job_id, status="error", result=None, error=_sanitize_text(f"{type(exc).__name__}: {exc}"), created_at=time.time())
         return _to_json_sanitized({"job_id": job_id, "status": "pending"})
@@ -3210,14 +3240,14 @@ def _annotate_quick_results(rows, classification, cache=None):
     return result
 
 
-def _record_tier_health(tier_name, success, outcome=None):
+def _record_tier_health(tier_name, success, outcome=None, who=None):
     try:
-        web_search_health.record(tier_name, success, outcome)
+        web_search_health.record(tier_name, success, outcome, who or requester.current())
     except Exception:
         pass  # telemetria é best-effort — nunca pode derrubar uma busca já resolvida
 
 
-def _record_tier_failure(tier_name, exc):
+def _record_tier_failure(tier_name, exc, who=None):
     """Health entry for a failed tier call, keeping a 429, a captcha and a quota pause apart from other errors."""
     if isinstance(exc, (TierSkipped, browser_service_client.BrowserSkipped)):
         outcome = "paused"
@@ -3227,7 +3257,7 @@ def _record_tier_failure(tier_name, exc):
         outcome = "captcha"
     else:
         outcome = "failed"
-    _record_tier_health(tier_name, False, outcome)
+    _record_tier_health(tier_name, False, outcome, who)
 
 
 _is_safe_crawl_target = web_fetch.is_safe_target
@@ -3979,7 +4009,29 @@ def _session_audit_hook(handler):
     return output
 
 
+def _handle_read_document(arguments):
+    """read_document: facts and a page, slide, sheet or part range of a PDF, docx, pptx or xlsx as compact text (see
+    document_read). Fails loudly, with the reason, for a path that is not absolute or readable, an unsupported or
+    oversized file, a password, a scanned PDF, a corrupt or hostile package and a range outside the document; one metric
+    row records the kind, the estimated tokens of the whole text and of the answer."""
+    started = time.monotonic()
+    unknown = sorted(set(arguments) - {"path", "range", "max_chars", "info_only"})
+    if unknown:
+        raise ValueError(f"read_document does not take {', '.join(unknown)}")
+    try:
+        text = document_read.read(arguments.get("path"), arguments.get("range") or None,
+                                  arguments.get("max_chars", document_read.DEFAULT_MAX_CHARS),
+                                  bool(arguments.get("info_only")))
+    except Exception as exc:
+        _metric("read_document", error=type(exc).__name__, elapsed_s=round(time.monotonic() - started, 2))
+        raise
+    _metric("read_document", kind=os.path.splitext(str(arguments.get("path")))[1].lower(),
+            answer_tokens=document_read.estimate_tokens(text), elapsed_s=round(time.monotonic() - started, 2))
+    return _sanitize_text(text)
+
+
 _TOOL_HANDLERS = {
+    "read_document": _handle_read_document,
     "web_fetch": _handle_web_fetch,
     "project_manage": _handle_project_manage,
     "smart_search": _handle_smart_search,
@@ -4002,7 +4054,8 @@ def _metric(event, **fields):
     _session, client = _session_client()
     try:
         integration_metrics.record(event, client=client_hooks.identify(client) or client.get("name"),
-                                   client_version=client.get("version"), **fields)
+                                   client_version=client.get("version"),
+                                   **({"requester": requester.current()} if requester.current() else {}), **fields)
     except (OSError, ValueError) as exc:
         _log(f"integration metric not saved: {exc}")
 
@@ -4016,6 +4069,9 @@ def _dispatch_tool_call(params, session_id=None):
     if handler is None:
         return _tool_result(_sanitize_text(f"Unknown tool: {name}"), is_error=True)
     token = _MCP_SESSION.set(session_id)
+    who = None
+    if name in requester.WEB_TOOLS:
+        who = requester.CURRENT.set(requester.claim(session_id, _session_client()[1].get("name"), name, arguments))
     try:
         with model_health.tool_call(name) as failures:
             try:
@@ -4031,6 +4087,8 @@ def _dispatch_tool_call(params, session_id=None):
             result["content"][0]["text"] += _sanitize_text(warning)
         return result
     finally:
+        if who is not None:
+            requester.CURRENT.reset(who)
         _MCP_SESSION.reset(token)
 
 

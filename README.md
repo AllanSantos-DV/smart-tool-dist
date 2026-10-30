@@ -8,6 +8,7 @@ A local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharpe
 | `smart_scout` | Answers a question about the code with the lines that answer it: reads the candidate files inside Smart Tool and returns `path:lines` with the literal text, so the files never enter the agent's context; with a `scout_model`, a small model also writes a short answer and keeps only the lines that support it; a question about why something is as it is (why, reason, decided) also lists up to three decision notes from the notes the project keeps about its intent, as ids with one excerpt each |
 | `web_search` / `web_search_result` | Web search across several sources in parallel, in the query language and in English, with a cache shared across sessions; `depth="research"` runs a multi-round research loop |
 | `web_fetch` | Reads a known URL and returns only the answer to your prompt, written by a small model; pages are cached for 24 h. Pages over 60,000 characters are not cut: the model reads the parts closest to the prompt (needs an `embedding_model`) |
+| `read_document` | Reads a PDF, Word, PowerPoint or Excel file as compact text, a range at a time: type, size, page/slide/sheet count and estimated tokens first, then only the pages, slides or sheets asked for (`range="3-5"`), so the file never enters the agent's context whole. Opt-in: the native Read is not redirected. Scanned PDFs fail with that reason (no OCR) |
 | `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage; `graph` with `symbol` tells what changing a function touches: callers, calls, the tests that reach it and the files that import it |
 
 Agents that must click, type or log in also get Microsoft's [Playwright MCP](https://github.com/microsoft/playwright-mcp),
@@ -16,7 +17,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.43 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.45 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -149,7 +150,21 @@ Redirects) and Maintenance (Setup audit, Startup).
    `browser_run_code_unsafe`, which runs arbitrary JavaScript in the server process, is denied in the client
    (`permissions.deny` in `~/.claude/settings.json`, `disabled_tools` in `~/.codex/config.toml`); if it cannot be
    denied, the server is not registered. A `playwright` server you registered yourself is never touched. Remove it with
-   `claude mcp remove playwright -s user` / `codex mcp remove playwright`.
+   `claude mcp remove playwright -s user` / `codex mcp remove playwright`. The registered command is a small stdio
+   proxy (`lazy_mcp_proxy.py`, standard library only) that answers the handshake and the tool list from a cache the
+   probe writes and starts the Node server on the first tool call, so a session that never opens a browser does not
+   keep a 97 MB Node process; it ends with the session.
+
+   **Who asked for a web search**: every provider call in `~/.smart-tool/data/web-search-health.jsonl` and every
+   record of `research-metrics.jsonl` made for a `web_search` carries `requester`: `client`, `mcp_session` (first 12
+   characters of the daemon's session id), `session` and `project` (the Claude Code session id and folder) and `source`
+   (`hook`: the PreToolUse hook saw this call; `mcp-session`: an earlier call of the same MCP session was attributed;
+   `none`: only the client name is known, which is what Codex gives, since its hook does not cover MCP tools). The
+   query text is not stored there. The folder and session come from the installed hook: after an update, "Update hook"
+   on the setup page adds `web_search` and `web_fetch` to its matcher. A native WebSearch or WebFetch that the hook
+   redirects is attributed from the hook payload itself (`mcp_session` empty). `integration-metrics.jsonl` carries the
+   same `requester` on the web events. A `deep` crawl job writes no provider record, so it has none. The hook's note
+   waits up to 60 s for its MCP call; an identical query from two sessions at once can swap their notes.
 
    The hook behaviors:
    - **Redirect** (default): the call is not denied. Smart Tool answers it and the answer comes back as the output

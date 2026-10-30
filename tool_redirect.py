@@ -10,6 +10,7 @@ the PreToolUse is rewritten to a no-op that always succeeds (a grep with no matc
 replacement: its shell call is rewritten to print a file holding the answer, which Codex only applies with `allow`.
 """
 import concurrent.futures
+import contextvars
 import os
 import threading
 import time
@@ -40,7 +41,7 @@ class Jobs:
             for old in [k for k, (at, _f) in self._futures.items() if now - at > RESULT_TTL_S]:
                 del self._futures[old]
             if key not in self._futures:
-                self._futures[key] = (now, _POOL.submit(self._runners[kind], arguments))
+                self._futures[key] = (now, _POOL.submit(contextvars.copy_context().run, self._runners[kind], arguments))
 
     def wait(self, key, timeout):
         """The text of key's call when it finished within timeout seconds, else None (the call keeps running and a

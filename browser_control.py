@@ -7,6 +7,10 @@ as the agent would: machines whose policy forbids it (corporate IT blocking remo
 keep today's read-only behavior, and the reason is shown in the setup screen instead of an error. A server named
 `playwright` the user already registered is left untouched.
 
+The registered command is lazy_mcp_proxy.py around the real server: every session starts the registered servers, and
+a Node process kept idle in each session that never opens a browser cost about 97 MB of commit each. The proxy answers
+the handshake from the cache the probe writes (HANDSHAKE_PATH) and starts the real server on the first tool call.
+
 Pages the agent opens are untrusted input. The server never exposes tools a page registers (WebMCP); every request
 the browser makes carries AGENT_HEADER, which the daemon refuses, so a page cannot steer the agent into Smart Tool's
 own setup page and its token (redirects included); `browser_run_code_unsafe` (arbitrary JavaScript in the server
@@ -18,6 +22,7 @@ import os
 import queue
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -26,6 +31,7 @@ import tomllib
 import atomic_io
 import endpoint_sync
 import install_runtime
+import lazy_mcp_proxy
 import node_locator
 import paths
 
@@ -34,6 +40,8 @@ CLI = install_runtime.PLAYWRIGHT_MCP_CLI
 STATUS_PATH = os.path.join(paths.DATA_DIR, "browser-control.json")
 OUTPUT_DIR = os.path.join(paths.DATA_DIR, "playwright-mcp")
 CONFIG_PATH = os.path.join(paths.DATA_DIR, "playwright-mcp.json")
+HANDSHAKE_PATH = os.path.join(paths.DATA_DIR, "playwright-mcp-handshake.json")
+PROXY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lazy_mcp_proxy.py")
 AGENT_HEADER = "X-Smart-Tool-Agent-Browser"
 OUTPUT_MAX_BYTES = 100 * 1024 * 1024
 PROBE_TIMEOUT_S = 60
@@ -68,6 +76,15 @@ def server_command():
             "--output-max-size", str(OUTPUT_MAX_BYTES)]
 
 
+def lazy_command(command):
+    """The command registered in the clients: lazy_mcp_proxy.py (console Python of this installation) around command,
+    the real server line, answering from HANDSHAKE_PATH until a tool call needs the real one."""
+    python = sys.executable
+    if os.path.basename(python).lower() == "pythonw.exe":
+        python = os.path.join(os.path.dirname(python), "python.exe")
+    return [python, PROXY, "--handshake", HANDSHAKE_PATH, "--", *command]
+
+
 def write_config():
     """Writes the Playwright MCP config file that adds AGENT_HEADER to every request of the browser (navigations,
     redirects, subresources; measured: no CORS preflight is added) and returns its path."""
@@ -77,14 +94,16 @@ def write_config():
     return CONFIG_PATH
 
 
-def probe(command, timeout=PROBE_TIMEOUT_S):
+def probe(command, timeout=PROBE_TIMEOUT_S, handshake_path=None):
     """Starts the server over stdio, opens about:blank and closes it, as an agent's first call would.
-    Returns None when the browser opened, else the reason it did not (a policy block, a crash, a timeout)."""
+    Returns None when the browser opened, else the reason it did not (a policy block, a crash, a timeout). With
+    handshake_path, a successful probe also saves the server's initialize result and tool list there, the cache
+    lazy_mcp_proxy answers from."""
     with tempfile.TemporaryDirectory(prefix="st-browser-probe-", ignore_cleanup_errors=True) as workdir:
-        return _probe(command, workdir, timeout)
+        return _probe(command, workdir, timeout, handshake_path)
 
 
-def _probe(command, workdir, timeout):
+def _probe(command, workdir, timeout, handshake_path=None):
     """probe() inside workdir, the server's working folder."""
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
@@ -118,14 +137,20 @@ def _probe(command, workdir, timeout):
                 return message["result"]
 
     try:
-        call(1, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
-                               "clientInfo": {"name": "smart-tool-probe", "version": "1"}})
+        initialized = call(1, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                             "clientInfo": {"name": "smart-tool-probe", "version": "1"}})
         proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        tools = call(4, "tools/list", {}).get("tools") if handshake_path else None
         result = call(2, "tools/call", {"name": "browser_navigate", "arguments": {"url": "about:blank"}})
         if result.get("isError"):
             text = " ".join(part.get("text", "") for part in result.get("content") or [])
             return f"browser did not open: {' '.join(text.split())[:300]}"
         call(3, "tools/call", {"name": "browser_close", "arguments": {}})
+        if handshake_path:
+            if not tools:
+                return "the server listed no tools"
+            os.makedirs(os.path.dirname(handshake_path), exist_ok=True)
+            atomic_io.write_secret_text(handshake_path, json.dumps({"initialize": initialized, "tools": tools}))
         return None
     except (OSError, RuntimeError, TimeoutError) as exc:
         return str(exc)
@@ -158,8 +183,9 @@ def registered():
     return found
 
 
-def registered_command(client):
-    """Executable the client's `playwright` server is registered with, or None when it is not registered."""
+def registered_executables(client):
+    """Executables the client's `playwright` server needs: the registered command and, behind lazy_mcp_proxy, the real
+    server's too; an empty list when it is not registered."""
     try:
         if client == "claude":
             with open(endpoint_sync.claude_json(), encoding="utf-8") as stream:
@@ -168,9 +194,32 @@ def registered_command(client):
             with open(_codex_config(), encoding="utf-8") as stream:
                 entry = (tomllib.loads(stream.read()).get("mcp_servers") or {}).get(SERVER)
     except (OSError, ValueError, AttributeError):
-        return None
+        return []
     command = entry.get("command") if isinstance(entry, dict) else None
-    return command if isinstance(command, str) else None
+    if not isinstance(command, str):
+        return []
+    args = entry.get("args") if isinstance(entry.get("args"), list) else []
+    real = args[args.index("--") + 1] if "--" in args and args.index("--") + 1 < len(args) else None
+    return [command] + ([real] if isinstance(real, str) else [])
+
+
+def _lazy_registration_usable(client):
+    """Whether the client's registration goes through lazy_mcp_proxy and the handshake cache it answers from is
+    readable: a registration of an older version (the Node server directly) or a lost cache both need ensure."""
+    try:
+        if client == "claude":
+            with open(endpoint_sync.claude_json(), encoding="utf-8") as stream:
+                entry = (json.load(stream).get("mcpServers") or {}).get(SERVER)
+        else:
+            with open(_codex_config(), encoding="utf-8") as stream:
+                entry = (tomllib.loads(stream.read()).get("mcp_servers") or {}).get(SERVER)
+        args = entry.get("args") or []
+        if PROXY not in args:
+            return False
+        lazy_mcp_proxy.load_handshake(HANDSHAKE_PATH)
+    except (OSError, ValueError, AttributeError, RuntimeError):
+        return False
+    return True
 
 
 def heal(log=None):
@@ -179,9 +228,10 @@ def heal(log=None):
     {client: ensure's outcome} for the clients refreshed."""
     refreshed = {}
     for client in ("claude", "codex"):
-        command = registered_command(client)
+        executables = registered_executables(client)
         ours = status().get(client, {}).get("state") in ("registered", "undenied")
-        if ours and command and not node_locator.exists(command):
+        if ours and executables and not (all(node_locator.exists(path) for path in executables)
+                                         and _lazy_registration_usable(client)):
             refreshed[client] = ensure(client, log)
     return refreshed
 
@@ -302,6 +352,12 @@ def _record(client, state, reason="", log=None):
     return data[client]
 
 
+def _clip(text, limit=300):
+    """text within limit characters, keeping its start and its end: a failed CLI call names the long command first and
+    the CLI's own message last."""
+    return text if len(text) <= limit else text[:limit // 3] + " ... " + text[-(limit - limit // 3 - 5):]
+
+
 def ensure(client, log=None):
     """Registers Playwright MCP in the client, or refreshes the registration Smart Tool made before (Node, Chromium
     and install paths change between versions). A `playwright` server the user registered is kept. When the browser
@@ -315,7 +371,7 @@ def ensure(client, log=None):
         return _record(client, "kept", "a playwright MCP server you registered is kept")
     try:
         command = server_command()
-        problem = probe(command)
+        problem = probe(command, handshake_path=HANDSHAKE_PATH)
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         problem = str(exc)
     try:
@@ -325,7 +381,7 @@ def ensure(client, log=None):
             if ours and client == "claude":
                 set_claude_deny(False)
             return _record(client, "unavailable", problem[:300], log)
-        endpoint_sync.run_cli(register_command(client, command))
+        endpoint_sync.run_cli(register_command(client, lazy_command(command)))
         if not registered().get(client):
             return _record(client, "unavailable", "the client CLI finished, but the server did not appear in its "
                            "configuration", log)
@@ -342,5 +398,5 @@ def ensure(client, log=None):
     except (OSError, RuntimeError, ValueError) as exc:
         # Our registration still in place after a failure (its removal failed) stays ours, flagged, never "kept".
         state = "undenied" if ours and registered().get(client) else "unavailable"
-        return _record(client, state, str(exc)[:300], log)
+        return _record(client, state, _clip(str(exc)), log)
     return _record(client, "registered")

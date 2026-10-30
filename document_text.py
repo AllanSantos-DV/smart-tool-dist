@@ -115,37 +115,155 @@ def _local(tag):
     return tag.rsplit('}', 1)[-1]
 
 
+def _docx_namespace(root):
+    """The WordprocessingML namespace prefix (transitional or strict) of a parsed part."""
+    return W if root.tag.startswith(W) else '{http://purl.oclc.org/ooxml/wordprocessingml/main}'
+
+
+def _docx_text(paragraph, namespace):
+    """Text of one `w:p`: runs, tabs and line breaks; a nested paragraph (text box) is not part of it."""
+    pending = list(reversed(paragraph))
+    pieces = []
+    while pending:
+        child = pending.pop()
+        if child.tag == namespace + 'p':
+            continue
+        if child.tag == namespace + 't':
+            pieces.append(child.text or '')
+        elif child.tag == namespace + 'tab':
+            pieces.append('\t')
+        elif child.tag in (namespace + 'br', namespace + 'cr'):
+            pieces.append('\n')
+        else:
+            pending.extend(reversed(child))
+    return ''.join(pieces)
+
+
+def _docx_extra_parts(package):
+    """Names of the header, footer, footnote and endnote parts of a .docx, in a stable order."""
+    return sorted(name for name in package.entries if re.fullmatch(
+        r'word/(?:header\d+|footer\d+|footnotes|endnotes)\.xml', name))
+
+
 def extract_docx(data):
     """Text of a .docx: body, headers, footers, footnotes and endnotes, one line per non-empty paragraph.
 
     Parameters: data (the file bytes). Returns: UTF-8 text bytes. Raises: DocumentError with a readable reason for a
     corrupt, encrypted or oversized package, or one with a DOCTYPE or entity."""
     with _open_package(data, 'DOCX', 'word/document.xml') as package:
-        names = ['word/document.xml'] + sorted(name for name in package.entries if re.fullmatch(
-            r'word/(?:header\d+|footer\d+|footnotes|endnotes)\.xml', name))
         paragraphs = _Lines('DOCX')
-        for name in names:
+        for name in ['word/document.xml'] + _docx_extra_parts(package):
             root = package.parse(name)
-            namespace = W if root.tag.startswith(W) else '{http://purl.oclc.org/ooxml/wordprocessingml/main}'
+            namespace = _docx_namespace(root)
             for paragraph in root.iter(namespace + 'p'):
-                def parts(node):
-                    pending = list(reversed(node))
-                    while pending:
-                        child = pending.pop()
-                        if child.tag == namespace + 'p':
-                            continue
-                        if child.tag == namespace + 't':
-                            yield child.text or ''
-                        elif child.tag == namespace + 'tab':
-                            yield '\t'
-                        elif child.tag in (namespace + 'br', namespace + 'cr'):
-                            yield '\n'
-                        else:
-                            pending.extend(reversed(child))
-                text = ''.join(parts(paragraph))
+                text = _docx_text(paragraph, namespace)
                 if text.strip():
                     paragraphs.add(text)
         return ('\n'.join(paragraphs) + '\n' if paragraphs else '').encode('utf-8')
+
+
+def _docx_heading_levels(package, namespace):
+    """`{styleId: level}` of the heading styles of word/styles.xml (the style name is `heading N` in every language,
+    `Title` is level 1); empty when the part is missing."""
+    if 'word/styles.xml' not in package.entries:
+        return {}
+    levels = {}
+    for style in package.parse('word/styles.xml').iter(namespace + 'style'):
+        name = next((node.get(namespace + 'val', '') for node in style if node.tag == namespace + 'name'), '').lower()
+        found = re.fullmatch(r'heading (\d)', name)
+        if found or name == 'title':
+            levels[style.get(namespace + 'styleId')] = int(found.group(1)) if found else 1
+    return levels
+
+
+def _docx_paragraph_line(paragraph, namespace, levels):
+    """Markdown line of a paragraph: `#` heading by style or outline level, `- ` item (indented by level) for a list
+    paragraph, else the plain text; an empty string for a paragraph without text."""
+    text = ' '.join(_docx_text(paragraph, namespace).split())
+    if not text:
+        return ''
+    properties = next((node for node in paragraph if node.tag == namespace + 'pPr'), None)
+    if properties is None:
+        return text
+    style = next((node.get(namespace + 'val') for node in properties if node.tag == namespace + 'pStyle'), None)
+    outline = next((node.get(namespace + 'val') for node in properties if node.tag == namespace + 'outlineLvl'), None)
+    level = levels.get(style) or (int(outline) + 1 if outline and outline.isdigit() and int(outline) < 6 else 0)
+    if level:
+        return '#' * min(level, 6) + ' ' + text
+    numbering = next((node for node in properties if node.tag == namespace + 'numPr'), None)
+    if numbering is not None:
+        depth = next((node.get(namespace + 'val') for node in numbering if node.tag == namespace + 'ilvl'), '0')
+        return '  ' * (int(depth) if depth.isdigit() else 0) + '- ' + text
+    return text
+
+
+def _docx_table_lines(table, namespace):
+    """GFM table lines of a `w:tbl`: one row per `w:tr`, the first row as the header, cell text on one line."""
+    rows = []
+    for row in table:
+        if row.tag != namespace + 'tr':
+            continue
+        cells = []
+        for cell in row:
+            if cell.tag == namespace + 'tc':
+                text = ' '.join(' '.join(_docx_text(p, namespace).split()) for p in cell.iter(namespace + 'p'))
+                cells.append(' '.join(text.split()).replace('|', '\\|'))
+        if any(cells):
+            rows.append('| ' + ' | '.join(cells) + ' |')
+    if len(rows) > 1:
+        rows.insert(1, '|' + ' --- |' * (rows[0].count(' | ') + 1))
+    return rows
+
+
+def _docx_body_items(node, namespace):
+    """The paragraphs and tables of a body (or of a content control inside it) in document order."""
+    for child in node:
+        if child.tag in (namespace + 'p', namespace + 'tbl'):
+            yield child
+        elif child.tag == namespace + 'sdt':
+            for content in child:
+                if content.tag == namespace + 'sdtContent':
+                    yield from _docx_body_items(content, namespace)
+
+
+def docx_blocks(data):
+    """Markdown blocks of a .docx in document order, for reading: headings as `#`, list items as `- `, tables as GFM
+    tables, other paragraphs as text. Footnotes, endnotes and the distinct header and footer lines follow under
+    `## Notes` and `## Headers and footers`.
+
+    Parameters: data (the file bytes). Returns: a list of blocks (a block is a paragraph line or a whole table, lines
+    joined by newline). Raises: DocumentError with a readable reason for a corrupt, encrypted, oversized or hostile
+    package, or one without text."""
+    with _open_package(data, 'DOCX', 'word/document.xml') as package:
+        root = package.parse('word/document.xml')
+        namespace = _docx_namespace(root)
+        levels = _docx_heading_levels(package, namespace)
+        blocks = _Lines('DOCX')
+        body = next((node for node in root if node.tag == namespace + 'body'), root)
+        for item in _docx_body_items(body, namespace):
+            if item.tag == namespace + 'tbl':
+                table = _docx_table_lines(item, namespace)
+                if table:
+                    blocks.add('\n'.join(table))
+            else:
+                line = _docx_paragraph_line(item, namespace, levels)
+                if line:
+                    blocks.add(line)
+        notes, frame = [], []
+        for name in _docx_extra_parts(package):
+            part = package.parse(name)
+            target = frame if re.search(r'header|footer', name) else notes
+            for paragraph in part.iter(_docx_namespace(part) + 'p'):
+                text = ' '.join(_docx_text(paragraph, _docx_namespace(part)).split())
+                if text and text not in target:
+                    target.append(text)
+        if notes:
+            blocks.add('## Notes', *notes)
+        if frame:
+            blocks.add('## Headers and footers', *frame)
+    if not blocks:
+        raise DocumentError('DOCX has no text.')
+    return list(blocks)
 
 
 def _drawing_paragraphs(root):
@@ -173,26 +291,40 @@ def _drawing_paragraphs(root):
     return lines
 
 
+def pptx_slides(data):
+    """The slides of a .pptx in slide order, for extraction and for reading.
+
+    Parameters: data (the file bytes). Returns: a list of `(number, body lines, notes lines)`, a slide without text
+    included with empty lists. Raises: DocumentError with a readable reason for a corrupt, encrypted, oversized or hostile
+    package or one over MAX_TEXT_BYTES of text."""
+    def has_slides(names):
+        return any(re.fullmatch(r'ppt/slides/slide\d+\.xml', name) for name in names)
+
+    with _open_package(data, 'PPTX', has_slides) as package:
+        numbered = sorted((int(m.group(1)), name) for name in package.entries
+                          if (m := re.fullmatch(r'ppt/slides/slide(\d+)\.xml', name)))
+        budget = _Lines('PPTX')
+        slides = []
+        for number, name in numbered:
+            body = _drawing_paragraphs(package.parse(name))
+            notes_name = f'ppt/notesSlides/notesSlide{number}.xml'
+            notes = _drawing_paragraphs(package.parse(notes_name)) if notes_name in package.entries else []
+            budget.add(*body, *notes)
+            slides.append((number, body, notes))
+    return slides
+
+
 def extract_pptx(data):
     """Text of a .pptx: each slide under `[slide N]`, then its speaker notes under `[notes N]`, in slide order.
 
     Parameters: data (the file bytes). Returns: UTF-8 text bytes. Raises: DocumentError with a readable reason for a
     corrupt, encrypted, oversized or hostile package, or a deck without any text."""
-    def has_slides(names):
-        return any(re.fullmatch(r'ppt/slides/slide\d+\.xml', name) for name in names)
-
-    with _open_package(data, 'PPTX', has_slides) as package:
-        slides = sorted((int(m.group(1)), name) for name in package.entries
-                        if (m := re.fullmatch(r'ppt/slides/slide(\d+)\.xml', name)))
-        lines = _Lines('PPTX')
-        for number, name in slides:
-            body = _drawing_paragraphs(package.parse(name))
-            if body:
-                lines.add(f'[slide {number}]', *body)
-            notes_name = f'ppt/notesSlides/notesSlide{number}.xml'
-            notes = _drawing_paragraphs(package.parse(notes_name)) if notes_name in package.entries else []
-            if notes:
-                lines.add(f'[notes {number}]', *notes)
+    lines = _Lines('PPTX')
+    for number, body, notes in pptx_slides(data):
+        if body:
+            lines.add(f'[slide {number}]', *body)
+        if notes:
+            lines.add(f'[notes {number}]', *notes)
     if not lines:
         raise DocumentError('PPTX has no text.')
     return ('\n'.join(lines) + '\n').encode('utf-8')
@@ -264,14 +396,13 @@ def _sheet_rows(root, strings):
             yield '\t'.join(values)
 
 
-def extract_xlsx(data):
-    """Text of an .xlsx: each sheet, in workbook order, under `[sheet NAME]`, then one line per row with the cells
-    separated by tabs. Shared strings are resolved; numbers and inline strings are kept; a formula contributes its cached
-    value, nothing is calculated.
+def xlsx_sheets(data):
+    """The sheets of an .xlsx in workbook order, for extraction and for reading. Shared strings are resolved; numbers
+    and inline strings are kept; a formula contributes its cached value, nothing is calculated.
 
-    Parameters: data (the file bytes). Returns: UTF-8 text bytes. Raises: DocumentError with a readable reason for a
-    corrupt, encrypted, oversized or hostile package, a workbook over XLSX_MAX_ROWS rows or MAX_TEXT_BYTES of text, or
-    one without any text."""
+    Parameters: data (the file bytes). Returns: a list of `(name, rows)`, `rows` being the tab-joined text of each
+    non-empty row (empty for a sheet without text). Raises: DocumentError with a readable reason for a corrupt,
+    encrypted, oversized or hostile package, or a workbook over XLSX_MAX_ROWS rows or MAX_TEXT_BYTES of text."""
     with _open_package(data, 'XLSX', 'xl/workbook.xml') as package:
         workbook = package.parse('xl/workbook.xml')
         targets = {}
@@ -281,22 +412,40 @@ def extract_xlsx(data):
                 targets[rel.get('Id')] = posixpath.normpath(target.lstrip('/') if target.startswith('/')
                                                             else posixpath.join('xl', target))
         strings = _shared_strings(package)
-        lines = _Lines('XLSX')
-        rows = 0
+        budget = _Lines('XLSX')
+        sheets = []
+        total = 0
         for sheet in (node for node in workbook.iter() if _local(node.tag) == 'sheet'):
             rid = next((value for key, value in sheet.attrib.items() if _local(key) == 'id'), None)
             part = targets.get(rid)
             if part not in package.entries:
                 raise DocumentError('Invalid XLSX or excessive structure.')
-            header = f"[sheet {' '.join(sheet.get('name', '').split())}]"
+            name = ' '.join(sheet.get('name', '').split())
+            rows = []
             for line in _sheet_rows(package.parse(part), strings):
-                rows += 1
-                if rows > XLSX_MAX_ROWS:
+                total += 1
+                if total > XLSX_MAX_ROWS:
                     raise DocumentError(f'XLSX over {XLSX_MAX_ROWS} rows.')
-                if header:
-                    lines.add(header)
-                    header = ''
-                lines.add(line)
+                if not rows:
+                    budget.add(f'[sheet {name}]')
+                budget.add(line)
+                rows.append(line)
+            sheets.append((name, rows))
+    return sheets
+
+
+def extract_xlsx(data):
+    """Text of an .xlsx: each sheet, in workbook order, under `[sheet NAME]`, then one line per row with the cells
+    separated by tabs. Shared strings are resolved; numbers and inline strings are kept; a formula contributes its cached
+    value, nothing is calculated.
+
+    Parameters: data (the file bytes). Returns: UTF-8 text bytes. Raises: DocumentError with a readable reason for a
+    corrupt, encrypted, oversized or hostile package, a workbook over XLSX_MAX_ROWS rows or MAX_TEXT_BYTES of text, or
+    one without any text."""
+    lines = _Lines('XLSX')
+    for name, rows in xlsx_sheets(data):
+        if rows:
+            lines.add(f'[sheet {name}]', *rows)
     if not lines:
         raise DocumentError('XLSX has no text.')
     return ('\n'.join(lines) + '\n').encode('utf-8')
@@ -320,14 +469,15 @@ print(json.dumps({"pages": pages, "count": len(reader.pages)}))
 """
 
 
-def run_pdf(data, timeout, max_pages, max_chars):
-    """Text of a PDF (pypdf, pure Python), page by page, with `[page N]` markers. A hostile PDF can make pypdf parse for
-    minutes, so it runs in an isolated subprocess (`-I`) killed at the deadline.
+def pdf_pages(data, timeout, max_pages, max_chars):
+    """Text of each page of a PDF (pypdf, pure Python). A hostile PDF can make pypdf parse for minutes, so it runs in an
+    isolated subprocess (`-I`) killed at the deadline.
 
     Parameters: data (PDF bytes), timeout (seconds before the subprocess is killed), max_pages, max_chars (cap on the
-    text read, over all pages). Returns: the marked text, with a `[pages A-B not read]` line when a cap cut it; empty
-    pages are left out. Raises: PdfTimeout, PdfEncrypted (a password is needed), PdfUnreadable (corrupt; `detail` has
-    the last line pypdf reported), all DocumentError."""
+    text read, over all pages). Returns: `(pages, count)`: the text of the pages read (an empty string for a page
+    without text) and the page count of the file, which is larger when a cap cut the reading. Raises: PdfTimeout,
+    PdfEncrypted (a password is needed), PdfUnreadable (corrupt; `detail` has the last line pypdf reported), all
+    DocumentError."""
     try:
         done = subprocess.run([sys.executable, "-I", "-c", PDF_SCRIPT, str(max_pages), str(max_chars)],
                               input=data, capture_output=True, timeout=timeout,
@@ -341,11 +491,19 @@ def run_pdf(data, timeout, max_pages, max_chars):
         result = json.loads(done.stdout)
         if result.get("encrypted"):
             raise PdfEncrypted("PDF protected by a password.")
-        pages, count = result["pages"], result["count"]
+        return result["pages"], result["count"]
     except (ValueError, KeyError, AttributeError) as exc:
         if isinstance(exc, PdfEncrypted):
             raise
         raise PdfUnreadable("PDF could not be read.", f"unexpected extractor output ({type(exc).__name__})") from None
+
+
+def run_pdf(data, timeout, max_pages, max_chars):
+    """Text of a PDF through pdf_pages, with `[page N]` markers.
+
+    Parameters: as pdf_pages. Returns: the marked text, with a `[pages A-B not read]` line when a cap cut it; empty
+    pages are left out. Raises: as pdf_pages."""
+    pages, count = pdf_pages(data, timeout, max_pages, max_chars)
     text = "\n\n".join(f"[page {number}]\n{page}" for number, page in enumerate(pages, 1) if page)
     if count > len(pages):
         text += f"\n\n[pages {len(pages) + 1}-{count} not read]"

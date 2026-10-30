@@ -5,8 +5,9 @@ reaproveitamento, e `research_max_iterations` limita o retorno por rodada. Write
 `router-metrics.jsonl` — nada no daemon lê isto de volta; quem lê é
 `.token-guard/analyze_research.py`.
 
-Grava só o que a calibração usa: textos de consulta/tópico truncados e números. Nunca
-snippets nem páginas, que são conteúdo de terceiros e não ajudam a decidir o valor.
+Grava só o que a calibração usa: textos de consulta/tópico truncados e números, mais o
+`requester` (sessão e pasta de quem pediu, ver requester.py). Nunca snippets nem páginas,
+que são conteúdo de terceiros e não ajudam a decidir o valor.
 """
 import json
 import os
@@ -15,6 +16,7 @@ import threading
 import time
 
 import atomic_io
+import requester
 
 METRICS_PATH = os.path.join(paths.DATA_DIR, "research-metrics.jsonl")
 METRICS_MAX_BYTES = 2 * 1024 * 1024
@@ -34,7 +36,7 @@ def _short(text):
 
 
 def _append(record):
-    record = {"ts": time.time(), **record}
+    record = {"ts": time.time(), **({"requester": requester.current()} if requester.current() else {}), **record}
     try:
         line = json.dumps(record, ensure_ascii=False) + "\n"
         with _LOCK:

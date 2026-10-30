@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.9.45 - beta
+
+- The Playwright MCP server starts on first use. What the clients register is now `lazy_mcp_proxy.py` around
+  the real command: it answers `initialize`, `ping` and `tools/list` from the handshake the setup probe saved
+  (`playwright-mcp-handshake.json`) and starts the Node server on the first other request, replaying the client's
+  handshake to it, then passes everything through and kills the server's process tree when the client closes. Before, each
+  Claude session started its own Node server (about 97 MB of commit) whether or not it opened a browser. A missing or
+  broken cache fails loudly (exit 2, reason on stderr), never as an empty tool list; the heal at startup also checks the
+  real server's executable. Tests in `tests/test_lazy_mcp_proxy.py` and `tests/test_browser_control.py`.
+- Web searches record who asked. Each provider call (`web-search-health.jsonl`) and each research record
+  (`research-metrics.jsonl`) carries `requester` (`client`, `mcp_session`, `session`, `project`, `source`): the PreToolUse
+  hook, which gets the Claude Code session and folder, now also matches `web_search` and `web_fetch`, and the MCP call
+  claims that note by tool and arguments. Without the hook (Codex, or a hook not yet updated) only the client and the MCP
+  session are known and `source` is `none`. A redirected native WebSearch/WebFetch is attributed from the hook payload,
+  and `integration-metrics.jsonl` carries the same field. The query text is stored nowhere new. Tests in
+  `tests/test_requester.py`. The startup heal also rebuilds a registration that still starts the Node server directly or
+  whose handshake cache is gone, and the proxy gives up on a real server silent for 60 s on its first `initialize`.
+- The resident search browser's exit after 300 s without requests is now covered by a test that runs the real service
+  loop with a stub browser (`tests/test_browser_idle.py`); the value is unchanged.
+
+## 0.9.44 - beta
+
+- New tool `read_document`: a PDF, Word, PowerPoint or Excel file read as compact text, a range at a time. The answer opens
+  with the type, size, page, slide, sheet or part count and the estimated tokens of all the text, then the text of the
+  `range` asked for (`3`, `3-5`, `7-`, `-4`, `1,4-6`, a sheet name) up to `max_chars`, with a `next:` line to continue;
+  `info_only` returns just the facts. PDF pages are compacted (ligatures, hyphenated line ends, wrapped lines); a docx is
+  markdown (headings, lists, GFM tables, notes, headers) in parts of about 6,000 characters, since it has no fixed pages;
+  a slide carries its speaker notes; a sheet is one tab-separated line per row with cached formula values. A scanned PDF,
+  a password, a corrupt or hostile file and a range outside the document fail with the reason. Opt-in: the native Read is
+  not redirected and the tool is not loaded upfront (the server instructions say to load it with ToolSearch). No new
+  dependency; the extractors of the index now return their units (`pdf_pages`, `pptx_slides`, `xlsx_sheets`) and the
+  indexed text is unchanged. Sources and the measurement in `docs/research/2026-10-30-read-document.md`; tests in
+  `tests/test_read_document.py`.
+
 ## 0.9.43 - beta
 
 - The session-start audit report (Claude Code and Codex) is also given after a compaction and after a fork, the two

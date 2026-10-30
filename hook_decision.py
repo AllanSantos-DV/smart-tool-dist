@@ -25,6 +25,7 @@ import index_scope
 import endpoint_sync
 import project_store
 import redirect_rule
+import requester
 import router
 import tool_redirect
 
@@ -298,6 +299,8 @@ def decide(payload, client, web_route, jobs):
             router.CLIENT.set(client)
             router.SESSION.set(payload.get("session_id"))
             router._log_decision(SMART_SEARCH_TOOL, {}, "allow", "Smart Tool search, logged to measure followed redirects")
+        requester.note_hook(payload["tool_name"].removeprefix(f"mcp__{SMART_TOOL_SERVER}__"), payload.get("tool_input"),
+                            payload.get("session_id"), payload.get("cwd"))
         return {}
     mode = config.hook_mode(cfg)
     if mode == "off" or not isinstance(payload, dict):
@@ -321,7 +324,12 @@ def _redirect(payload, client, plan, jobs):
     else runs as the agent wrote it and, in Claude Code, `after` swaps its output for the answer."""
     key, tool_name = payload["tool_use_id"], payload["tool_name"]
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
-    jobs.start(key, plan["kind"], plan["arguments"])
+    who = requester.CURRENT.set(requester.from_hook(client, payload)) if tool_name in WEB_TOOLS else None
+    try:
+        jobs.start(key, plan["kind"], plan["arguments"])
+    finally:
+        if who is not None:
+            requester.CURRENT.reset(who)
     if tool_name not in tool_redirect.NO_OP:
         return {}
     text = _answer(jobs, key, PRE_WAIT_S, tool_name)
