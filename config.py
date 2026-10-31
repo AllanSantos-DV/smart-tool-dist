@@ -39,6 +39,7 @@ DEFAULT_CONFIG = {
     "duplicate_mode": "warn",
     "dependency_mode": "warn",
     "auto_update": True,
+    "language": "",
     "pattern_proposals": "on",
     "contact": "",
     "model_adapter": "",
@@ -129,6 +130,17 @@ def auto_update(cfg=None):
     value = (cfg if cfg is not None else load_config()).get("auto_update", DEFAULT_CONFIG["auto_update"])
     if not isinstance(value, bool):
         raise ValueError(f"Invalid auto_update ({value!r}) in {CONFIG_PATH}: use true or false.")
+    return value
+
+
+LANGUAGES = ("pt-BR", "en")
+
+
+def language(cfg=None):
+    """Interface language the user picked ("pt-BR" or "en"), or "" to follow the Windows display language."""
+    value = (cfg if cfg is not None else load_config()).get("language", DEFAULT_CONFIG["language"])
+    if value not in ("", *LANGUAGES):
+        raise ValueError(f"Invalid language ({value!r}) in {CONFIG_PATH}: use one of {', '.join(LANGUAGES)} or \"\".")
     return value
 
 

@@ -31,6 +31,7 @@ import yaml
 
 import atomic_io
 import endpoint_sync
+import i18n
 import paths
 
 REPORT_DIR = os.path.join(paths.DATA_DIR, "setup-audit")
@@ -904,13 +905,14 @@ def notices_due():
 
 
 def toast_text(row):
-    """(title, lines) of the toast for one `notices_due` row."""
+    """(title, lines) of the toast for one `notices_due` row, in the interface language."""
     total = row["errors"] + row["warnings"]
-    title = f"Setup audit: {total} new problem{'s' if total != 1 else ''} in the agent configuration"
+    title = (i18n.t("Setup audit: 1 new problem in the agent configuration") if total == 1
+             else i18n.t("Setup audit: {count} new problems in the agent configuration", count=total))
     lines = [os.path.basename(row["project"].rstrip("\\/")) or row["project"]]
     lines += [f"{item['severity']}: {item['check']} - {item['subject']}"[:120] for item in row["items"][:3]]
     if len(row["items"]) > 3:
-        lines.append(f"and {len(row['items']) - 3} more")
+        lines.append(i18n.t("and {count} more", count=len(row["items"]) - 3))
     return title, lines
 
 

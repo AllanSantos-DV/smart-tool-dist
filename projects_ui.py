@@ -1,13 +1,16 @@
 """Tela local de projetos; todas as operações passam pelos jobs do daemon."""
 import html
 import re
+import i18n
 import setup_ui
 import project_maps_ui
 import project_insights_ui
 
 
 def render_projects_page():
+    """The projects page with its token, map and insight components and the interface language script."""
     return (_PAGE.replace("__TOKEN__", html.escape(setup_ui.SETUP_TOKEN, quote=True))
+            .replace("__I18N__", i18n.page_script(setup_ui.SETUP_TOKEN))
             .replace("__MAP_STYLE__", project_maps_ui.STYLE)
             .replace("__MAP_HTML__", project_maps_ui.HTML)
             .replace("__MAP_SCRIPT__", project_maps_ui.SCRIPT)
@@ -24,13 +27,14 @@ def render_map_window():
         '__STYLE__': style.replace('__MAP_STYLE__', project_maps_ui.STYLE).replace('__INSIGHTS_STYLE__', project_insights_ui.STYLE),
         '__MAP_HTML__': project_maps_ui.HTML,
         '__MAP_SCRIPT__': project_maps_ui.SCRIPT,
+        '__I18N__': i18n.page_script(setup_ui.SETUP_TOKEN),
     }
     return re.sub('|'.join(re.escape(key) for key in values), lambda m:values[m[0]], _MAP_WINDOW)
 
 
 _MAP_WINDOW = r'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="setup-token" content="__TOKEN__"><title>Project maps · Smart Tool</title><style>
+<meta name="setup-token" content="__TOKEN__"><title>Project maps · Smart Tool</title>__I18N__<style>
 __STYLE__
 body.map-window{padding:0}.map-window header,.map-window main{max-width:none}.map-window header{padding:22px 28px 14px}.map-window main{padding:0 20px 30px}.map-window h1{font-size:22px}.map-window #window-root{margin:6px 0 0;font-size:12px;overflow-wrap:anywhere}.map-window .maps{margin-top:0}.map-window .maps>summary{display:none}.map-window .maps-workspace{grid-template-columns:minmax(0,1fr) 285px}.map-window #maps-svg{height:calc(100vh - 360px);min-height:430px}.map-window .maps-tools #maps-new-window{display:none}.map-window #maps-color-legend{max-height:90px}.map-window #window-message:empty{display:none}.map-window #window-message{margin-bottom:14px;overflow-wrap:anywhere}
 @media(max-width:850px){.map-window .maps-workspace{grid-template-columns:1fr}.map-window header{padding-inline:18px}.map-window main{padding-inline:12px}.map-window #maps-svg{height:450px;min-height:0}}
@@ -51,6 +55,7 @@ _PAGE = r'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="setup-token" content="__TOKEN__">
 <title>Projects and indexing · Smart Tool</title>
+__I18N__
 <style>
 :root{color-scheme:light dark;--bg:#f6f7f9;--surface:#fff;--border:#dde1e6;--ink:#1b2430;--muted:#5b6472;--accent:#2f6fed;--good:#18723c;--bad:#b52c2c;--warn:#805300;--selected:#eaf1ff}
 @media(prefers-color-scheme:dark){:root{--bg:#14171c;--surface:#1c2027;--border:#39414e;--ink:#e6e9ee;--muted:#a6afbb;--accent:#91baff;--good:#68dc93;--bad:#ff9696;--warn:#e0b565;--selected:#263751}}
@@ -96,7 +101,7 @@ function setAdd(open){const restore=$('add-form').contains(document.activeElemen
 function select(id){selected=id;scopeKey='';scopeDirty=false;window.SmartMaps?.reset();window.SmartInsights?.reset();history.replaceState(null,'','#'+id);render()}
 function jobsHtml(rows){return rows.map(j=>`<div class="job"><div class="job-line"><strong>${esc(kindNames[j.kind]||j.kind)}</strong><span class="state ${j.status==='error'?'bad':''}">${esc(states[j.status]||j.status)}</span></div>${j.message?`<p>${esc(j.cancel_requested?'Cancellation requested; waiting for the current call to finish.':j.message)}</p>`:''}${j.status==='pending'?`<progress aria-label="Indexing progress" ${j.total_files>0&&j.processed_files!=null?`max="${j.total_files}" value="${j.processed_files}"`:''}></progress>`:''}${j.error?`<p class="state bad">${esc(j.error)}</p>`:''}${j.warning?`<p>${esc(j.warning)}</p>`:''}<small>${esc(j.job_id)}${j.elapsed_s!=null?' · '+j.elapsed_s+' s':''}</small></div>`).join('')}
 function render(){
- $('count').textContent=projects.length+' folder'+(projects.length===1?' registered':'s registered');
+ $('count').textContent=projects.length===1?'1 folder registered':projects.length+' folders registered';
  const list=$('project-list');
  for(const node of [...list.children])if(!projects.some(p=>p.id===node.dataset.project))node.remove();
  for(const p of projects){let button=list.querySelector(`[data-project="${p.id}"]`);if(!button){button=document.createElement('button');button.className='project-item';button.dataset.project=p.id;button.append(document.createElement('strong'),document.createElement('small'));list.append(button)}button.setAttribute('aria-current',String(p.id===selected));button.firstChild.textContent=p.name;button.lastChild.textContent=(states[p.status]||p.status)+(p.watch&&!p.paused?' · Watching':'')}

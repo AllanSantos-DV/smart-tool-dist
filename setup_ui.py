@@ -28,6 +28,7 @@ import config
 import daemon_launcher
 import endpoint_sync
 import gateway
+import i18n
 import model_catalog
 import model_defaults
 import model_health
@@ -101,6 +102,7 @@ def render_setup_page():
         # Único valor que entra no corpo do HTML, e não no <script>: escapado porque vem
         # de variável de ambiente, ainda que só quem já executa código possa definí-la.
         "__SETUP_ORIGIN__": html.escape(setup_origin(), quote=True),
+        "__I18N__": i18n.page_script(SETUP_TOKEN),
     }
     # Um único passe sobre o template original: .replace() encadeado re-escanearia o
     # próprio resultado e corromperia o JSON se um valor coincidisse com o outro placeholder.
@@ -419,6 +421,16 @@ def handle_providers_save(body):
             "validated_results": validated}
 
 
+def handle_language_save(body):
+    """Saves the interface language the language button picked; returns {"language": <saved>}."""
+    if not isinstance(body, dict):
+        raise SetupError("Request body must be a JSON object with 'language'.")
+    try:
+        return {"language": i18n.set_language(body.get("language"))}
+    except ValueError as exc:
+        raise SetupError(str(exc)) from exc
+
+
 def handle_autostart_get():
     return autostart.status()
 
@@ -494,6 +506,7 @@ _PAGE_TEMPLATE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Settings · Smart Tool</title>
+__I18N__
 <style>
   :root { color-scheme: light dark;
     --bg: #f6f7f9; --surface: #ffffff; --line: #dde1e6; --ink: #1b2430; --muted: #5b6472; --soft: #eef1f5;
@@ -665,7 +678,7 @@ _PAGE_TEMPLATE = """<!doctype html>
 </head>
 <body>
 <header class="top">
-  <div><h1>Smart Tool settings</h1><span class="where">__SETUP_ORIGIN__ · version <span id="app-version"></span></span></div>
+  <div><h1>Smart Tool settings</h1><span class="where">__SETUP_ORIGIN__ · <span>Version</span> <span id="app-version"></span></span></div>
   <nav><a href="/projects">Projects and indexing →</a></nav>
 </header>
 <div class="shell">
@@ -1010,7 +1023,7 @@ function renderOverview() {
     badge.hidden = !entry;
     badge.textContent = entry ? entry.count : "";
     badge.dataset.tone = entry && entry.bad ? "bad" : "warn";
-    badge.title = entry ? plural(entry.count, "item") + (entry.count === 1 ? " needs" : " need") + " attention" : "";
+    badge.title = !entry ? "" : entry.count === 1 ? "1 item needs attention" : entry.count + " items need attention";
   }
 }
 

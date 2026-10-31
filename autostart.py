@@ -14,6 +14,8 @@ import tempfile
 import toast_notice
 
 TASK_NAME = os.environ.get("SMART_TOOL_TASK_NAME", "SmartTool-Tray")
+# The tray runs under pythonw (no console): schtasks without this flag flashed a console each time its menu was drawn.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class AutostartError(Exception):
@@ -138,7 +140,7 @@ def _task_installed():
     try:
         result = subprocess.run(
             ["schtasks", "/Query", "/TN", TASK_NAME],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, timeout=20, creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -159,7 +161,7 @@ def install():
                 f.write(xml.encode("utf-16"))
             result = subprocess.run(
                 ["schtasks", "/Create", "/TN", TASK_NAME, "/XML", tmp_path, "/F"],
-                capture_output=True, text=True, timeout=20,
+                capture_output=True, text=True, timeout=20, creationflags=_NO_WINDOW,
             )
         finally:
             try:
@@ -182,7 +184,7 @@ def remove():
     try:
         result = subprocess.run(
             ["schtasks", "/Delete", "/TN", TASK_NAME, "/F"],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, timeout=20, creationflags=_NO_WINDOW,
         )
         if result.returncode == 0:
             removed.append("task")

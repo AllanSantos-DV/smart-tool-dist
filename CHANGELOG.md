@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.46 - beta
+
+- The interface speaks Portuguese and English. It follows the Windows display language (any Portuguese shows Brazilian
+  Portuguese, anything else English) until the user picks one: a globe button (PT/EN) in the header of the settings,
+  projects and map pages, and an "Idioma / Language" submenu in the tray, both saved as `language` in the config. The
+  settings and projects pages, including the text their scripts write, the tray menu, tooltip and notifications, the
+  Windows toasts, the folder picker and the update screen are translated; agent-facing text (tool answers, hook
+  messages) stays English. English is the catalog key (`locales/pt-BR.json`, read by `i18n.py`); the pages translate
+  their rendered text in the browser, and `tests/test_i18n.py` fails when a visible string has no entry.
+- Updating never opens a console window. "Check for updates" now says "Checking for updates…" in a Windows notification,
+  and an update shows its own small window with no buttons (`update_splash.py`): the version change, the current step
+  (downloading, copying files, installing dependencies…) and the result, in the interface language. The install command
+  runs with no console, so npm, the installer, pip, PowerShell and schtasks share one hidden console; its output goes to
+  `~/.smart-tool/data/update.log`, and a failed update says so on the screen and in a toast with the log path.
+- The tray menu no longer flashes console windows when it opens: its "Start with Windows" check ran `schtasks` from the
+  window-less tray without `CREATE_NO_WINDOW`.
+- The tray tells "Smart Tool updated from X to Y" also when the daemon started first after the update: both record the
+  new running version, and the tray keeps its own marker (`tray_told`) instead of needing to be the one that found it.
+
 ## 0.9.45 - beta
 
 - The Playwright MCP server starts on first use. What the clients register is now `lazy_mcp_proxy.py` around

@@ -1,5 +1,6 @@
 """Newer Smart Tool release on npm and the update itself: the tray checks npm at start and every 24 h and, when
-automatic updates are on (the default), runs the same install command a user would, in a visible console. A failed
+automatic updates are on (the default), runs the same install command a user would, behind the update screen
+(update_splash.py) and with no console window. A failed
 version is tried again after 24 h. What happened (newer version available, updated, update failed) is told to the
 user by the tray and to agent sessions by the daemon, from the state file, without contacting npm again.
 
@@ -8,12 +9,12 @@ newer-version notice still shows then, with the command to update by hand."""
 import json
 import os
 import subprocess
+import sys
 import time
 import urllib.request
 
 import atomic_io
 import config
-import node_locator
 import paths
 import version
 
@@ -102,6 +103,22 @@ def note_running_version(now=None):
     return found
 
 
+def update_for_tray(now=None):
+    """The update record (from, to, at) of the running version the first time the tray asks, whether the tray or the
+    daemon started first and recorded it; None when there is none, it is older than the updated notice, or the tray
+    already told it."""
+    note_running_version(now)
+    now = now or time.time()
+    state = _state()
+    updated = state.get("updated") or {}
+    if (updated.get("to") != version.VERSION or state.get("tray_told") == version.VERSION
+            or now - updated.get("at", 0) >= UPDATED_NOTICE_S):
+        return None
+    state["tray_told"] = version.VERSION
+    _save(state)
+    return updated
+
+
 def failed_update():
     """The version an automatic update went for and did not install (the previous version is still running), else
     None."""
@@ -136,15 +153,16 @@ def notices(now=None):
 
 
 def run_update(latest, automatic):
-    """Starts the install command in its own visible console, detached from the tray (the installer stops and restarts
-    the tray). The console closes on success and stays open with the error on failure. npx is looked up now, not in the
-    PATH the tray was born with: a Node installed or moved since the last logon still runs the update, and the folder
-    found is put first in the PATH the installer (and the tray it restarts) inherits."""
+    """Starts the update screen (update_splash.py) detached from the tray, which the installer stops and restarts:
+    it runs the install command with no console window and shows each step and the result. npx is looked up by the
+    screen when it starts, not in the PATH the tray was born with."""
     if automatic:
         state = _state()
         state.update(attempted=latest, at=time.time())
         _save(state)
-    flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    command = f'title Smart Tool update to {latest} && {UPDATE_COMMAND} || pause'
-    subprocess.Popen(["cmd.exe", "/c", command], creationflags=flags, close_fds=True,
-                     cwd=os.path.expanduser("~"), env=node_locator.environment(prefer=node_locator.which("npx.cmd")))
+    folder = os.path.dirname(os.path.abspath(__file__))
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    subprocess.Popen([pythonw if os.path.isfile(pythonw) else sys.executable, os.path.join(folder, "update_splash.py"),
+                      latest], creationflags=flags, close_fds=True, cwd=folder, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

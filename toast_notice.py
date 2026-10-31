@@ -74,13 +74,14 @@ def action_uri(action, **params):
 
 
 def toast_xml(title, lines, buttons):
-    """`buttons` is a list of (label, uri); each one launches its protocol link and closes the toast."""
+    """`buttons` is a list of (label, uri); each one launches its protocol link and closes the toast. An empty list
+    gives a toast without an actions element."""
     text = "".join(f"<text>{escape(line)}</text>" for line in [title, *lines])
     actions = "".join(
         f'<action content={quoteattr(label)} arguments={quoteattr(uri)} activationType="protocol"/>'
         for label, uri in buttons)
     return (f'<toast><visual><binding template="ToastGeneric">{text}</binding></visual>'
-            f'<actions>{actions}</actions></toast>')
+            + (f'<actions>{actions}</actions>' if actions else '') + '</toast>')
 
 
 def show(title, lines, buttons, tag=None):

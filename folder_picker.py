@@ -6,14 +6,16 @@ import threading
 import urllib.request
 import webbrowser
 
+import i18n
+
 _PICKER_LOCK = threading.Lock()
 
 
 def choose_folder():
     if os.name != "nt":
-        raise RuntimeError("Native folder selection is only available on Windows; enter the folder path.")
+        raise RuntimeError(i18n.t("Native folder selection is only available on Windows; enter the folder path."))
     if not _PICKER_LOCK.acquire(blocking=False):
-        raise ValueError("A folder picker is already open.")
+        raise ValueError(i18n.t("A folder picker is already open."))
     import ctypes
     from ctypes import wintypes
 
@@ -37,14 +39,14 @@ def choose_folder():
         label = ctypes.create_unicode_buffer(32768)
         info = BrowseInfo()
         info.pszDisplayName = ctypes.cast(label, wintypes.LPWSTR)
-        info.lpszTitle = "Smart Tool — select the folder to index"
+        info.lpszTitle = i18n.t("Smart Tool — select the folder to index")
         info.ulFlags = 0x0001 | 0x0040  # Diretórios reais; diálogo redimensionável.
         selected = shell.SHBrowseForFolderW(ctypes.byref(info))
         if not selected:
             return None
         path = ctypes.create_unicode_buffer(32768)
         if not shell.SHGetPathFromIDListEx(selected, path, len(path), 0):
-            raise ValueError("The selection is not an accessible folder.")
+            raise ValueError(i18n.t("The selection is not an accessible folder."))
         return path.value
     finally:
         if selected:
@@ -64,7 +66,7 @@ def register_from_tray():
         page = response.read().decode("utf-8")
     match = re.search(r'<meta name="setup-token" content="([a-zA-Z0-9_-]+)">', page)
     if not match:
-        raise RuntimeError("Reopen Smart Tool to load the updated projects page.")
+        raise RuntimeError(i18n.t("Reopen Smart Tool to load the updated projects page."))
     request = urllib.request.Request(url + "/setup/projects", method="POST",
         headers={"Content-Type": "application/json", "X-Setup-Token": match.group(1)},
         data=json.dumps({"action": "register", "project_root": root}).encode("utf-8"))

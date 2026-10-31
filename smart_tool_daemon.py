@@ -4163,6 +4163,7 @@ _SETUP_SAVES = {
     "/setup/gateway": setup_ui.handle_gateway_save,
     "/setup/autostart": setup_ui.handle_autostart_action,
     "/setup/contact": setup_ui.handle_contact_save,
+    "/setup/language": setup_ui.handle_language_save,
     "/setup/audit": setup_ui.handle_audit,
 }
 

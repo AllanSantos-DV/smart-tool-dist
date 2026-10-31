@@ -120,7 +120,7 @@ def _entry_changes(event, matcher, expected, groups):
     covered = str(group.get("matcher") or "").split("|")
     left_out = [tool for tool in matcher.split("|") if tool not in covered]
     if left_out:
-        changes.append(f"Its {event} entry does not cover " + ", ".join(left_out) + ".")
+        changes.append(f"Its {event} entry does not cover {', '.join(left_out)}.")
     found = next(hook for hook in group["hooks"] if _our_hook(hook))
     if _target(found) != _target(expected):
         changes.append(f"It calls {_target(found)} instead of {_target(expected)}.")
