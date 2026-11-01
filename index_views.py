@@ -5,12 +5,15 @@ import hashlib
 import os
 import shutil
 import subprocess
+import threading
 import time
 
 import project_identity
 
 _PINNED = contextvars.ContextVar('smart_index_view', default=None)
 _CACHE = {}
+_LOCKS = {}
+_LOCKS_GUARD = threading.Lock()
 
 
 class ViewChanged(RuntimeError):
@@ -54,15 +57,42 @@ def _stamp(view):
     return tuple(result)
 
 
+def _lock_for(key):
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(key, threading.Lock())
+
+
+def _validated(key):
+    """The cached view of `key` while it is still the current one: a Git view until the files that define it move (a stat
+    of five files, no process), a folder without Git for one second."""
+    old = _CACHE.get(key)
+    if not old:
+        return None
+    if old[1].get('git'):
+        return None if stamp_changed(old[1]) else old[1]
+    return old[1] if time.monotonic()-old[0] < 1 else None
+
+
 def describe(root, fresh=False):
+    """Git view of `root`. `fresh` asks for a check, not for a new resolution: a cached Git view whose stamp (HEAD, index,
+    logs/HEAD, packed-refs, the ref file) did not move is still the current one and costs no git process. Concurrent
+    callers of the same root share one resolution: the others wait for the lock and find the view it cached."""
     root = project_identity.display_root(root)
     key = project_identity.canonical_root(root)
     pinned = _PINNED.get()
     if pinned and pinned['root'] == key and not fresh:
         return pinned
-    old = _CACHE.get(key)
-    if not fresh and old and time.monotonic()-old[0] < 1:
-        return old[1]
+    cached = _validated(key)
+    if cached:
+        return cached
+    with _lock_for(key):
+        cached = _validated(key)
+        if cached:
+            return cached
+        return _resolve(root, key)
+
+
+def _resolve(root, key):
     view = {'root': key, 'git': False, 'view_id': 'workspace', 'label': 'Folder without Git',
             'branch': None, 'commit': None}
     if _git_marker(root):

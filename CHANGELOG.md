@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.48 - beta
+
+- Smart Tool spawns far fewer Git processes. A Git view (`index_views.describe`, `pin`) is now resolved once per
+  repository and reused while the files that define it (HEAD, index, logs/HEAD, packed-refs, the branch ref) have not
+  moved: a stat of five files instead of three `git.exe` per call, also for `fresh` and `pin`. Concurrent callers of the
+  same repository share one resolution. A checkout or commit still changes the stamp, so it is detected and
+  `assert_current` still discards a result computed on another branch (`tests/test_view_sharing.py`).
+
 ## 0.9.47 - beta
 
 - The update window names the browser check ("Checking the browsers…") while the installer verifies Camoufox and
