@@ -82,13 +82,13 @@ def _set_state(health, icon=None):
         icon.title = i18n.t(_TITLES[health])
 
 
-def _notify(icon, text, **values):
-    """Windows notification, translated (text is an English catalog key). A toast under Smart Tool's own app id,
-    since the tray balloon is shown as "Python"; when Windows refuses the toast, the balloon carries the text and the
-    refusal."""
+def _notify(icon, text, buttons=(), **values):
+    """Windows notification, translated (text is an English catalog key; buttons are (catalog key, protocol link)). A
+    toast under Smart Tool's own app id, since the tray balloon is shown as "Python"; when Windows refuses the toast,
+    the balloon carries the text and the refusal."""
     message = i18n.t(text, **values)
     try:
-        toast_notice.show("Smart Tool", [message], [])
+        toast_notice.show("Smart Tool", [message], [(i18n.t(label), uri) for label, uri in buttons])
     except Exception as exc:
         icon.notify(f"{message} ({exc})", "Smart Tool")
 
@@ -187,11 +187,13 @@ def _announce_start(icon):
     """Tells the user, once per start, that Smart Tool was just updated or that the last automatic update failed."""
     updated = update_check.update_for_tray()
     if updated:
-        _notify(icon, "Smart Tool updated from {old} to {new}.", old=updated["from"], new=updated["to"])
+        changes = (i18n.N_("What changed"), toast_notice.action_uri("open-changes"))
+        _notify(icon, "Smart Tool updated from {old} to {new}.", [changes], old=updated["from"], new=updated["to"])
     failed = update_check.failed_update()
     if failed:
+        log = (i18n.N_("View log"), toast_notice.action_uri("open-update-log"))
         _notify(icon, "The update to {target} failed; Smart Tool {version} is still installed. It is tried again in "
-                "24 h, or now from this menu.", target=failed, version=version.VERSION)
+                "24 h, or now from this menu.", [log], target=failed, version=version.VERSION)
 
 
 def _update_loop(icon):

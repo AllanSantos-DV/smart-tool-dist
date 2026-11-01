@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.47 - beta
+
+- The update window names the browser check ("Checking the browsers…") while the installer verifies Camoufox and
+  Chromium, the longest step of an update; before, it kept saying "Preparing Python…" until the end.
+- Update notifications carry a button. "Smart Tool updated from X to Y" opens what changed (the product page); a failed
+  update, on the update window's toast and on the tray's notice at the next start, opens the update log. Both are
+  fixed actions of `notice_action.py` (`open-changes`, `open-update-log`), never a link taken from the toast.
+
 ## 0.9.46 - beta
 
 - The interface speaks Portuguese and English. It follows the Windows display language (any Portuguese shows Brazilian

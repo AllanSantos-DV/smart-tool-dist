@@ -3,7 +3,7 @@ the interface language, then the result. Started by the tray (update_check.run_u
 <version>`; it outlives the tray, which the installer stops and starts again.
 
 The install command runs with CREATE_NO_WINDOW, so it and every console program it starts (node, the installer,
-pip, PowerShell, schtasks) share one hidden console. Its output goes to UPDATE_LOG; a failure shows the last line,
+pip, PowerShell, schtasks) share one hidden console. Its output goes to update_check.UPDATE_LOG; a failure shows the last line,
 the log path and a Windows notification, and the installer has already restored the previous version."""
 import os
 import queue
@@ -15,12 +15,10 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import i18n
 import node_locator
-import paths
 import toast_notice
 import update_check
 import version
 
-UPDATE_LOG = os.path.join(paths.DATA_DIR, "update.log")
 TIMEOUT_S = 20 * 60
 SUCCESS_CLOSE_MS = 4000
 FAILURE_CLOSE_MS = 15000
@@ -30,6 +28,8 @@ STEPS = (
     ("Downloading uv", i18n.N_("Downloading components…")),
     ("Preparing Python", i18n.N_("Preparing Python…")),
     ("TLS inspection", i18n.N_("Preparing Python…")),
+    ("Camoufox browser", i18n.N_("Checking the browsers…")),
+    ("Chromium browser", i18n.N_("Checking the browsers…")),
     ("Older Smart Tool installation found", i18n.N_("Removing an older installation…")),
     ("Updating Smart Tool at", i18n.N_("Copying the new files…")),
     ("Installing Smart Tool at", i18n.N_("Copying the new files…")),
@@ -56,12 +56,12 @@ def install_command():
 
 
 def run_install(lines):
-    """Runs the install command hidden, puts each output line on `lines`, writes them to UPDATE_LOG and returns
+    """Runs the install command hidden, puts each output line on `lines`, writes them to update_check.UPDATE_LOG and returns
     (exit code, last non-empty line). Kills the whole process tree after TIMEOUT_S."""
     command, npx = install_command()
-    os.makedirs(os.path.dirname(UPDATE_LOG), exist_ok=True)
+    os.makedirs(os.path.dirname(update_check.UPDATE_LOG), exist_ok=True)
     last = ""
-    with open(UPDATE_LOG, "w", encoding="utf-8") as log:
+    with open(update_check.UPDATE_LOG, "w", encoding="utf-8") as log:
         log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(command)}\n")
         with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
@@ -179,11 +179,11 @@ def main(argv):
                           i18n.t("This window closes by itself."))
             return
         detail = i18n.t("The update did not finish; version {version} is still installed.", version=version.VERSION)
-        splash.finish(False, i18n.t("Update not finished"), f"{detail}\n{outcome['last'][:180]}",
-                      i18n.t("Details in {path}", path=UPDATE_LOG))
+        where = i18n.t("Details in {path}", path=update_check.UPDATE_LOG)
+        splash.finish(False, i18n.t("Update not finished"), f"{detail}\n{outcome['last'][:180]}", where)
         try:
-            toast_notice.show(i18n.t("Smart Tool update not finished"), [detail, i18n.t("Details in {path}", path=UPDATE_LOG)],
-                              [], tag="update-failed")
+            toast_notice.show(i18n.t("Smart Tool update not finished"), [detail, where],
+                              [(i18n.t("View log"), toast_notice.action_uri("open-update-log"))], tag="update-failed")
         except Exception as exc:
             splash.note.config(text=f"{splash.note.cget('text')}\n{exc}")
 

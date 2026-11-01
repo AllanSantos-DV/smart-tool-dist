@@ -33,6 +33,14 @@ def run(uri):
         import daemon_launcher
         webbrowser.open(daemon_launcher.ensure_daemon_running().rstrip("/") + "/setup#" + params.get("section", "models"))
         return "setup opened"
+    if action == "open-update-log":
+        import update_check
+        os.startfile(update_check.UPDATE_LOG)
+        return "update log opened"
+    if action == "open-changes":
+        import update_check
+        webbrowser.open(update_check.SITE_URL)
+        return "changes opened"
     if action == "mute-model":
         import model_health
         return model_health.mute(params.get("model", ""))

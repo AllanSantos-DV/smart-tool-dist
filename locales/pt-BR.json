@@ -881,7 +881,10 @@
   "({0} sites)": "({0} sites)",
   "{0} skills": "{0} skills",
   ", {0} new": ", {0} novos",
-  "{0} {1} (~{2} tokens)": "{0} {1} (~{2} tokens)"
+  "{0} {1} (~{2} tokens)": "{0} {1} (~{2} tokens)",
+  "Checking the browsers…": "Verificando os navegadores…",
+  "View log": "Ver o log",
+  "What changed": "O que mudou"
  },
  "ignore": [
   "saved msg",

@@ -23,6 +23,7 @@ REGISTRY_URL = "https://registry.npmjs.org/@allansantos-dev%2Fsmart-tool/latest"
 UPDATE_COMMAND = f"npx --yes {PACKAGE}@latest install"
 SITE_URL = "https://allansantos-dv.github.io/smart-tool/"
 STATE_PATH = os.path.join(paths.DATA_DIR, "update-state.json")
+UPDATE_LOG = os.path.join(paths.DATA_DIR, "update.log")
 ENV_OPT_OUT = "SMART_TOOL_AUTO_UPDATE"
 RETRY_AFTER_S = 24 * 3600
 UPDATED_NOTICE_S = 24 * 3600
