@@ -16,6 +16,7 @@ import time
 
 import atomic_io
 import project_identity
+import project_store
 import index_views
 
 import model_client
@@ -532,6 +533,18 @@ def _exclude_matcher(exclude):
     return matches
 
 
+def _nested_matcher(root):
+    """Predicate "is this inside a registered project nested under root?", by exact path prefix: that project is
+    indexed on its own, so the folder holding it leaves it out. A folder elsewhere with the same name stays in."""
+    nested = tuple(path.lower() for path in project_store.nested_projects(root)) if root else ()
+
+    def inside(rel_path):
+        target = rel_path.replace("\\", "/").strip("/").lower()
+        return any(target == path or target.startswith(path + "/") for path in nested)
+
+    return inside
+
+
 def scope_filter(scope, root=None):
     """Predicate `keep(rel_path)`: whether resolve_included_files would list rel_path (a file) or walk it (a folder) —
     under an include base, outside the exclusions, outside hidden folders. Built once so a burst of file events does not
@@ -540,11 +553,12 @@ def scope_filter(scope, root=None):
     matcher = _exclude_matcher(set(scope.get("exclude") or []) | set(scope.get("user_exclude") or []) |
                                set(mechanical_excludes(root) if root else ()) | _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
     whole = "" in bases
+    nested = _nested_matcher(root)
 
     def keep(rel_path):
         rel_path = rel_path.replace("\\", "/")
         parts = rel_path.split("/")
-        if matcher(rel_path) or is_hidden(rel_path):
+        if matcher(rel_path) or is_hidden(rel_path) or nested(rel_path):
             return False
         if whole or len(parts) == 1:
             return True
@@ -563,11 +577,16 @@ def resolve_included_files(root, scope, cancel_check=None):
     if not valid_scope(scope):
         raise ValueError("Invalid scope; request a new project analysis.")
     include, _dropped = normalize_include(scope.get("include"))
-    matcher = _exclude_matcher(set(scope.get("exclude") or []) | set(scope.get("user_exclude") or []) |
-                               set(mechanical_excludes(root)) | _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
+    excluded = _exclude_matcher(set(scope.get("exclude") or []) | set(scope.get("user_exclude") or []) |
+                                set(mechanical_excludes(root)) | _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
+    nested = _nested_matcher(root)
+
+    def matcher(rel_path):
+        return excluded(rel_path) or nested(rel_path)
+
     files = []
     def walk_error(error):
-        raise OSError("Could not list a folder in the scope; try again when it is accessible.") from error
+        raise OSError(f"Could not list {error.filename} ({error.strerror}); try again when it is accessible.") from error
     if "" not in include:
         files.extend(_root_level_files(root, matcher))
     for base in include:
@@ -576,6 +595,8 @@ def resolve_included_files(root, scope, cancel_check=None):
         # repositório analisado: um valor absoluto ou com `..` faria a varredura sair do
         # projeto e mandar conteúdo de fora pro endpoint de embeddings.
         if not _within_root(root, base_full):
+            continue
+        if not os.path.lexists(base_full):
             continue
         if os.path.isfile(base_full):
             rel = os.path.relpath(base_full, root).replace(os.sep, "/")

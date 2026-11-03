@@ -382,7 +382,26 @@ def main():
         mark_updating(False)
     if not args.no_start:
         enable_browser_control(target, python)
+    for folder in prune_backups(target):
+        print(f"Removed the old copy {folder}.")
     print("Smart Tool ready." if not args.no_start else "Files installed; daemon not restarted (--no-start).")
+
+
+def prune_backups(target):
+    """After a successful install, deletes the copies of older versions beside target: `.smart-tool-backup-*` (kept by
+    an incomplete rollback) and `<target name>.bak-*` (copies made by hand before an update). Returns the removed
+    paths; a copy that cannot be removed is reported on stderr and kept."""
+    removed = []
+    for folder in sorted(target.parent.iterdir()):
+        if not folder.is_dir() or not (folder.name.startswith(".smart-tool-backup-") or
+                                       folder.name.startswith(target.name + ".bak-")):
+            continue
+        try:
+            shutil.rmtree(folder)
+            removed.append(str(folder))
+        except OSError as exc:
+            print(f"Could not remove the old copy {folder}: {exc}", file=sys.stderr)
+    return removed
 
 
 def _update(args, target, files, existed, python, pythonw):

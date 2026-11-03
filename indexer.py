@@ -14,6 +14,7 @@ import os
 import paths
 import re
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -21,6 +22,8 @@ from pathlib import Path
 
 import atomic_io
 import project_identity
+import index_scope
+import project_store
 import index_views
 import embedding_cache
 import document_text
@@ -87,6 +90,23 @@ SKIP_GRAPHIC = "large svg graphic"
 SKIP_BINARY = "binary"
 SKIP_MINIFIED = "minified"
 SKIP_UNREADABLE = "unreadable"
+SKIP_OUT_OF_RANGE = "date or size outside what the index stores"
+# SQLite INTEGER is a signed 64-bit value: a file dated past 2262 (or before 1677) has an st_mtime_ns beyond it.
+_SQLITE_INTEGER = range(-2**63, 2**63)
+# A removal that leaves this much free space in an index file is followed by VACUUM: with secure_delete the freed
+# pages are zeroed but the file keeps its size until compacted.
+COMPACT_MIN_FREE_BYTES = 8 * 1024 * 1024
+COMPACT_MIN_FREE_SHARE = 0.25
+# Where notices about a skipped file or a recovered index go; the daemon points this at daemon.log.
+NOTICE = None
+
+
+def _notice(message):
+    """Sends one diagnostic line to NOTICE (daemon.log when the daemon runs), or to stderr without a daemon."""
+    if NOTICE is None:
+        print(message, file=sys.stderr)
+    else:
+        NOTICE(message)
 
 
 LEXICAL_MODEL = "lexical"
@@ -207,20 +227,48 @@ def existing_db_path(root):
 
 
 def _readonly(path):
+    """Read-only connection to an index. A rollback journal left by a crashed writer (a hot journal) cannot be rolled
+    back by a read-only connection, which then fails every read with "attempt to write a readonly database": the
+    journal is rolled back once through a read-write connection, logged, and the read-only open is retried."""
+    conn = sqlite3.connect(Path(path).absolute().as_uri() + "?mode=ro", uri=True, timeout=10)
+    try:
+        conn.execute("PRAGMA schema_version").fetchone()
+        return conn
+    except sqlite3.OperationalError as exc:
+        conn.close()
+        journal = str(path) + "-journal"
+        if "readonly" not in str(exc) or not os.path.isfile(journal):
+            raise
+        size = os.path.getsize(journal)
+        writer = sqlite3.connect(path, timeout=10)
+        try:
+            writer.execute("PRAGMA schema_version").fetchone()
+        finally:
+            writer.close()
+        _notice(f"index {os.path.basename(str(path))}: rolled back the {size}-byte journal a crashed write left behind")
     return sqlite3.connect(Path(path).absolute().as_uri() + "?mode=ro", uri=True, timeout=10)
 
 
 def _backup(source, target):
+    """Consistent copy of the index at source into target, through a temporary file removed if the copy fails."""
     target = project_identity.state_path(target, INDEX_DIR)
     temp = atomic_io.tmp_path_for(target)
-    src, dst = _readonly(source), sqlite3.connect(temp)
     try:
-        src.backup(dst)
-        dst.commit()
-    finally:
-        src.close()
-        dst.close()
-    atomic_io.atomic_replace(temp, target)
+        src = _readonly(source)
+        try:
+            dst = sqlite3.connect(temp)
+            try:
+                src.backup(dst)
+                dst.commit()
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        atomic_io.atomic_replace(temp, target)
+    except BaseException:
+        if os.path.exists(temp):
+            os.remove(temp)
+        raise
 
 
 def migrate_legacy(root):
@@ -513,6 +561,8 @@ def _stat_candidate(root, rel):
         return None, SKIP_TOO_LARGE
     if name.endswith(".svg") and stat.st_size > MAX_SVG_INDEXABLE_BYTES:
         return None, SKIP_GRAPHIC
+    if stat.st_mtime_ns not in _SQLITE_INTEGER or stat.st_size not in _SQLITE_INTEGER:
+        return None, SKIP_OUT_OF_RANGE
     return (stat.st_mtime_ns, stat.st_size), None
 
 
@@ -620,6 +670,10 @@ def _reindex(root, included_paths, embed_batch, chunk_lines=CHUNK_LINES, on_prog
             stat, reason = _stat_candidate(root, rel)
             if stat is None:
                 stats["skipped"][reason] = stats["skipped"].get(reason, 0) + 1
+                if reason == SKIP_OUT_OF_RANGE:
+                    stats.setdefault("out_of_range", []).append(rel)
+                    _notice(f"index {root}: skipped {rel}: its date or size is outside the 64-bit range SQLite stores; "
+                            "fix the file's date to index it")
                 continue
             observed[rel] = stat
             force_file = any(rel.casefold() == p or rel.casefold().startswith(p + "/") for p in forced)
@@ -724,6 +778,8 @@ def _reindex(root, included_paths, embed_batch, chunk_lines=CHUNK_LINES, on_prog
         if building or stats["added"] or stats["changed"] or stats["removed"]:
             _set_metadata(conn, {"updated_at": time.time()})
         conn.commit()
+        if stats["removed"] and not building:
+            _compact(conn)
         stats.update(generation=generation, dimensions=dimensions,
                      embedded_chunks=cache.misses, reused_chunks=cache.hits,
                      embedded_characters=cache.characters, view=index_views.public(view),
@@ -738,14 +794,57 @@ def _reindex(root, included_paths, embed_batch, chunk_lines=CHUNK_LINES, on_prog
             cache.close()
     check()
     if building and not stats["failed"]:
-        if os.path.isfile(target):
-            _backup(target, target[:-8] + ".previous.sqlite3")
         atomic_io.atomic_replace(work_path, project_identity.state_path(target, INDEX_DIR))
     stats["ready"] = not bool(stats["failed"])
     stats["path"] = target if stats["ready"] else work_path
     if building or total or stats["removed"] or full_check:
         invalidate_cache(root)
+    _trim_other_views(root, target)
     return stats
+
+
+def _trim_other_views(root, target):
+    """Drops, from the project's other Git views, the files of projects registered inside root (their own index holds
+    them; target already left them out through its scope), then compacts each view left mostly free. A view another
+    process holds is logged and trimmed at the next update. Runs on every update, changed files or not, so views written
+    before the inner project was registered are trimmed too; reading the paths is an index scan per view."""
+    if not project_store.nested_projects(root):
+        return
+    nested = index_scope._nested_matcher(root)
+    key = project_identity.project_id(root)
+    for name in sorted(os.listdir(INDEX_DIR)):
+        path = os.path.join(INDEX_DIR, name)
+        if (not name.startswith(key + ".v-") or not name.endswith(".sqlite3") or ".building-" in name
+                or ".previous." in name or os.path.normcase(path) == os.path.normcase(target)):
+            continue
+        conn = sqlite3.connect(path, timeout=10)
+        try:
+            conn.execute("PRAGMA secure_delete=ON")
+            states = conn.execute("SELECT 1 FROM sqlite_master WHERE name='file_state'").fetchone()
+            for (rel,) in conn.execute("SELECT path FROM manifest UNION SELECT DISTINCT path FROM chunks").fetchall():
+                if nested(rel):
+                    remove_file(conn, rel)
+                    if states:
+                        conn.execute("DELETE FROM file_state WHERE path = ?", (rel,))
+            conn.commit()
+            _compact(conn)
+        except sqlite3.OperationalError as exc:
+            _notice(f"index {name}: other view not trimmed now ({exc}); it is trimmed at the next update")
+        finally:
+            conn.close()
+
+
+def _compact(conn):
+    """VACUUM when the removals left at least COMPACT_MIN_FREE_BYTES and COMPACT_MIN_FREE_SHARE of the file free."""
+    page = conn.execute("PRAGMA page_size").fetchone()[0]
+    free = conn.execute("PRAGMA freelist_count").fetchone()[0] * page
+    total = conn.execute("PRAGMA page_count").fetchone()[0] * page
+    if free >= COMPACT_MIN_FREE_BYTES and free >= COMPACT_MIN_FREE_SHARE * total:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='chunks_fts'").fetchone():
+            # FTS5 records a deletion as a tombstone; merging the segments drops the deleted text for good.
+            conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')")
+            conn.commit()
+        conn.execute("VACUUM")
 
 
 def _vector_rows(root, path):
@@ -965,28 +1064,6 @@ def graph_cache_path(view_path):
     """Where code_graph keeps the saved analysis of one index view (graph-cache/<view>.json.gz next to it)."""
     return os.path.join(os.path.dirname(view_path), "graph-cache",
                         os.path.basename(view_path).removesuffix(".sqlite3") + ".json.gz")
-
-
-def remove_index(root):
-    """Remove somente arquivos de índice da raiz conhecida, nunca arquivos do projeto."""
-    import glob
-    removed = []
-    for key in set([project_identity.project_id(root), *project_identity.legacy_ids(root)]):
-        pattern = re.compile(re.escape(key) + r"(?:\.v-[a-f0-9]{16})?(?:\.previous|\.building-[a-f0-9]+|\.vectors)?\.sqlite3$")
-        for path in glob.glob(os.path.join(INDEX_DIR, key + "*.sqlite3")):
-            if pattern.fullmatch(os.path.basename(path)):
-                safe = project_identity.state_path(path, INDEX_DIR)
-                try:
-                    os.remove(safe)
-                except PermissionError as exc:
-                    raise RuntimeError("The index is open in another process. Close the external reader and try removing it again.") from exc
-                removed.append(safe)
-                try:
-                    os.remove(graph_cache_path(safe))
-                except FileNotFoundError:
-                    pass
-    invalidate_cache(root)
-    return removed
 
 
 def copy_project_indexes(root, destination):

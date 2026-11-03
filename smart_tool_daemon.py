@@ -42,6 +42,7 @@ import install_runtime
 import integration_metrics
 import node_locator
 import config
+import disk_cleanup
 import freshness
 import model_client
 import index_scope
@@ -844,6 +845,8 @@ def _log(message):
         except (OSError, ValueError):
             pass
 
+
+indexer.NOTICE = _log
 
 _WEB_WARNINGS = contextvars.ContextVar("web_warnings", default=None)
 _WEB_TRACE = contextvars.ContextVar("web_trace", default=None)
@@ -2318,14 +2321,10 @@ def _project_action_locked(arguments):
         if active:
             raise ValueError("Cancel the jobs and wait for them to stop before removing the index.")
         project_store.update(key, watch=False, paused=True, enabled=False)
-        removed = indexer.remove_index(project["root"])
-        import glob
-        for scope_id in set([key, *project_identity.legacy_ids(project["root"])]):
-            for path in glob.glob(os.path.join(index_scope.SCOPE_DIR, scope_id + '*.scope.json')):
-                if re.fullmatch(re.escape(scope_id) + r'(?:\.v-[a-f0-9]{16})?\.scope\.json', os.path.basename(path)):
-                    os.remove(project_identity.state_path(path, index_scope.SCOPE_DIR))
+        removed = disk_cleanup.remove_project_files(project["root"])
         project_store.forget(key)
-        return {"removed_index_files": len(removed), "source_files_preserved": True}
+        return {"removed_index_files": len(removed["files"]), "removed_bytes": removed["bytes"],
+                "source_files_preserved": True}
     elif action == "relocate":
         if active:
             raise ValueError("Wait for the jobs to stop before relocating the folder.")
@@ -4569,6 +4568,7 @@ def main():
     threading.Thread(target=_heal_browser_control, daemon=True).start()
     try:
         recovered = project_store.recover_interrupted()
+        disk_cleanup.sweep([WEB_FETCH_VECTOR_ROOT], _log)
         project_store.import_known_legacy(indexer.INDEX_DIR)
         _PROJECT_MONITOR = project_monitor.ProjectMonitor(_enqueue_monitored_project)
         _PROJECT_MONITOR.start()

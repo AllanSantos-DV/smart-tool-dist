@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.9.54 - beta
+
+- A folder whose subfolders are projects is not indexed as one project. When it has no `.git` of its own and two or
+  more subfolders are registered projects or Git repositories, `smart_search`, `smart_scout` and `project_manage
+  action=register` fail naming those subfolders and asking for one of them as `project_root`; such a folder already
+  registered is unregistered and its index removed when the daemon starts. A project registered inside another is left
+  out of the outer one's scope, so the same files are no longer indexed twice; at its next update the outer index drops
+  their chunks from the current Git view and from the other views kept for that folder, compacting each view left
+  mostly free (`tests/test_disk_waste.py`).
+- A folder of the indexing scope that was deleted no longer fails every indexing attempt of the project: it is left out
+  and the rest of the scope is indexed. A folder that cannot be listed fails naming it and the reason
+  (`tests/test_disk_waste.py`).
+- A file whose date or size does not fit SQLite's 64-bit integer (a date past the year 2262) no longer fails every
+  indexing attempt with `OverflowError`: it is skipped by name with a `daemon.log` line saying how to index it, and the
+  rest of the folder is indexed. An index left with the journal of a write the daemon did not finish is rolled back on
+  the next read, with a log line, instead of failing as read-only on every attempt (`tests/test_disk_waste.py`).
+- Disk left behind. A replaced index generation is no longer kept as `.previous.sqlite3` (nothing read it). An index
+  that lost at least 8 MB and a quarter of its pages to removed files is compacted (FTS optimize and `VACUUM`) after the
+  update. When the daemon starts it removes write temporaries orphaned by a crash, generations under construction
+  untouched for 7 days, the old `.previous` copies, the index files of folders that are not registered and saved graphs
+  of views that no longer exist; a registered folder it cannot list is logged and the rest of the cleanup goes on. The
+  installer removes `SmartTool.bak-*` and `.smart-tool-backup-*` copies next to the installation after the new version
+  is installed. `project_manage action=remove` reports the files and bytes it removed
+  (`tests/test_disk_waste.py`, `tests/test_graph_cache.py`).
+
 ## 0.9.53 - beta
 
 - An update started in the first minutes after a release finds it. The update screen and the manual command in the

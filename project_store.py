@@ -38,10 +38,50 @@ def _db():
         db.close()
 
 
+CONTAINER_MIN_PROJECTS = 2
+
+
+def project_subfolders(root):
+    """Names of the immediate subfolders of root that are projects: registered, or holding a `.git` folder or file."""
+    registered = {project_identity.canonical_root(p["root"]) for p in all_projects()}
+    names = []
+    with os.scandir(root) as entries:
+        for entry in entries:
+            if entry.name.startswith(".") or not entry.is_dir():
+                continue
+            if (project_identity.canonical_root(entry.path) in registered or
+                    os.path.exists(os.path.join(entry.path, ".git"))):
+                names.append(entry.name)
+    return sorted(names)
+
+
+def container_error(root):
+    """Why root cannot be one project, or None: a folder without its own `.git` whose subfolders are at least
+    CONTAINER_MIN_PROJECTS projects holds projects (each indexed on its own); indexing it would store them twice."""
+    if os.path.exists(os.path.join(root, ".git")):
+        return None
+    names = project_subfolders(root)
+    if len(names) < CONTAINER_MIN_PROJECTS:
+        return None
+    shown = ", ".join(names[:8]) + (", ..." if len(names) > 8 else "")
+    return (f"{root} is a folder of {len(names)} projects ({shown}), not one project: "
+            "pass the folder of one of them as project_root.")
+
+
+def nested_projects(root):
+    """Paths, relative to root with forward slashes, of the registered projects strictly inside root."""
+    base = project_identity.canonical_root(root)
+    inner = (project_identity.canonical_root(p["root"]) for p in all_projects())
+    return sorted(os.path.relpath(path, base).replace(os.sep, "/") for path in inner if path.startswith(base + os.sep))
+
+
 def register(root, watch=None):
     display = project_identity.display_root(root)
     if not os.path.isdir(display):
         raise ValueError("The project folder does not exist or is not accessible.")
+    refused = container_error(display)
+    if refused:
+        raise ValueError(refused)
     key = project_identity.project_id(display)
     with _LOCK, _db() as db:
         row = db.execute("SELECT data FROM projects WHERE id=?", (key,)).fetchone()
