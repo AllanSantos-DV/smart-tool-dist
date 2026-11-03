@@ -11,11 +11,13 @@ import urllib.parse
 import webbrowser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import atomic_io
 import model_upgrade
 import paths
 import toast_notice
 
 LOG_PATH = os.path.join(paths.DATA_DIR, "notice-actions.log")
+LOG_MAX_BYTES = 256 * 1024
 
 
 def run(uri):
@@ -48,7 +50,9 @@ def run(uri):
 
 
 def main(argv):
-    """Runs the link in `argv[1]` and logs the outcome; returns the process exit code (0 done, 1 refused)."""
+    """Runs the link in `argv[1]` and logs the outcome; returns the process exit code (0 done, 1 refused). The link
+    comes from whatever opened the protocol, so its line breaks are joined: one entry is one line. The log keeps one
+    previous generation (`notice-actions.log.1`) past LOG_MAX_BYTES."""
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -57,8 +61,9 @@ def main(argv):
     except Exception as exc:
         line = f"{stamp} FAIL {argv[1] if len(argv) > 1 else ''} -> {type(exc).__name__}: {exc}"
         code = 1
+    atomic_io.rotate(LOG_PATH, LOG_MAX_BYTES)
     with open(LOG_PATH, "a", encoding="utf-8") as log:
-        log.write(line + "\n")
+        log.write(" ".join(line.split()) + "\n")
     return code
 
 

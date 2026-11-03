@@ -51,12 +51,14 @@ def step_for(line):
 
 def install_command(target):
     """argv of the update: the npx command a user types, through cmd.exe because npx is a .cmd script, for the version
-    the tray announced. `@latest` would let npx reuse an older package from its cache and install that instead, and
-    --expect-version makes the installer refuse a package that is not that version."""
+    the tray announced. `@latest` would let npx reuse an older package from its cache and install that instead;
+    --prefer-online makes npm ask the registry for the package's version list, which in the first minutes after a
+    publication its cache does not yet have (ETARGET); --expect-version makes the installer refuse a package that is
+    not that version."""
     npx = node_locator.which("npx.cmd")
     if not npx:
         raise RuntimeError(i18n.t("Node.js (npx) was not found; install Node.js and try again."))
-    return ["cmd.exe", "/d", "/c", npx, "--yes", f"{update_check.PACKAGE}@{target}", "install",
+    return ["cmd.exe", "/d", "/c", npx, "--yes", "--prefer-online", f"{update_check.PACKAGE}@{target}", "install",
             "--expect-version", target], npx
 
 
@@ -97,6 +99,15 @@ def run_install(lines, target):
                 timer.cancel()
         log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} exit {code}\n")
     return code, last
+
+
+def log_line(text):
+    """Appends text as one line to update_check.UPDATE_LOG: what the window shows only until it closes stays there."""
+    try:
+        with open(update_check.UPDATE_LOG, "a", encoding="utf-8") as log:
+            log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(str(text).split())}\n")
+    except OSError:
+        pass  # the window note already shows it; a log that cannot be written must not hide the outcome
 
 
 def _single_instance():
@@ -212,6 +223,7 @@ def main(argv):
                               [(i18n.t("View log"), toast_notice.action_uri("open-update-log"))], tag="update-failed")
         except Exception as exc:
             splash.note.config(text=f"{splash.note.cget('text')}\n{exc}")
+            log_line(f"Windows notification not shown: {type(exc).__name__}: {exc}")
 
     splash.root.after(200, pump)
     splash.root.mainloop()

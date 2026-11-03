@@ -43,8 +43,9 @@ def newer_version(timeout=10):
 
 def update_command(target):
     """The npx command that installs version target, as told to the user and to agent sessions. Pinned rather than
-    `@latest`, which lets npx reuse an older package from its cache."""
-    return f"npx --yes {PACKAGE}@{target} install"
+    `@latest`, which lets npx reuse an older package from its cache; --prefer-online because npm's cached version list
+    does not have a release published minutes ago and fails with ETARGET."""
+    return f"npx --yes --prefer-online {PACKAGE}@{target} install"
 
 
 def env_opted_out():

@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw
 import pystray
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import atomic_io
 import autostart
 import config
 import daemon_launcher
@@ -37,6 +38,7 @@ NOTICE_RETRY_S = 15
 UPDATE_RETRY_S = 300
 NOTICE_UNREACHABLE_LOG_S = 600
 LOG_PATH = os.path.join(paths.DATA_DIR, "tray.log")
+LOG_MAX_BYTES = 256 * 1024
 SETUP_URL = "http://127.0.0.1:8765/setup"
 
 _STATE_LOCK = threading.Lock()
@@ -181,11 +183,13 @@ def _show_notices(icon, notices):
 
 def _log(text):
     """Appends a line to `tray.log` in the data folder: what the tray cannot tell with a notification (a notice that could
-    not be fetched or shown) is kept where the user can read it, never turned into another notification."""
+    not be fetched or shown) is kept where the user can read it, never turned into another notification. One line per
+    entry (an exception text with line breaks is joined) and one previous generation (`tray.log.1`) past LOG_MAX_BYTES."""
     try:
         os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        atomic_io.rotate(LOG_PATH, LOG_MAX_BYTES)
         with open(LOG_PATH, "a", encoding="utf-8") as log:
-            log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}\n")
+            log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(str(text).split())}\n")
     except OSError:
         pass  # no console and no other channel here; a full disk must not kill the notice thread
 

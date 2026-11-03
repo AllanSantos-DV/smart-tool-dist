@@ -19,7 +19,8 @@ const PYTHON_DIR = join(RUNTIME_DIR, "python");
 const USAGE = `Usage: npx @allansantos-dev/smart-tool@<version> install [--target DIR] [--no-start] [--skip-deps]
 
 Installs or updates Smart Tool for this Windows user. To update, run it again with the version to install in place of
-<version>: a pinned version keeps npx from reusing an older package from its cache.`;
+<version>: a pinned version keeps npx from reusing an older package from its cache. For a version published minutes
+ago, add --prefer-online before the package name so npm asks the registry instead of its cached version list.`;
 
 function fail(message) {
   throw new Failure(message);

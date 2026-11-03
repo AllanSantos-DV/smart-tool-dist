@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.53 - beta
+
+- An update started in the first minutes after a release finds it. The update screen and the manual command in the
+  update notices run `npx --yes --prefer-online @allansantos-dev/smart-tool@<version> install`: without
+  `--prefer-online`, npm answered from the version list in its cache, fetched before the release, and the update ended
+  in `npm error code ETARGET ... No matching version found` although the tray had already seen that version on npm
+  (`tests/test_update_splash.py`, `tests/test_update_check.py`, `tests/test_node_locator.py`). The README and the
+  wrapper usage text (`npx @allansantos-dev/smart-tool`) say so for an update by hand.
+- The product page is published only once npm lists the version it shows: `release/pages.py wait-npm` reads the
+  registry until the version in `version.py` is there (up to 60 min, then the Pages job fails) and runs before
+  `publish`. The page used to go live from the push to `main` and right after the release pushed the package, minutes
+  before npm served it, so its pinned install command ended in "No matching version found" (`tests/test_pages.py`).
+- `tray.log` and `notice-actions.log` keep one previous generation (`.1`) past 256 KB and write each entry on one line:
+  the link a toast button hands to `notice_action.py` can no longer add lines of its own. A Windows notification the
+  update window could not show is also written to `update.log`, not only to the window that closes by itself
+  (`tests/test_tray_notices.py`, `tests/test_model_upgrade.py`, `tests/test_update_splash.py`).
+
 ## 0.9.52 - beta
 
 - Actionable setup audit. Every finding of `setup_audit.py` carries an `action`: the file and edit, the command to run
