@@ -1600,6 +1600,8 @@ function patternRow(item, actions, selectable) {
   buttons.style.marginTop = "0";
   for (const [decision, label] of actions) buttons.appendChild(button(label, "small", () => decidePatterns([item.id], decision, label)));
   const meta = node("div", "pattern-meta");
+  if (!selectable) meta.appendChild(node("span", "pattern-mode", item.mode === "instruct" ? "Tip only, does not block" : "Blocks"));
+  if (item.accepted_by === "agent") meta.appendChild(node("span", "pattern-mode", "Decided by an agent"));
   meta.append(reach, buttons);
   const main = node("div");
   main.append(body, meta);
@@ -1652,7 +1654,7 @@ function renderPatterns(patterns) {
     accept.disabled = reject.disabled = !count;
     bulk.append(selectPage, accept, reject);
     const list = node("ul", "pattern-list");
-    for (const item of view.rows) list.appendChild(patternRow(item, [["accept", "Accept"], ["reject", "Reject"]], true));
+    for (const item of view.rows) list.appendChild(patternRow(item, [["accept", "Accept"], ["instruct", "Tip only"], ["reject", "Reject"]], true));
     if (!view.rows.length) list.appendChild(node("li", "hint", "No proposal matches the filter."));
     const pager = node("div", "actions pager");
     const prev = button("Previous", "", () => { patternView.page -= 1; renderPatterns(lastPatterns); });
@@ -1669,7 +1671,7 @@ function renderPatterns(patterns) {
     const blocking = node("details", "more");
     blocking.open = patternView.open;
     blocking.addEventListener("toggle", () => { patternView.open = blocking.open; });
-    blocking.appendChild(node("summary", "", "Patterns you accepted, blocking now (" + patterns.accepted.length + ")"));
+    blocking.appendChild(node("summary", "", "Patterns you accepted (" + patterns.accepted.length + ")"));
     const list = node("ul", "pattern-list");
     for (const item of patterns.accepted) list.appendChild(patternRow(item, [["remove", "Remove"]], false));
     blocking.appendChild(list);

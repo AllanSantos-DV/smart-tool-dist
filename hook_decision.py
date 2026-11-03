@@ -163,6 +163,16 @@ def web_message(client, tool_name, url, why):
             f"{_load_hint(client, tool)} Do not fetch it through {fetchers}: that bypasses the rule.")
 
 
+def instruct_message(client, tool_name, target, reason, cwd):
+    """Tip for a call matching an accepted pattern in mode instruct: the call runs; the text names the smart_search
+    call that answers searches like it, with project_root from the folder the call reads."""
+    root = _search_root(target, cwd).replace("\\", "/")
+    return (f"This {tool_name} call {clean_reason(reason)}. Searches like it are answered by "
+            f'{_tool_name(client, "smart_search")}: project_root="{root}", query_identifiers = what you are looking '
+            f"for in identifier terms (plus query_comments when the project has two languages)."
+            f'{_load_hint(client, "smart_search")}')
+
+
 def advise(reason):
     """Same routing advice without blocking: the agent sees it next to the tool result and decides next time."""
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
@@ -410,7 +420,13 @@ def _route(payload, client, web_route, cfg):
         except Exception:
             pass
         return {"systemMessage": f"Smart Tool unavailable, routing skipped: {type(exc).__name__}"}
-    if decision != "redirect" or (tool_name in tool_redirect.NO_OP and tool_input.get("run_in_background")):
+    if tool_name in tool_redirect.NO_OP and tool_input.get("run_in_background"):
+        return {}
+    if decision == "instruct":
+        if not agent_has_smart_tool(payload.get("agent_type") if payload.get("agent_id") else None, cwd):
+            return {}
+        return advise(instruct_message(client, tool_name, target, reason, cwd))
+    if decision != "redirect":
         return {}
     terms = redirect_rule.search_terms(tool_name, tool_input)
     arguments = {"project_root": _search_root(target, cwd), "query_identifiers": terms,

@@ -66,6 +66,7 @@ import research_metrics
 import research_cache
 import router
 import setup_audit
+import block_patterns
 import setup_ui
 import site_memory
 import web_search_adapters
@@ -360,10 +361,12 @@ SERVER_INSTRUCTIONS = (
 TOOLS = [
     {
         "name": "project_manage",
-        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project; status shows storage, scope and jobs. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; mode=last returns the stored report instead of auditing again. Jobs via smart_search_result.",
+        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project; status shows storage, scope and jobs. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. Jobs via smart_search_result.",
         "inputSchema": {
             "type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "affected_tests", "setup_audit"]},
+                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "affected_tests", "setup_audit", "redirect_proposals", "redirect_decide"]},
+                "ids": {"type": "array", "items": {"type": "string"}, "description": "redirect_decide: proposal ids from redirect_proposals (accepted ids for remove)"},
+                "decision": {"type": "string", "enum": ["accept", "instruct", "reject", "remove"], "description": "redirect_decide: accept redirects matching calls to smart_search; instruct lets them run with a tip naming smart_search; reject discards; remove deletes an accepted pattern"},
                 "finding_id": {"type": "string"},
                 "reason": {"type": "string", "enum": ["false_positive", "intentional"]},
                 "note": {"type": "string"},
@@ -1621,20 +1624,75 @@ def _mark_notice_delivered(job_id):
 
 
 def _pending_notices(session, client, project_root):
-    """[(key, text)] the session has not been told yet: the hook state (once) and the stored setup audit of the
-    searched folder (once per folder, only with errors or warnings, and not when the SessionStart audit hook already
-    reports it at the start of the session)."""
+    """[(key, text)] the session has not been told yet: the hook state (once), the stored setup audit of the
+    searched folder (once per folder, only with errors or warnings) and the redirect proposals waiting for a decision
+    (once), these two not when the SessionStart audit hook already reports them at the start of the session. An
+    unreadable audit report is logged, not raised, so a search never fails over it."""
     delivered = session.get("notices_delivered") or set()
     pending = []
     if session["hook_notice"] and "hook" not in delivered:
         pending.append(("hook", session["hook_notice"]))
     pending += [(key, f"{text} Tell the user.") for key, text in _update_notices() if key not in delivered]
     key = "audit:" + setup_audit.index_key(project_root)
-    if key not in delivered and not client_hooks.audit_hook_installed(client):
-        text = setup_audit.session_notice(project_root)
+    if (key not in delivered or "proposals" not in delivered) and not client_hooks.audit_hook_installed(client):
+        try:
+            text = setup_audit.session_notice(project_root) if key not in delivered else ""
+        except Exception as exc:
+            _log(f"setup audit notice not read: {type(exc).__name__}: {exc}")
+            text = ""
         if text:
             pending.append((key, text))
+        proposals = _proposals_notice() if "proposals" not in delivered else ""
+        if proposals:
+            pending.append(("proposals", proposals))
     return pending
+
+
+def _proposals_notice():
+    """One line for the agent when redirect proposals wait for a decision, "" when none; an unreadable store is
+    logged, not raised, so neither a search nor a session start fails over it."""
+    try:
+        count, _top = block_patterns.pending(0)
+    except Exception as exc:
+        _log(f"redirect proposals not read: {type(exc).__name__}: {exc}")
+        return ""
+    if not count:
+        return ""
+    return (f"{count} Smart Tool redirect proposal(s) wait for a decision (no need to interrupt the user's task for "
+            "them): list and decide them with project_manage action=redirect_proposals.")
+
+
+REDIRECT_GUIDE = (
+    "Decide each proposal from its pattern, example and history_matches (logged calls it would have matched): "
+    "accept (mode redirect: matching calls go to smart_search) when the pattern only matches searches or bulk reads "
+    "over a folder that smart_search answers; instruct (the calls run and the agent gets a tip naming smart_search) "
+    "when it also matches calls whose shell output is needed, or when unsure; reject when it matches commands that "
+    "change files, read one known file or are not searches. Then call project_manage action=redirect_decide with ids "
+    "and decision; remove undoes an accepted one.")
+
+
+def _redirect_action(arguments):
+    """redirect_proposals: the proposals waiting for a decision, most matched first, with the guide to decide them;
+    redirect_decide: accept, instruct, reject (proposals) or remove (accepted) the given ids, recorded as decided by an
+    agent."""
+    if arguments["action"] == "redirect_proposals":
+        limit = arguments.get("limit", 30)
+        if not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("redirect_proposals limit must be an integer from 1 to 200.")
+        count, top = block_patterns.pending(limit)
+        accepted = block_patterns.load()["accepted"]
+        fields = ("id", "tool", "pattern", "reason", "example", "history_matches", "history_total")
+        return {"pending": count, "shown": len(top),
+                "accepted": {mode: sum(e["mode"] == mode for e in accepted) for mode in block_patterns.MODES},
+                "proposals": [{f: entry.get(f) for f in fields} for entry in top], "guide": REDIRECT_GUIDE}
+    ids, decision = arguments.get("ids"), arguments.get("decision")
+    if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
+        raise ValueError("redirect_decide needs ids: the proposal ids listed by action=redirect_proposals.")
+    if decision not in block_patterns.DECISIONS:
+        raise ValueError(f"redirect_decide decision must be one of {', '.join(block_patterns.DECISIONS)}.")
+    data = block_patterns.decide_proposals(ids, decision, decided_by="agent")
+    return {"decided": len(set(ids)), "decision": decision, "pending": len(data["proposals"]),
+            "accepted": {mode: sum(e["mode"] == mode for e in data["accepted"]) for mode in block_patterns.MODES}}
 
 
 def _update_notices():
@@ -1695,7 +1753,7 @@ def _smart_search_arguments(arguments):
     if session is not None:
         notices = _pending_notices(session, client, project_root)
         if notices:
-            arguments["setup_notice"] = " ".join(text for _key, text in notices)
+            arguments["setup_notice"] = "\n".join(text for _key, text in notices)
             arguments["setup_notice_keys"] = [key for key, _text in notices]
     _metric("search", group=group, top_k=limits, query_comments=bool(comments), single_language_reason=reason)
     return arguments
@@ -2006,6 +2064,8 @@ def _project_summary(project):
 def _project_action(arguments):
     if not isinstance(arguments, dict):
         raise ValueError("Pass the action in a JSON object.")
+    if arguments.get("action") in ("redirect_proposals", "redirect_decide"):
+        return _redirect_action(arguments)
     if arguments.get("action") == "setup_audit":
         root = arguments.get("project_root")
         if not isinstance(root, str) or not os.path.isdir(root):
@@ -4000,7 +4060,7 @@ def _session_audit_hook(handler):
         _log(f"SessionStart audit hook without a report: {type(exc).__name__}: {exc}")
         text = ""
     updates = " ".join(notice for _key, notice in _update_notices())
-    context = " ".join(part for part in (updates, text) if part)
+    context = "\n".join(part for part in (updates, text, _proposals_notice()) if part)
     if not context:
         return {}
     output = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}
@@ -4259,7 +4319,7 @@ class MCPHandler(BaseHTTPRequestHandler):
         if self._reject_foreign_origin():
             return
         if self.path == "/health":
-            self._write_json(200, {"status": "ok"})
+            self._write_json(200, {"status": "ok", "version": version.VERSION})
             return
         if self.path == "/status":
             self._write_json(200, {

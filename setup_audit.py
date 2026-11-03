@@ -43,6 +43,9 @@ PROBE_MAX_AGE_S = 6 * 3600
 SKILL_DESCRIPTION_MAX = 1536
 SKILL_BUDGET_CHARS = 8000
 CODEX_PROJECT_DOC_MAX = 32 * 1024
+NOTICE_ITEMS = 3
+NOTICE_ACTION_MAX = 360
+REVIEW_FIRST = ("hook_overlap", "skill_budget")
 SMART_TOOL_SERVER = "smart-tool"
 CLAUDE_TOOLS = ("Bash", "Read", "Grep", "Glob", "LS", "Edit", "MultiEdit", "Write", "NotebookEdit", "WebFetch",
                 "WebSearch", "Task")
@@ -120,8 +123,9 @@ class _Snapshot:
             return None
 
 
-def _hooks_from(data, source, root=None):
-    """Hook entries of a settings/hooks.json object: one dict per hook with its event, matcher and target."""
+def _hooks_from(data, source, file, root=None):
+    """Hook entries of a settings/hooks.json object: one dict per hook with its event, matcher, target and the file
+    that declares it (named in the fix of a finding)."""
     found = []
     for event, groups in ((data or {}).get("hooks") or {}).items():
         for group in groups if isinstance(groups, list) else []:
@@ -130,7 +134,7 @@ def _hooks_from(data, source, root=None):
                     found.append({"event": event, "matcher": group.get("matcher") or "", "type": hook.get("type"),
                                   "command": hook.get("command"), "url": hook.get("url"),
                                   "server": hook.get("server"), "tool": hook.get("tool"), "source": source,
-                                  "root": root})
+                                  "file": file, "root": root})
     return found
 
 
@@ -236,7 +240,7 @@ def collect_claude(project, snapshot):
         if data is None:
             continue
         settings.append({"scope": scope, "path": path, "disable_all_hooks": bool(data.get("disableAllHooks"))})
-        hooks += _hooks_from(data, f"settings:{scope}")
+        hooks += _hooks_from(data, f"settings:{scope}", path)
         enabled.update({k: v for k, v in (data.get("enabledPlugins") or {}).items()})
         overrides.update(data.get("skillOverrides") or {})
         _approvals(data, approval)
@@ -270,7 +274,8 @@ def collect_claude(project, snapshot):
                 continue
             name = plugin_id.split("@")[0]
             plugins.append({"id": plugin_id, "path": root})
-            hooks += _hooks_from(snapshot.json(os.path.join(root, "hooks", "hooks.json")), f"plugin:{name}", root)
+            hook_file = os.path.join(root, "hooks", "hooks.json")
+            hooks += _hooks_from(snapshot.json(hook_file), f"plugin:{name}", hook_file, root)
             plugin_mcp = snapshot.json(os.path.join(root, ".mcp.json")) or {}
             mcp += _mcp_entries(plugin_mcp.get("mcpServers", plugin_mcp), f"plugin:{name}",
                                 os.path.join(root, ".mcp.json"), f"plugin:{name}:", {"CLAUDE_PLUGIN_ROOT": root})
@@ -327,7 +332,7 @@ def _collect_codex_plugins(config, snapshot):
             continue
         plugins.append({"id": plugin_id, "path": root})
         hook_file = _codex_plugin_path(manifest, "hooks", root, (os.path.join("hooks", "hooks.json"),))
-        hooks += _hooks_from(snapshot.json(hook_file) if hook_file else None, f"plugin:{name}", root)
+        hooks += _hooks_from(snapshot.json(hook_file) if hook_file else None, f"plugin:{name}", hook_file, root)
         mcp_file = _codex_plugin_path(manifest, "mcpServers", root, (".mcp.json", "mcp.json"))
         plugin_mcp = snapshot.json(mcp_file) if mcp_file else None
         if plugin_mcp is None and isinstance(manifest.get("mcpServers"), dict):
@@ -345,8 +350,9 @@ def collect_codex(project, snapshot):
     """Codex's effective set for project: config.toml (MCP, hooks), hooks.json, skills, AGENTS.md chain."""
     config = snapshot.toml(os.path.join(codex_dir(), "config.toml")) or {}
     mcp = _mcp_entries(config.get("mcp_servers"), "user", os.path.join(codex_dir(), "config.toml"))
-    hooks = _hooks_from(snapshot.json(os.path.join(codex_dir(), "hooks.json")), "hooks.json")
-    hooks += _hooks_from(config, "config.toml")
+    hooks = _hooks_from(snapshot.json(os.path.join(codex_dir(), "hooks.json")), "hooks.json",
+                        os.path.join(codex_dir(), "hooks.json"))
+    hooks += _hooks_from(config, "config.toml", os.path.join(codex_dir(), "config.toml"))
     skills = _skills(snapshot, os.path.join(codex_dir(), "skills"), "user", recursive=True)
     skills += _skills(snapshot, _home(".agents", "skills"), "user-agents")
     skills += _skills(snapshot, os.path.join(project, ".agents", "skills"), "project")
@@ -375,11 +381,25 @@ def collect_codex(project, snapshot):
     return {"plugins": plugins, "hooks": hooks, "mcp": mcp, "skills": skills, "instructions": instructions}
 
 
-def _finding(check, severity, harness, subject, detail, source, evidence=()):
-    """One finding; its id is stable for the same check, harness and subject (used to diff runs)."""
+def _finding(check, severity, harness, subject, detail, source, action, evidence=()):
+    """One finding; its id is stable for the same check, harness and subject (used to diff runs). action is the step
+    that resolves it, written so an agent can carry it out: the file and line to change, the command, or the tool
+    call. Nothing applies it on its own."""
     key = hashlib.sha1(f"{check}\0{harness}\0{subject}".encode()).hexdigest()[:10]
     return {"id": key, "check": check, "severity": severity, "harness": harness, "subject": subject,
-            "detail": detail, "source": source, "evidence": list(evidence)}
+            "detail": detail, "source": source, "action": action, "evidence": list(evidence)}
+
+
+def _files(paths):
+    """Distinct file paths joined for an action text, in first-seen order."""
+    return ", ".join(dict.fromkeys(p for p in paths if p))
+
+
+def _plugin_note(hook):
+    """Warning appended to a fix that edits a plugin's own file, which the next plugin update overwrites."""
+    if not hook["source"].startswith("plugin:"):
+        return ""
+    return f" That file belongs to the {hook['source'][7:]} plugin: an update overwrites the edit, so report it there too."
 
 
 def _matches(matcher, tool):
@@ -401,16 +421,20 @@ def check_hook_overlap(harness, hooks, tools):
             matching = [h for h in hooks if h["event"] == event and _matches(h["matcher"], tool)]
             if len(matching) > 1:
                 key = (event, tuple(sorted(f"{h['source']} {h['type']} {h['matcher'] or '*'}" for h in matching)))
-                groups.setdefault(key, []).append(tool)
+                groups.setdefault(key, ([], [h["file"] for h in matching]))[0].append(tool)
     doc = DOCS["claude_hooks"] if harness == "claude" else DOCS["codex_hooks"]
     rule = ("all run in parallel; deny > defer > ask > allow, and two updatedInput rewrites have no documented order"
             if harness == "claude" else "they run concurrently and any deny wins")
-    for (event, members), names in groups.items():
+    for (event, members), (names, files) in groups.items():
         sources = sorted({m.split(" ")[0] for m in members})
         findings.append(_finding("hook_overlap", "warn", harness, f"{event} on {', '.join(names)}",
                                  f"{len(members)} hooks decide on the same call ({rule}): " + "; ".join(members)
                                  + (". From different sources: check they do not rewrite the same input."
-                                    if len(sources) > 1 else "."), doc))
+                                    if len(sources) > 1 else "."), doc,
+                                 f"Read these hooks in {_files(files)}: when two of them "
+                                 f"rewrite or deny the same {', '.join(names)} call, narrow one matcher so they stop "
+                                 "sharing it; when each does something different (one logs, one rewrites), nothing "
+                                 "needs to change."))
     return findings
 
 
@@ -437,21 +461,31 @@ def check_hook_targets(harness, hooks, mcp_names, probe):
                 if not os.path.isabs(path):
                     path = os.path.join(hook["root"], path) if hook.get("root") else None
                 if path and not os.path.exists(path):
+                    fix = (f"Reinstall or update the {hook['source'][7:]} plugin, which is missing {path}."
+                           if hook["source"].startswith("plugin:") else
+                           f"Restore {path}, or delete this {hook['event']} hook from {hook['file']}.")
                     findings.append(_finding("hook_missing_script", "error", harness, where,
-                                             f"The hook runs {token}, which does not exist.", doc, [hook["command"]]))
+                                             f"The hook runs {token}, which does not exist.", doc, fix,
+                                             [hook["command"]]))
             if _SILENCED_RE.search(hook["command"]):
                 findings.append(_finding("hook_silenced", "warn", harness, where,
                                          "The hook discards its errors (|| true / 2>/dev/null): when it breaks, "
-                                         "nothing shows.", doc, [hook["command"]]))
+                                         "nothing shows.", doc,
+                                         f"In {hook['file']}, remove `|| true`, `exit 0` and `2>/dev/null` from the "
+                                         f"command of this {hook['event']} hook so its failures show."
+                                         + _plugin_note(hook), [hook["command"]]))
         elif hook["type"] == "mcp_tool" and hook.get("server") and hook["server"] not in mcp_names:
             findings.append(_finding("hook_unknown_server", "error", harness, where,
                                      f"The hook calls MCP server '{hook['server']}', which is not configured here.",
-                                     doc))
+                                     doc, f"Register MCP server '{hook['server']}' for this agent, or delete this "
+                                          f"{hook['event']} hook from {hook['file']}." + _plugin_note(hook)))
         elif hook["type"] == "http" and hook.get("url") and probe:
             problem = _reachable(hook["url"])
             if problem:
                 findings.append(_finding("hook_endpoint_down", "error", harness, where,
-                                         f"The hook posts to {hook['url']}, which does not answer: {problem}", doc))
+                                         f"The hook posts to {hook['url']}, which does not answer: {problem}", doc,
+                                         f"Start the service that listens at {hook['url']}, or delete this "
+                                         f"{hook['event']} hook from {hook['file']}." + _plugin_note(hook)))
     return findings
 
 
@@ -481,7 +515,10 @@ def check_agents(claude):
                      f"{len(blind)} subagent(s) list tools but none of mcp__{SMART_TOOL_SERVER}__*: {names}. Add "
                      f"mcp__{SMART_TOOL_SERVER}__smart_search and mcp__{SMART_TOOL_SERVER}__smart_search_result to "
                      "their `tools`, or drop the `tools` line to inherit every tool.", DOCS["claude_subagents"],
-                     [a["path"] for a in blind[:8]])]
+                     f"In each of the {len(blind)} files listed as evidence, add mcp__{SMART_TOOL_SERVER}__smart_search "
+                     f"and mcp__{SMART_TOOL_SERVER}__smart_search_result to the `tools:` line of the frontmatter, or "
+                     "delete that line so the subagent inherits every tool.",
+                     [a["path"] for a in blind])]
 
 
 def check_skills(harness, skills):
@@ -494,19 +531,30 @@ def check_skills(harness, skills):
         if len(same) > 1:
             findings.append(_finding("skill_name_collision", "warn", harness, name,
                                      f"{len(same)} skills share the name '{name}': only one is offered.", doc,
+                                     f"Rename the `name` in the frontmatter of all but one of these, or remove the "
+                                     f"copies you do not use: {_files(s['path'] for s in same)}.",
                                      [s["path"] for s in same]))
     if harness == "claude":
         for skill in skills:
             if len(skill["description"]) > SKILL_DESCRIPTION_MAX:
                 findings.append(_finding("skill_description_long", "warn", harness, skill["name"],
                                          f"Description of {len(skill['description'])} characters; Claude Code cuts "
-                                         f"each one at {SKILL_DESCRIPTION_MAX}.", doc, [skill["path"]]))
+                                         f"each one at {SKILL_DESCRIPTION_MAX}.", doc,
+                                         f"Shorten the `description` in {skill['path']} from "
+                                         f"{len(skill['description'])} to at most {SKILL_DESCRIPTION_MAX} characters, "
+                                         "keeping when to use the skill at the start.", [skill["path"]]))
     total = sum(len(s["name"]) + len(s["description"]) for s in skills)
     if total > SKILL_BUDGET_CHARS:
+        longest = ", ".join(s["name"] for s in sorted(skills, key=lambda s: -len(s["description"]))[:5])
+        how = ('turn off the ones you do not use with "skillOverrides": {"<name>": "off"} in '
+               f"{os.path.join(endpoint_sync.claude_dir(), 'settings.json')}" if harness == "claude"
+               else "remove the skill folders you do not use")
         findings.append(_finding("skill_budget", "warn", harness, f"{len(skills)} skills",
                                  f"Names and descriptions add up to {total:,} characters, over the ~{SKILL_BUDGET_CHARS:,} "
                                  "the skill list gets (Claude: 1% of a 200k context; Codex: 2% or 8,000 characters):"
-                                 " some skills are left out of what the model sees.", doc))
+                                 " some skills are left out of what the model sees.", doc,
+                                 f"Bring names and descriptions under ~{SKILL_BUDGET_CHARS:,} characters: {how}, or "
+                                 f"shorten the longest descriptions ({longest})."))
     return findings
 
 
@@ -519,7 +567,9 @@ def check_instructions(project, claude, codex):
     if agents_here and not imports_agents:
         findings.append(_finding("agents_md_not_read_by_claude", "warn", "claude", os.path.join(project, "AGENTS.md"),
                                  "Codex reads AGENTS.md; Claude Code reads only CLAUDE.md (and what it imports with "
-                                 "@AGENTS.md), so the two agents get different instructions here.", DOCS["claude_memory"]))
+                                 "@AGENTS.md), so the two agents get different instructions here.", DOCS["claude_memory"],
+                                 f"Add a line `@AGENTS.md` to {os.path.join(project, 'CLAUDE.md')} (create the file "
+                                 "with that line if it does not exist)."))
     for item in claude_texts:
         base = os.path.dirname(item["path"])
         for target in _IMPORT_RE.findall(item["_text"]):
@@ -527,12 +577,17 @@ def check_instructions(project, claude, codex):
             if not os.path.exists(path):
                 findings.append(_finding("broken_import", "error", "claude", f"{item['path']} @{target}",
                                          "Imported file does not exist: that part of the instructions never loads.",
-                                         DOCS["claude_memory"], [item["path"]]))
+                                         DOCS["claude_memory"],
+                                         f"In {item['path']}, point `@{target}` to a file that exists, or delete that "
+                                         "line.", [item["path"]]))
     total = sum(i["bytes"] for i in codex["instructions"] if i["kind"] == "project")
     if total > CODEX_PROJECT_DOC_MAX:
         findings.append(_finding("codex_agents_truncated", "error", "codex", project,
                                  f"Project AGENTS.md chain is {total:,} bytes; Codex reads {CODEX_PROJECT_DOC_MAX:,} "
                                  "(project_doc_max_bytes) and drops the rest.", DOCS["codex_agents_md"],
+                                 f"Shorten the project AGENTS.md files to under {CODEX_PROJECT_DOC_MAX:,} bytes in "
+                                 f"total, or set project_doc_max_bytes = {total} (or more) in "
+                                 f"{os.path.join(codex_dir(), 'config.toml')}.",
                                  [i["path"] for i in codex["instructions"]]))
     return findings
 
@@ -672,6 +727,7 @@ def check_mcp(harness, entries, results):
     """Unhealthy servers, and tools offered twice (same name, or a proxy re-exposing a directly registered server)."""
     findings, tools_by_server = [], {}
     doc = DOCS["claude_mcp"] if harness == "claude" else DOCS["mcp_lifecycle"]
+    sources = {entry["name"]: entry["source"] for entry in entries}
     for entry, result in zip(entries, results):
         subject = f"{entry['name']} ({entry['scope']})"
         if result is None:
@@ -682,7 +738,9 @@ def check_mcp(harness, entries, results):
                     "timeout": "did not answer in time; its tools were not verified"}.get(result["kind"],
                                                                                        "does not start or answer")
             findings.append(_finding("mcp_unhealthy", severity, harness, subject,
-                                     f"MCP server {text}: {result['error']}", doc, [entry["source"]]))
+                                     f"MCP server {text}: {result['error']}", doc, _mcp_fix(harness, entry,
+                                                                                           result["kind"]),
+                                     [entry["source"]]))
             continue
         names = [t.get("name") for t in result["tools"] if t.get("name") not in entry["disabled_tools"]]
         tools_by_server[entry["name"]] = set(names)
@@ -698,13 +756,31 @@ def check_mcp(harness, entries, results):
             if same:
                 findings.append(_finding("mcp_duplicate_tools", "warn", harness, f"{server} and {other}",
                                          f"{len(same)} tools with the same name on both servers: {', '.join(same[:6])}",
-                                         doc))
+                                         doc, f"Keep one of the two: remove '{server}' from {sources[server]} or "
+                                              f"'{other}' from {sources[other]}"
+                                              + (", or list the duplicated tools in disabled_tools of one of them."
+                                                 if harness == "codex" else ".")))
             if proxied:
                 findings.append(_finding("mcp_duplicate_tools", "warn", harness, f"{server} proxies {other}",
                                          f"{server} re-exposes {len(proxied)} tools of {other}, which is also "
                                          f"registered directly: {', '.join(proxied[:6])}. The model sees both and "
-                                         "pays for both descriptions.", doc))
+                                         "pays for both descriptions.", doc,
+                                         f"Keep one path to {other}: drop it from the servers {server} proxies (in "
+                                         f"{server}'s own configuration), or remove the direct '{other}' entry from "
+                                         f"{sources[other]}."))
     return findings
+
+
+def _mcp_fix(harness, entry, kind):
+    """The step that brings an unhealthy MCP server back: sign in, or run its command by hand to see the error, or
+    remove the entry."""
+    if kind == "auth":
+        return (f"Sign in: run /mcp in Claude Code and pick {entry['name']}." if harness == "claude"
+                else f"Sign in: run `codex mcp login {entry['name']}`.")
+    command = " ".join([entry.get("command") or ""] + entry["args"])
+    target = (f"check that {entry['url']} answers" if entry.get("url") else
+              f"run its command by hand to see the error: `{command}`")
+    return f"To bring {entry['name']} back, {target}; if it is no longer used, remove it from {entry['source']}."
 
 
 def _public(section):
@@ -762,12 +838,18 @@ def _report_path(project):
 
 
 def last_report(project):
-    """The last stored report of project, or None when it was never audited."""
+    """The last stored report of project, or None when it was never audited. A report whose findings carry no
+    action was written by an older Smart Tool: it raises, naming the run that replaces it."""
+    path = _report_path(project)
     try:
-        with open(_report_path(project), encoding="utf-8") as stream:
-            return json.load(stream)
+        with open(path, encoding="utf-8") as stream:
+            report = json.load(stream)
     except FileNotFoundError:
         return None
+    if any("action" not in finding for finding in report["findings"]):
+        raise ValueError(f"{path} holds a setup audit of {report['project']} from an older Smart Tool, whose "
+                         "findings have no fix: run project_manage action=setup_audit mode=run to replace it.")
+    return report
 
 
 def stored_for(path):
@@ -783,9 +865,20 @@ def stored_for(path):
         folder = parent
 
 
+def top_findings(report, count=NOTICE_ITEMS):
+    """The errors and warnings of report most worth acting on first: errors, then a fix over a check to make
+    (REVIEW_FIRST), then new ones, then the report order."""
+    order = {"error": 0, "warn": 1}
+    ranked = [(order[f["severity"]], f["check"] in REVIEW_FIRST, not f.get("new"), position, f)
+              for position, f in enumerate(report["findings"]) if f["severity"] in order]
+    return [row[-1] for row in sorted(ranked, key=lambda row: row[:4])[:count]]
+
+
 def session_notice(path):
-    """One short line for the agent about the stored audit of path (nothing is run), or "" when there is no stored
-    report or it holds no error or warning."""
+    """Context for an agent session about the stored audit of path (nothing is run): the project, the counts, the top
+    NOTICE_ITEMS findings with their fix and the exact call that lists all of them. "" when there is no stored report
+    or it holds no error or warning. Each fix changes the user's agent setup, so the agent is told to apply one when
+    the user agrees, never on its own. Stays far below the ~2,500 tokens Codex spills to disk."""
     report = stored_for(path)
     if report is None:
         return ""
@@ -794,9 +887,17 @@ def session_notice(path):
         return ""
     new = sum(1 for f in report["findings"] if f.get("new") and f["severity"] in ("error", "warn"))
     age = max(0, int((time.time() - report["checked_at"]) // 60))
-    return (f"Setup audit of {report['project']} ({age} min ago): {summary['error']} errors, {summary['warn']} "
-            f"warnings" + (f", {new} new" if new else "") + " in the agent configuration. Details without rerunning: "
-            "project_manage action=setup_audit mode=last.")
+    lines = [f"Smart Tool setup audit of {report['project']} ({age} min ago): {summary['error']} errors, "
+             f"{summary['warn']} warnings" + (f", {new} new" if new else "") + " in the Claude Code and Codex "
+             "configuration. Top items, each with its fix:"]
+    for number, finding in enumerate(top_findings(report), 1):
+        lines.append(f"{number}. [{finding['harness']}] {finding['severity']} {finding['check']}: "
+                     f"{finding['subject'][:120]}. Fix: {finding['action'][:NOTICE_ACTION_MAX]}")
+    root = report["project"].replace("\\", "/")
+    lines.append(f'All findings with their fixes: project_manage action=setup_audit mode=last project_root="{root}"; '
+                 "after a fix, mode=run checks again. These fixes change the user's agent setup: apply one when the "
+                 "user agrees.")
+    return "\n".join(lines)
 
 
 def index():
@@ -975,6 +1076,7 @@ def markdown(report):
         mark = {"error": "ERROR", "warn": "WARN", "info": "NOTE"}[finding["severity"]]
         lines.append(f"- **{mark}** [{finding['harness']}] {finding['subject']}: {finding['detail']} "
                      f"([source]({finding['source']}))" + (" *(new)*" if finding.get("new") else ""))
+        lines.append(f"  - Fix: {finding['action']}")
     for side in ("claude", "codex"):
         servers = [m for m in report[side]["mcp"] if "tools" in m]
         if servers:

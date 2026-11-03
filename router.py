@@ -154,9 +154,10 @@ def _log_error(message):
 
 
 def decide(tool_name, tool_input, cwd=None):
-    """(decision, reason, target) for one hook call: decision is redirect or allow, target the folder the redirected
-    search would read (the session folder for an accepted pattern, None when allowed). An allowed search is queued for
-    the router model's review, which never delays the call."""
+    """(decision, reason, target) for one hook call: decision is redirect, instruct (an accepted pattern in mode
+    instruct: the call runs and the agent is told the smart_search call that answers it) or allow; target is the folder
+    the redirected search would read (the session folder for an accepted pattern, None when allowed). An allowed search
+    is queued for the router model's review, which never delays the call."""
     safe_input = tool_input if isinstance(tool_input, dict) else {}
     mechanical = _mechanical_decision(tool_name, safe_input)
     if mechanical:
@@ -167,6 +168,10 @@ def decide(tool_name, tool_input, cwd=None):
     pattern_tool = "Bash" if tool_name in SHELL_TOOLS else tool_name
     learned = (block_patterns.matching(pattern_tool, safe_input)
                if decision == "allow" and block_patterns.reviewable(pattern_tool, safe_input, reason) else None)
+    if learned and learned["mode"] == "instruct":
+        reason = f"matches accepted pattern {learned['id']} (a tip chosen in Smart Tool)"
+        _log_decision(tool_name, tool_input, "allow", reason, extra={"pattern": learned["id"], "mode": "instruct"})
+        return "instruct", reason, cwd
     if learned:
         reason = f"accepted block pattern {learned['id']} (approved by the user in Smart Tool's setup screen)"
         _log_decision(tool_name, tool_input, "redirect", reason, extra={"pattern": learned["id"]})

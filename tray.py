@@ -289,17 +289,16 @@ _update_busy = threading.Lock()
 
 
 def _update_now(icon, item):
-    """Menu action: installs the known newer version, or checks npm first (telling the user it is checking) and says
-    when there is none."""
+    """Menu action: asks npm again for the newest version (a newer one may have come out since the last check) and
+    installs it, telling the user it is checking when no newer version was known yet, and says when there is none."""
     if not _update_busy.acquire(blocking=False):
         return
 
     def run():
         try:
-            latest = _state["update"]
-            if not latest:
+            if not _state["update"]:
                 _notify(icon, "Checking for updates…")
-                latest = update_check.newer_version()
+            latest = update_check.newer_version()
             if not latest:
                 _notify(icon, "Smart Tool {version} is the latest version.", version=version.VERSION)
                 return

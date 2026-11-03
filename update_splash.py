@@ -4,9 +4,11 @@ the interface language, then the result. Started by the tray (update_check.run_u
 
 The install command runs with CREATE_NO_WINDOW, so it and every console program it starts (node, the installer,
 pip, PowerShell, schtasks) share one hidden console. Its output goes to update_check.UPDATE_LOG; a failure shows the last line,
-the log path and a Windows notification, and the installer has already restored the previous version."""
+the log path and a Windows notification, and the installer has already restored the previous version. The outcome names
+the version read from the installed version.py after the run, not the one this process loaded before it."""
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -49,11 +51,24 @@ def step_for(line):
 
 def install_command(target):
     """argv of the update: the npx command a user types, through cmd.exe because npx is a .cmd script, for the version
-    the tray announced. `@latest` would let npx reuse an older package from its cache and install that instead."""
+    the tray announced. `@latest` would let npx reuse an older package from its cache and install that instead, and
+    --expect-version makes the installer refuse a package that is not that version."""
     npx = node_locator.which("npx.cmd")
     if not npx:
         raise RuntimeError(i18n.t("Node.js (npx) was not found; install Node.js and try again."))
-    return ["cmd.exe", "/d", "/c", npx, "--yes", f"{update_check.PACKAGE}@{target}", "install"], npx
+    return ["cmd.exe", "/d", "/c", npx, "--yes", f"{update_check.PACKAGE}@{target}", "install",
+            "--expect-version", target], npx
+
+
+def installed_version(folder=os.path.dirname(os.path.abspath(__file__))):
+    """VERSION as written in folder's version.py now: the installer replaces that file, so after an update it tells which
+    version is really installed. Raises when the file has no VERSION line."""
+    path = os.path.join(folder, "version.py")
+    with open(path, encoding="utf-8") as stream:
+        found = re.search(r'^VERSION = "([^"]+)"', stream.read(), re.M)
+    if not found:
+        raise RuntimeError(f"{path} has no VERSION line")
+    return found.group(1)
 
 
 def run_install(lines, target):
@@ -176,12 +191,20 @@ def main(argv):
         if worker.is_alive():
             splash.root.after(200, pump)
             return
-        if outcome["code"] == 0:
+        try:
+            installed = installed_version()
+        except (OSError, RuntimeError) as exc:
+            installed = None
+            outcome["code"], outcome["last"] = outcome["code"] or 1, f"{type(exc).__name__}: {exc}"
+        if outcome["code"] == 0 and installed == target:
             splash.finish(True, i18n.t("Smart Tool updated"),
                           i18n.t("Version {version} is installed and running.", version=target),
                           i18n.t("This window closes by itself."))
             return
-        detail = i18n.t("The update did not finish; version {version} is still installed.", version=version.VERSION)
+        if outcome["code"] == 0:
+            outcome["last"] = f"installed version.py says {installed}, not {target}"
+        detail = i18n.t("The update did not finish; version {version} is still installed.",
+                        version=installed or version.VERSION)
         where = i18n.t("Details in {path}", path=update_check.UPDATE_LOG)
         splash.finish(False, i18n.t("Update not finished"), f"{detail}\n{outcome['last'][:180]}", where)
         try:

@@ -16,9 +16,10 @@ const UV_DIR = join(RUNTIME_DIR, `uv-${UV_VERSION}`);
 const UV_EXE = join(UV_DIR, "uv.exe");
 const PYTHON_VERSION = "3.12";
 const PYTHON_DIR = join(RUNTIME_DIR, "python");
-const USAGE = `Usage: npx @allansantos-dev/smart-tool install [--target DIR] [--no-start] [--skip-deps]
+const USAGE = `Usage: npx @allansantos-dev/smart-tool@<version> install [--target DIR] [--no-start] [--skip-deps]
 
-Installs or updates Smart Tool for this Windows user. Run it again with @latest to update.`;
+Installs or updates Smart Tool for this Windows user. To update, run it again with the version to install in place of
+<version>: a pinned version keeps npx from reusing an older package from its cache.`;
 
 function fail(message) {
   throw new Failure(message);

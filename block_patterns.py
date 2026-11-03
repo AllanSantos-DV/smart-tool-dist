@@ -1,8 +1,10 @@
 """Block patterns learned during operation: when the deterministic redirect rule lets a search or read run, the router
 model (review_model) reviews the call in the background (the agent never waits for it) and may propose a regex for calls that should
 go to Smart Tool. A proposal is checked (compiles, matches the call, how many logged calls it would have blocked; one
-that blocks more than BROAD_SHARE of them is discarded) and waits for the user in the setup screen; an accepted pattern
-redirects from then on, deterministically, after the rule's own exceptions (single files, commands changing files).
+that blocks more than BROAD_SHARE of them is discarded) and waits for a decision, in the setup screen or by an agent
+through project_manage (redirect_proposals, redirect_decide). An accepted pattern acts from then on, deterministically,
+after the rule's own exceptions (single files, commands changing files), in its mode: redirect sends the call to
+Smart Tool, instruct lets it run and tells the agent which smart_search call answers it.
 """
 import concurrent.futures
 import hashlib
@@ -28,6 +30,8 @@ PATTERN_MAX_CHARS = 300
 CALL_MAX_CHARS = 1500
 # Only calls whose reach the rule cannot measure are reviewed: bulk reads (globs, xargs, -exec, loops, scripts walking
 # folders) and paths it could not resolve. Reading a few listed files is allowed on purpose and never reviewed.
+MODES = ("redirect", "instruct")
+DECISIONS = {"accept": "redirect", "instruct": "instruct", "reject": None, "remove": None}
 REVIEWED_REASONS = ("The searched path uses a variable the hook cannot resolve.", "No content search over a folder.")
 _BULK_READ = re.compile(r"\*|\bxargs\b|-exec\b|\bfor\s+\w+\s+in\b|os\.walk|rglob|glob\(|readdirSync|readdir\(|"
                         r"walkSync|-Recurse\b|Get-ChildItem", re.IGNORECASE)
@@ -125,7 +129,8 @@ def _empty():
 
 
 def load():
-    """The stored patterns: {"accepted": [...], "proposals": [...], "rejected": [...]}."""
+    """The stored patterns: {"accepted": [...], "proposals": [...], "rejected": [...]}; every accepted pattern has a
+    mode in MODES."""
     try:
         with open(STORE_PATH, encoding="utf-8") as stream:
             data = json.load(stream)
@@ -133,7 +138,19 @@ def load():
         return _empty()
     if not isinstance(data, dict) or any(not isinstance(data.get(k), list) for k in _empty()):
         raise ValueError(f"{STORE_PATH} is not a block patterns file: fix or delete it.")
+    unknown = [e.get("id") for e in data["accepted"] if e.get("mode") not in MODES]
+    if unknown:
+        raise ValueError(f"{STORE_PATH}: accepted pattern(s) {', '.join(map(str, unknown))} have no mode "
+                         f"({' or '.join(MODES)}): remove and accept them again in the setup screen.")
     return data
+
+
+def pending(limit):
+    """(count, proposals) waiting for a decision: the limit with the most matches among the logged calls first, then
+    the newest."""
+    proposals = load()["proposals"]
+    ranked = sorted(proposals, key=lambda e: (-(e.get("history_matches") or 0), -(e.get("proposed_at") or 0)))
+    return len(proposals), ranked[:limit]
 
 
 def _save(data):
@@ -309,11 +326,12 @@ def review_later(tool_name, tool_input, rule_reason, metrics_path, redact, log):
     return True
 
 
-def decide_proposals(entry_ids, action):
-    """accept moves proposals to accepted; reject moves them to rejected; remove deletes accepted patterns. All ids are
-    decided in one write, or none when any id is unknown (ValueError naming it)."""
-    if action not in ("accept", "reject", "remove"):
-        raise ValueError("Invalid action: use accept, reject or remove.")
+def decide_proposals(entry_ids, action, decided_by="user"):
+    """accept moves proposals to accepted in mode redirect, instruct in mode instruct; reject moves them to rejected;
+    remove deletes accepted patterns. decided_by (user, or agent through project_manage) is stored with the decision.
+    All ids are decided in one write, or none when any id is unknown (ValueError naming it)."""
+    if action not in DECISIONS:
+        raise ValueError(f"Invalid action: use {', '.join(DECISIONS)}.")
     wanted = list(dict.fromkeys(entry_ids))
     if not wanted:
         raise ValueError("No pattern selected.")
@@ -327,9 +345,10 @@ def decide_proposals(entry_ids, action):
         data[source] = [e for e in data[source] if e["id"] not in found]
         now = time.time()
         for entry_id in wanted:
-            if action == "accept":
-                data["accepted"].append({**found[entry_id], "accepted_at": now})
+            if DECISIONS[action]:
+                data["accepted"].append({**found[entry_id], "mode": DECISIONS[action], "accepted_at": now,
+                                         "accepted_by": decided_by})
             elif action == "reject":
-                data["rejected"].append({**found[entry_id], "rejected_by": "user"})
+                data["rejected"].append({**found[entry_id], "rejected_by": decided_by})
         _save(data)
         return data

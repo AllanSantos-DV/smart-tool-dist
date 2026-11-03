@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.52 - beta
+
+- Actionable setup audit. Every finding of `setup_audit.py` carries an `action`: the file and edit, the command to run
+  or the sign-in step per harness. `mode=last` prints it as `- Fix: ...`, and a stored report without fixes fails loud
+  naming the `mode=run` that replaces it; the daemon also runs a new audit 120 s after it starts. The SessionStart hook
+  puts the project's counts, the top three errors and warnings with their fixes and the call that lists them all in the
+  agent's `additionalContext`, with the rule that the agent applies a fix only when the user agrees. The user gets no new
+  notice (`tests/test_setup_audit.py`, `tests/test_session_audit.py`).
+- Redirect proposals decided by an agent: `project_manage action=redirect_proposals` lists the pending proposals ranked
+  by how many commands in the history each one would have matched; `action=redirect_decide` accepts, rejects, removes or
+  turns them into `instruct`, a new mode where the call runs and the agent gets a tip naming the `smart_search` call
+  that answers it (never the model-written reason; a background shell call gets no tip, as a background call is never
+  redirected). Decisions are marked as made by an agent in the setup screen, which
+  now also offers "Tip only" (`tests/test_block_patterns.py`, `tests/test_transparent_redirect.py`).
+- An update now confirms the version it installed. `install.py` checks that the daemon it started reports the version
+  being installed (`/health` now carries `version`) and restores the previous version otherwise; `--expect-version`
+  refuses a package that is not the requested version before touching anything. The update screen passes the version it
+  announced and reads the installed `version.py` afterwards: it reports success only when that is the announced version,
+  and a failure names the version really installed. The tray's Update entry asks npm again on each click, so a release
+  that came out after the last check is the one installed (`tests/test_update_splash.py`, `tests/test_install_version.py`).
+- The README and the site show the install command pinned to the current version, and `release/pages.py` refuses to
+  publish when either one does not; the installer's usage text and the README no longer say to update with `@latest`
+  (`tests/test_pages.py`).
+
 ## 0.9.51 - beta
 
 - The automatic update installs the version the tray announced (`npx --yes @allansantos-dev/smart-tool@<version>

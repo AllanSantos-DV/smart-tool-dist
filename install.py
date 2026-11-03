@@ -13,6 +13,7 @@ import venv
 from pathlib import Path
 
 import paths
+import version
 
 SOURCE = Path(__file__).resolve().parent
 DEFAULT_TARGET = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "Programs" / "SmartTool"
@@ -291,17 +292,23 @@ def start(target, python, pythonw):
 
 
 def verify(target, python):
+    """Checks the started daemon: it answers MCP, serves REQUIRED_TOOLS, runs the version being installed and is the
+    process of this installation. Any mismatch raises, so _update restores the previous version."""
     script = ("import json,urllib.request,daemon_launcher; url=daemon_launcher.ensure_daemon_running(wait_seconds=30); "
+              "opener=urllib.request.build_opener(urllib.request.ProxyHandler({})); "
+              "running=json.load(opener.open(url+'/health',timeout=10)).get('version'); "
               "body=json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/list','params':{}}).encode(); "
               "req=urllib.request.Request(url+'/mcp',data=body,method='POST',headers={'Content-Type':'application/json'}); "
-              "opener=urllib.request.build_opener(urllib.request.ProxyHandler({})); "
-              "print(json.dumps(sorted(r['name'] for r in json.load(opener.open(req,timeout=10))['result']['tools'])))")
+              "print(json.dumps({'version':running,'tools':sorted(r['name'] for r in json.load(opener.open(req,timeout=10))['result']['tools'])}))")
     result = subprocess.run([str(python), "-c", script], cwd=target, capture_output=True, text=True, timeout=60)
     if result.returncode:
         raise RuntimeError("Daemon did not respond: " + ((result.stderr or result.stdout).strip().splitlines() or ["no output"])[-1])
-    missing = REQUIRED_TOOLS - set(json.loads(result.stdout.strip().splitlines()[-1]))
+    served = json.loads(result.stdout.strip().splitlines()[-1])
+    missing = REQUIRED_TOOLS - set(served["tools"])
     if missing:
         raise RuntimeError("Missing MCP tools: " + ", ".join(sorted(missing)))
+    if served["version"] != version.VERSION:
+        raise RuntimeError(f"The daemon runs version {served['version']}, not the {version.VERSION} being installed")
     pid = json.loads(REGISTRY.read_text(encoding="utf-8"))["pid"]
     command = powershell(f"(Get-CimInstance Win32_Process -Filter 'ProcessId = {int(pid)}').CommandLine").stdout
     if str(target / "smart_tool_daemon.py").lower() not in command.lower():
@@ -340,14 +347,19 @@ def main():
     parser.add_argument("--no-start", action="store_true", help="do not restart or check the daemon")
     parser.add_argument("--skip-tests", action="store_true",
                         help="install without running tests/run.py (npm package, whose tests ran in CI; emergency only otherwise)")
+    parser.add_argument("--expect-version",
+                        help="refuse to install unless this package is that version (the update screen passes the one it announced)")
     args = parser.parse_args()
+    if args.expect_version and args.expect_version != version.VERSION:
+        raise SystemExit(f"This package is Smart Tool {version.VERSION}, not the {args.expect_version} requested; "
+                         "nothing was changed.")
     target = args.target.resolve()
     if target == SOURCE:
         raise SystemExit("The target cannot be the source folder itself.")
     if args.skip_tests:
         print("Tests skipped by --skip-tests.")
     elif not (SOURCE / "tests" / "run.py").is_file():
-        raise SystemExit(f"No test suite in {SOURCE}; a packaged install runs with --skip-tests (npx @allansantos-dev/smart-tool install).")
+        raise SystemExit(f"No test suite in {SOURCE}; a packaged install runs with --skip-tests (npx @allansantos-dev/smart-tool@{version.VERSION} install).")
     else:
         interpreter = python_paths(target)[0] if python_paths(target)[0].is_file() else Path(sys.executable)
         tests = subprocess.run([str(interpreter), str(SOURCE / "tests" / "run.py")], capture_output=True, text=True,
