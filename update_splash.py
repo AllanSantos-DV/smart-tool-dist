@@ -47,18 +47,19 @@ def step_for(line):
     return None
 
 
-def install_command():
-    """argv of the update: the same npx command a user types, through cmd.exe because npx is a .cmd script."""
+def install_command(target):
+    """argv of the update: the npx command a user types, through cmd.exe because npx is a .cmd script, for the version
+    the tray announced. `@latest` would let npx reuse an older package from its cache and install that instead."""
     npx = node_locator.which("npx.cmd")
     if not npx:
         raise RuntimeError(i18n.t("Node.js (npx) was not found; install Node.js and try again."))
-    return ["cmd.exe", "/d", "/c", npx, "--yes", f"{update_check.PACKAGE}@latest", "install"], npx
+    return ["cmd.exe", "/d", "/c", npx, "--yes", f"{update_check.PACKAGE}@{target}", "install"], npx
 
 
-def run_install(lines):
+def run_install(lines, target):
     """Runs the install command hidden, puts each output line on `lines`, writes them to update_check.UPDATE_LOG and returns
     (exit code, last non-empty line). Kills the whole process tree after TIMEOUT_S."""
-    command, npx = install_command()
+    command, npx = install_command(target)
     os.makedirs(os.path.dirname(update_check.UPDATE_LOG), exist_ok=True)
     last = ""
     with open(update_check.UPDATE_LOG, "w", encoding="utf-8") as log:
@@ -150,7 +151,9 @@ class Splash:
 
 def main(argv):
     """Shows the screen, runs the update and reports the outcome; returns the installer's exit code."""
-    target = argv[1] if len(argv) > 1 else "latest"
+    if len(argv) < 2:
+        raise SystemExit("usage: update_splash.py <version>: the version to install, as announced by the tray")
+    target = argv[1]
     if not _single_instance():
         return 0
     splash = Splash(target)
@@ -158,7 +161,7 @@ def main(argv):
 
     def work():
         try:
-            outcome["code"], outcome["last"] = run_install(lines)
+            outcome["code"], outcome["last"] = run_install(lines, target)
         except Exception as exc:
             outcome["code"], outcome["last"] = 1, f"{type(exc).__name__}: {exc}"
 

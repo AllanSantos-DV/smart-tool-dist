@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.51 - beta
+
+- The automatic update installs the version the tray announced (`npx --yes @allansantos-dev/smart-tool@<version>
+  install`) instead of `@latest`. With `@latest`, npx could reuse an older package left in its cache and install that,
+  moving the install back a version. The update notices given to the user and to agent sessions ("To update now,
+  run: ...") name the same pinned command, and the update screen refuses to start without the version to install
+  instead of falling back to `@latest` (`tests/test_update_splash.py`, `tests/test_update_check.py`).
+
 ## 0.9.50 - beta
 
 - Windows refused the setup-audit toast of a project whose path made the toast tag longer than 64 characters

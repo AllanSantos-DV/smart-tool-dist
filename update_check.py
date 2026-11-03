@@ -20,7 +20,6 @@ import version
 
 PACKAGE = "@allansantos-dev/smart-tool"
 REGISTRY_URL = "https://registry.npmjs.org/@allansantos-dev%2Fsmart-tool/latest"
-UPDATE_COMMAND = f"npx --yes {PACKAGE}@latest install"
 SITE_URL = "https://allansantos-dv.github.io/smart-tool/"
 STATE_PATH = os.path.join(paths.DATA_DIR, "update-state.json")
 UPDATE_LOG = os.path.join(paths.DATA_DIR, "update.log")
@@ -40,6 +39,12 @@ def newer_version(timeout=10):
     with urllib.request.urlopen(request, timeout=timeout) as response:
         latest = json.load(response)["version"]
     return latest if _parts(latest) > _parts(version.VERSION) else None
+
+
+def update_command(target):
+    """The npx command that installs version target, as told to the user and to agent sessions. Pinned rather than
+    `@latest`, which lets npx reuse an older package from its cache."""
+    return f"npx --yes {PACKAGE}@{target} install"
 
 
 def env_opted_out():
@@ -144,10 +149,10 @@ def notices(now=None):
                  else "automatic updates are now off")
         found.append((f"failed:{failed}",
                       f"The automatic update of Smart Tool to {failed} failed; {version.VERSION} is still installed "
-                      f"and {retry}. To update now, run: {UPDATE_COMMAND}"))
+                      f"and {retry}. To update now, run: {update_command(failed)}"))
     elif latest and _parts(latest) > _parts(version.VERSION):
         how = ("the tray installs it automatically" if automatic_enabled()
-               else f"automatic updates are off (tray switch or {ENV_OPT_OUT}=off); to update, run: {UPDATE_COMMAND}")
+               else f"automatic updates are off (tray switch or {ENV_OPT_OUT}=off); to update, run: {update_command(latest)}")
         found.append((f"available:{latest}",
                       f"Smart Tool {latest} is available on npm (installed: {version.VERSION}); {how}."))
     return found
