@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.49 - beta
+
+- No more "Could not show a Smart Tool notice: [WinError 10061]" right after logon. The tray's notice loop asked the
+  daemon at once, using the address of the previous run from the registry, before the daemon was listening, and turned the
+  refused connection into a notification. Now a daemon that is not accepting connections yet (or no address yet) is asked
+  again every 15 s without showing anything; any other failure is written to `tray.log` in the data folder, once per
+  message, never shown as another notification. The same boot ordering applied to the update check: with no network yet
+  at logon it waited 24 h for the next try; it now retries every 5 min until npm answers (`tests/test_tray_notices.py`).
+
 ## 0.9.48 - beta
 
 - Smart Tool spawns far fewer Git processes. A Git view (`index_views.describe`, `pin`) is now resolved once per

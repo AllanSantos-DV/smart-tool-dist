@@ -12,6 +12,7 @@ import os
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import webbrowser
 
@@ -23,6 +24,7 @@ import autostart
 import config
 import daemon_launcher
 import i18n
+import paths
 import setup_audit
 import toast_notice
 import update_check
@@ -31,6 +33,10 @@ import version
 POLL_INTERVAL_S = 45
 UPDATE_CHECK_INTERVAL_S = 24 * 3600
 NOTICE_INTERVAL_S = 600
+NOTICE_RETRY_S = 15
+UPDATE_RETRY_S = 300
+NOTICE_UNREACHABLE_LOG_S = 600
+LOG_PATH = os.path.join(paths.DATA_DIR, "tray.log")
 SETUP_URL = "http://127.0.0.1:8765/setup"
 
 _STATE_LOCK = threading.Lock()
@@ -165,22 +171,55 @@ def _show_notices(icon, notices):
                           tag="setup-audit:" + row["project"])
 
 
+def _log(text):
+    """Appends a line to `tray.log` in the data folder: what the tray cannot tell with a notification (a notice that could
+    not be fetched or shown) is kept where the user can read it, never turned into another notification."""
+    try:
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        with open(LOG_PATH, "a", encoding="utf-8") as log:
+            log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}\n")
+    except OSError:
+        pass  # no console and no other channel here; a full disk must not kill the notice thread
+
+
+def _daemon_not_ready(exc):
+    """The daemon is not accepting connections yet (refused, reset or no answer in time), as right after boot, when the
+    registry still holds the address of the previous run. An HTTP answer, even an error, is not that."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return False
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    return isinstance(reason, (ConnectionError, TimeoutError))
+
+
 def _notice_loop(icon):
     """Asks the daemon every 10 minutes whether a toast is due. The daemon decides (once a day per notice) and marks it
-    announced, so a restart of the tray never repeats one."""
+    announced, so a restart of the tray never repeats one. While the daemon is still starting the question is asked again
+    every few seconds and nothing is shown: the tray icon already says "starting". Any other failure goes to `tray.log`."""
+    waiting_since = None
     while True:
+        delay = NOTICE_INTERVAL_S
         try:
             daemon_url = (daemon_launcher.read_registry() or {}).get("url")
             if daemon_url:
                 request = urllib.request.Request(daemon_url.rstrip("/") + "/setup/notices", data=b"{}", method="POST",
                                                  headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(request, timeout=60) as response:
-                    _show_notices(icon, json.load(response))
+                    notices = json.load(response)
+                waiting_since = None
+                _show_notices(icon, notices)
+            else:
+                delay = NOTICE_RETRY_S
         except Exception as exc:
-            if str(exc) != _state.get("notice_error"):
+            if _daemon_not_ready(exc):
+                delay = NOTICE_RETRY_S
+                waiting_since = waiting_since if waiting_since is not None else time.monotonic()
+                if time.monotonic() - waiting_since >= NOTICE_UNREACHABLE_LOG_S and not _state.get("notice_unreachable"):
+                    _state["notice_unreachable"] = True
+                    _log(f"notices: the daemon has not answered for {NOTICE_UNREACHABLE_LOG_S // 60} min: {exc}")
+            elif str(exc) != _state.get("notice_error"):
                 _state["notice_error"] = str(exc)
-                _notify(icon, "Could not show a Smart Tool notice: {error}", error=exc)
-        time.sleep(NOTICE_INTERVAL_S)
+                _log(f"notices: could not fetch or show them: {type(exc).__name__}: {exc}")
+        time.sleep(delay)
 
 
 def _announce_start(icon):
@@ -197,17 +236,20 @@ def _announce_start(icon):
 
 
 def _update_loop(icon):
-    """Checks npm at start and every 24 h. A newer version is installed right away when automatic updates are on (once
+    """Checks npm at start and every 24 h (every 5 min while npm cannot be reached, as when the network is not up yet right
+    after boot; nothing is shown for that). A newer version is installed right away when automatic updates are on (once
     per version, again 24 h after a failed try); otherwise the user is told and the menu offers it."""
     try:
         _announce_start(icon)
     except Exception as exc:
         _notify(icon, "Could not read the update state: {error}", error=exc)
     while True:
+        unreachable = False
         try:
             latest = update_check.newer_version()
         except Exception:
             latest = None
+            unreachable = True
         else:
             try:
                 update_check.record_check(latest)
@@ -228,7 +270,7 @@ def _update_loop(icon):
             elif not known:
                 _notify(icon, "Smart Tool {version} is available: use \"Update to {version}\" in this menu.",
                         version=latest)
-        time.sleep(UPDATE_CHECK_INTERVAL_S)
+        time.sleep(UPDATE_RETRY_S if unreachable else UPDATE_CHECK_INTERVAL_S)
 
 
 def _update_label(item):

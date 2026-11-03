@@ -864,7 +864,6 @@
   "Could not open the projects: {error}": "Não foi possível abrir os projetos: {error}",
   "Could not select the folder: {error}": "Não foi possível selecionar a pasta: {error}",
   "Failed to change automatic start: {error}": "Não foi possível mudar a inicialização automática: {error}",
-  "Could not show a Smart Tool notice: {error}": "Não foi possível mostrar um aviso do Smart Tool: {error}",
   "Could not save the update check: {error}": "Não foi possível salvar a verificação de atualização: {error}",
   "Automatic update skipped: {error}": "Atualização automática ignorada: {error}",
   "Smart Tool {version} is available: use \"Update to {version}\" in this menu.": "O Smart Tool {version} está disponível: use \"Atualizar para {version}\" neste menu.",
