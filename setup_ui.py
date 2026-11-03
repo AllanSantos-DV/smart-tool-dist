@@ -327,7 +327,8 @@ def handle_audit(body):
     """Setup audit panel: `index` lists the registered projects with their last audit summary; `report` returns the
     last stored report of one of them; `run` audits it now (MCP servers contacted unless probe is false). Only
     registered project folders are accepted. The opt-in session-start report in Claude Code or Codex (`client`, default
-    claude; Codex runs it only after /hooks approval, state `waiting_approval`): `hook_state`,
+    claude; in Codex the install also records the approval in config.toml, and `waiting_approval` means Codex does not
+    trust the written entry): `hook_state`,
     `hook_preview` (the exact entry and a token), `hook_install` (with that token, after a backup) and `hook_remove`
     (only Smart Tool's entry, after a backup)."""
     if not isinstance(body, dict):
@@ -337,7 +338,7 @@ def handle_audit(body):
         client = body.get("client", "claude")
         if body.get("action") == "hook_state":
             state = client_hooks.audit_state(client)
-            detail = {"detail": "installed, waiting for your approval in /hooks"} if state == client_hooks.AUDIT_WAITING else {}
+            detail = {"detail": "installed, but Codex does not trust this definition; Update records the approval"} if state == client_hooks.AUDIT_WAITING else {}
             return {"state": state, "file": client_hooks.CLIENTS[client]["files"][0], **detail}
         if body.get("action") == "hook_preview":
             return client_hooks.audit_preview(client)
@@ -827,7 +828,7 @@ __I18N__
       <div class="card">
         <div class="card-head"><h3>Report at session start</h3><span class="pill" id="audit-hook-pill" data-tone="busy">Checking</span></div>
         <div class="field"><label for="sel-audit-hook-client">Client</label><select id="sel-audit-hook-client"><option value="claude">Claude Code</option><option value="codex">Codex</option></select></div>
-        <p class="lede">Off by default. When on, every new session starts with the Smart Tool update notices (also shown to you) and the redirect proposals waiting for a decision. It adds a SessionStart entry to <span class="mono" id="audit-hook-file"></span>, written after a backup, and turning it off removes only that entry. Codex runs a new hook only after you approve it in /hooks. Either way, the agent learns about a project's setup audit on its first Smart Tool call there, once per session.</p>
+        <p class="lede">Off by default. When on, every new session starts with the Smart Tool update notices (also shown to you) and the redirect proposals waiting for a decision. It adds a SessionStart entry to <span class="mono" id="audit-hook-file"></span>, written after a backup, and turning it off removes only that entry. In Codex the same step records the approval in config.toml, as /hooks would. Either way, the agent learns about a project's setup audit on its first Smart Tool call there, once per session.</p>
         <div class="actions"><button type="button" class="primary" id="btn-audit-hook-on" hidden>Turn on</button><button type="button" id="btn-audit-hook-off" hidden>Turn off</button></div>
         <div id="audit-hook-confirm" hidden>
           <p class="hint" id="audit-hook-where"></p>
@@ -1911,13 +1912,14 @@ async function loadAuditHook() {
   try {
     const hook = await post("/setup/audit", { action: "hook_state", client: auditHookClient() });
     $("audit-hook-file").textContent = hook.file;
-    const on = hook.state === "current" || hook.state === "waiting_approval";
+    const on = hook.state === "current";
+    const stale = hook.state === "outdated" || hook.state === "waiting_approval";
     const pillEl = $("audit-hook-pill");
-    pillEl.textContent = hook.state === "waiting_approval" ? "Waiting for approval in /hooks" : on ? "On" : hook.state === "outdated" ? "Outdated" : "Off";
-    pillEl.dataset.tone = hook.state === "waiting_approval" || hook.state === "outdated" ? "warn" : on ? "ok" : "idle";
+    pillEl.textContent = hook.state === "waiting_approval" ? "Not approved in Codex" : on ? "On" : hook.state === "outdated" ? "Outdated" : "Off";
+    pillEl.dataset.tone = stale ? "warn" : on ? "ok" : "idle";
     if (hook.detail) setMsg("audit-hook-msg", "", hook.detail + ".");
     $("btn-audit-hook-on").hidden = on;
-    $("btn-audit-hook-on").textContent = hook.state === "outdated" ? "Update" : "Turn on";
+    $("btn-audit-hook-on").textContent = stale ? "Update" : "Turn on";
     $("btn-audit-hook-off").hidden = hook.state === "missing";
   } catch (error) {
     setMsg("audit-hook-msg", "error", "Session-start report state unavailable: " + error.message);

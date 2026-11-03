@@ -35,7 +35,8 @@ CLIENTS = {
                "post_matcher": "Grep|Bash|PowerShell|WebFetch|WebSearch"},
     "codex": {"label": "Codex", "prefix": "codex", "files": [os.path.join(endpoint_sync.codex_dir(), "hooks.json"), os.path.join(endpoint_sync.codex_dir(), "config.toml")],
               "docs": "https://learn.chatgpt.com/docs/hooks", "event": "PreToolUse", "matcher": "Bash|apply_patch",
-              "after_install": "Codex only runs new hooks after the user approves the definition in /hooks."},
+              "after_install": "Smart Tool recorded the approval of the new definition in Codex's config.toml, as /hooks "
+                               "would, so Codex runs it from the next session on."},
     "cursor": {"label": "Cursor", "prefix": "cursor", "files": [os.path.join(HOME, ".cursor", "hooks.json")],
                "docs": "https://cursor.com/docs/agent/hooks", "event": "preToolUse", "matcher": "Shell|Read|Grep",
                "blocked": "In Cursor, `allow` approves the tool without the user and empty output blocks: there is no documented neutral "
@@ -86,9 +87,10 @@ def _target(handler):
     return handler.get("url") or handler.get("command") or ""
 
 
-def inspect(client):
+def inspect(client, trust=True):
     """Our hook in the client's config: `current`, `missing`, or `outdated` (an older entry of ours) with `changes`,
-    plain sentences saying what an update rewrites (tools the old matcher leaves out, an old address or timeout)."""
+    plain sentences saying what an update rewrites (tools the old matcher leaves out, an old address or timeout).
+    In Codex a current entry that config.toml does not trust is outdated too, unless trust=False."""
     spec = CLIENTS[client]
     for path in spec["files"]:
         try:
@@ -106,6 +108,8 @@ def inspect(client):
         for event, (matcher, expected) in _entries(client).items():
             groups = hooks.get(event) if isinstance(hooks, dict) else None
             changes += _entry_changes(event, matcher, expected, groups)
+            if client == "codex" and trust and not changes and not _codex_trusted(event, groups, _our_hook):
+                changes.append(f"Codex has not approved its {event} entry; an update records the approval.")
         return {"state": "outdated" if changes else "current", "changes": changes}
     return {"state": "missing", "changes": []}
 
@@ -202,9 +206,20 @@ def _handler(client, route=HTTP_PATH, timeout=HTTP_TIMEOUT_S):
     return {"type": "command", "command": _command(client), "timeout": timeout}
 
 
+def _slot(groups, is_ours):
+    """Index, among the groups left once ours are taken out, where our replacement entry goes: the place of our first
+    group that holds only our hooks, so the groups after it keep their index (Codex keys an approval by that index);
+    the end when there is no such group."""
+    for kept, group in enumerate(groups):
+        if _ours(group, is_ours) and all(map(is_ours, group["hooks"])):
+            return kept
+    return len(_without_ours(groups, is_ours))
+
+
 def _plan(client_info):
     """(client, spec, path, data, changes): the client's config with our entries already taken out, and changes
-    {event: (groups, entry)}, the entry to append to each event's groups."""
+    {event: (groups, entry, slot, before)}: the entry to insert at `slot` of each event's groups, and the groups as
+    they were before."""
     client = identify(client_info)
     if client is None:
         raise ValueError(f"Unrecognized MCP client ({(client_info or {}).get('name') or 'no clientInfo'}); "
@@ -225,8 +240,9 @@ def _plan(client_info):
         groups = data["hooks"].setdefault(event, [])
         if not isinstance(groups, list):
             raise ValueError(f"{path}: hooks.{event} is not a list; nothing was changed.")
+        before, slot = list(groups), _slot(groups, _our_hook)
         groups[:] = _without_ours(groups)
-        changes[event] = (groups, {"matcher": matcher, "hooks": [handler]})
+        changes[event] = (groups, {"matcher": matcher, "hooks": [handler]}, slot, before)
     return client, spec, path, data, changes
 
 
@@ -239,7 +255,7 @@ def preview(client_info):
     token = secrets.token_urlsafe(12)
     _PREVIEWS[token] = {"client": client, "at": time.time()}
     return {"client": client, "installed": False, "file": path,
-            "change": {event: entry for event, (_groups, entry) in changes.items()},
+            "change": {event: entry for event, (_groups, entry, _slot, _before) in changes.items()},
             "token": token, "expires_s": PREVIEW_TTL_S, "after_install": spec.get("after_install")}
 
 
@@ -252,20 +268,38 @@ def install(client_info, token, confirm):
         raise ValueError("Installing requires the install_hook_preview token from this session (valid for 10 min) and confirm=true.")
     if installed(client):
         return {"client": client, "installed": True, "changed": False, "file": path}
-    for groups, entry in changes.values():
-        groups.append(entry)
-    backup = _write_checked(path, data, lambda: installed(client), "The hook")
+    if client == "codex":
+        _codex_states()
+    for groups, entry, slot, _before in changes.values():
+        groups.insert(slot, entry)
+    backup = _write_checked(path, data, lambda: inspect(client, trust=False)["state"] == "current", "The hook")
+    if client == "codex":
+        record_codex_trust({key: value for event, (groups, _entry, _slot, before) in changes.items()
+                      for key, value in _codex_trust(event, before, groups).items()})
+        if not installed(client):
+            raise RuntimeError(f"Codex does not trust the hook in {path} after recording its approval.")
     return {"client": client, "installed": True, "changed": True, "file": path, "backup": backup,
             "after_install": spec.get("after_install")}
+
+
+def backup_file(path):
+    """Copies path to a timestamped `.smart-tool-backup-` file beside it and returns that path, None when path does not
+    exist. A second backup in the same second gets a numbered name, so it never overwrites the copy of an earlier step."""
+    if not os.path.exists(path):
+        return None
+    stamp = f"{path}.smart-tool-backup-{time.strftime('%Y%m%d-%H%M%S')}"
+    backup, number = stamp, 1
+    while os.path.exists(backup):
+        number += 1
+        backup = f"{stamp}-{number}"
+    shutil.copy2(path, backup)
+    return backup
 
 
 def _write_checked(path, data, verify, what):
     """Writes data as JSON to path through a temp file after a timestamped backup; when verify() fails on the written
     file, restores the backup (or removes the new file) and raises. Returns the backup path (None for a new file)."""
-    backup = None
-    if os.path.exists(path):
-        backup = f"{path}.smart-tool-backup-{time.strftime('%Y%m%d-%H%M%S')}"
-        shutil.copy2(path, backup)
+    backup = backup_file(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = path + ".smart-tool-tmp"
     with open(temporary, "w", encoding="utf-8") as stream:
@@ -300,7 +334,8 @@ def _audit_client(client):
 
 
 def _audit_plan(client="claude"):
-    """(path, data, groups) of the client's hooks file with our SessionStart entry already removed from groups."""
+    """(path, data, groups, slot, before) of the client's hooks file: groups with our SessionStart entry already
+    removed, the slot where a replacement goes and the groups as they were before."""
     path = os.path.realpath(_audit_client(client)["files"][0])
     try:
         with open(path, encoding="utf-8") as stream:
@@ -312,8 +347,9 @@ def _audit_plan(client="claude"):
     groups = data["hooks"].setdefault("SessionStart", [])
     if not isinstance(groups, list):
         raise ValueError(f"{path}: hooks.SessionStart is not a list; nothing was changed.")
+    before, slot = list(groups), _slot(groups, _audit_hook)
     groups[:] = _without_ours(groups, _audit_hook)
-    return path, data, groups
+    return path, data, groups, slot, before
 
 
 def _codex_hash(event, group, index=0):
@@ -331,35 +367,173 @@ def _codex_hash(event, group, index=0):
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _codex_approved(groups):
-    """Our SessionStart handler is trusted in Codex's config.toml: the entry keyed by hooks.json path, event, group
-    and handler index holds the hash of the definition as it is now (a missing or different hash means /hooks has not
-    approved it, so Codex does not run it). An unreadable config.toml raises ValueError."""
-    spec = CLIENTS["codex"]
+def _codex_event(event):
+    """Codex's snake_case name of a hooks.json event (`PreToolUse` -> `pre_tool_use`), as in its state keys."""
+    return "".join(f"_{char.lower()}" if char.isupper() else char for char in event).lstrip("_")
+
+
+def _codex_key(event, group_index, handler_index, hooks=None):
+    """Codex's `hooks.state` key of one handler of `hooks` (default: Codex's hooks.json): file path, event, group
+    index, handler index."""
+    return f"{hooks or CLIENTS['codex']['files'][0]}:{_codex_event(event)}:{group_index}:{handler_index}"
+
+
+def _codex_states(path=None):
+    """The `hooks.state` table of Codex's config.toml at `path` (default: Codex's), {} when the file or the table is
+    missing; a config.toml that is not valid TOML raises ValueError."""
+    path = path or CLIENTS["codex"]["files"][1]
     try:
-        with open(spec["files"][1], encoding="utf-8") as stream:
+        with open(path, encoding="utf-8") as stream:
             hooks = tomllib.loads(stream.read()).get("hooks")
-            states = hooks.get("state") if isinstance(hooks, dict) else None
-            states = states if isinstance(states, dict) else {}
     except FileNotFoundError:
-        return False
+        return {}
     except tomllib.TOMLDecodeError as exc:
-        raise ValueError(f"{spec['files'][1]} is not valid TOML: {exc}")
-    paths = {spec["files"][0], os.path.realpath(spec["files"][0])}
+        raise ValueError(f"{path} is not valid TOML: {exc}")
+    states = hooks.get("state") if isinstance(hooks, dict) else None
+    return states if isinstance(states, dict) else {}
+
+
+def _codex_trusted(event, groups, is_ours):
+    """Our handler under `event` is trusted in Codex's config.toml: the entry keyed by hooks.json path, event, group
+    and handler index holds the hash of the definition as it is now (a missing or different hash means Codex does not
+    run it). An unreadable config.toml raises ValueError."""
+    states = _codex_states()
+    name = _codex_event(event)
+    path = CLIENTS["codex"]["files"][0]
     for group_index, group in enumerate(groups):
-        if not _ours(group, _audit_hook):
+        if not _ours(group, is_ours):
             continue
-        handler_index = next(i for i, hook in enumerate(group["hooks"]) if _audit_hook(hook))
-        for path in paths:
-            trusted = (states.get(f"{path}:session_start:{group_index}:{handler_index}") or {}).get("trusted_hash")
-            if trusted == _codex_hash("session_start", group, handler_index):
+        handler_index = next(i for i, hook in enumerate(group["hooks"]) if is_ours(hook))
+        for prefix in {path, os.path.realpath(path)}:
+            trusted = (states.get(f"{prefix}:{name}:{group_index}:{handler_index}") or {}).get("trusted_hash")
+            if trusted == _codex_hash(name, group, handler_index):
                 return True
     return False
 
 
+def _command_handlers(groups):
+    """(group index, handler index, group, handler) of every command handler in an event's groups."""
+    return [(group_index, handler_index, group, hook) for group_index, group in enumerate(groups)
+            if isinstance(group, dict) and isinstance(group.get("hooks"), list)
+            for handler_index, hook in enumerate(group["hooks"])
+            if isinstance(hook, dict) and hook.get("type") == "command" and "command" in hook]
+
+
+def _codex_trust(event, before, after):
+    """{state key: trusted hash} Codex needs once Smart Tool rewrote one event's groups from `before` to `after`: our
+    handlers, which the user approved by confirming the change, and every other command handler that moved to a new
+    index while config.toml trusts its definition at the old one."""
+    states = _codex_states()
+    name = _codex_event(event)
+    old = {id(hook): (group_index, handler_index, group)
+           for group_index, handler_index, group, hook in _command_handlers(before)}
+    wanted = {}
+    for group_index, handler_index, group, hook in _command_handlers(after):
+        key = _codex_key(event, group_index, handler_index)
+        if _our_hook(hook) or _audit_hook(hook):
+            wanted[key] = _codex_hash(name, group, handler_index)
+            continue
+        found = old.get(id(hook))
+        if found and found[:2] != (group_index, handler_index):
+            trusted = (states.get(_codex_key(event, *found[:2])) or {}).get("trusted_hash")
+            if trusted == _codex_hash(name, found[2], found[1]):
+                wanted[key] = _codex_hash(name, group, handler_index)
+    return wanted
+
+
+def _toml_table(line):
+    """Key path of a `[table]` header line (`[hooks.state.'x']` -> ("hooks", "state", "x")), None for any other line."""
+    stripped = line.strip()
+    if not stripped.startswith("[") or stripped.startswith("[["):
+        return None
+    try:
+        table = tomllib.loads(stripped)
+    except tomllib.TOMLDecodeError:
+        return None
+    path = []
+    while isinstance(table, dict) and len(table) == 1:
+        key = next(iter(table))
+        path.append(key)
+        table = table[key]
+    return tuple(path)
+
+
+def _with_trusted_hash(lines, key, value, newline):
+    """config.toml lines with `trusted_hash = "<value>"` under `[hooks.state.<key>]`: replaced or added inside the
+    table when its header exists, else a new table at the end."""
+    line = f'trusted_hash = "{value}"{newline}'
+    header = next((i for i, text in enumerate(lines) if _toml_table(text) == ("hooks", "state", key)), None)
+    if header is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += newline
+        quoted = f"'{key}'" if "'" not in key else json.dumps(key)
+        return lines + [newline, f"[hooks.state.{quoted}]{newline}", line]
+    end = next((i for i in range(header + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+    for i in range(header + 1, end):
+        if lines[i].split("=")[0].strip() == "trusted_hash":
+            lines[i] = line
+            return lines
+    lines.insert(header + 1, line)
+    return lines
+
+
+def repoint_trust(hooks_path, before_text, after_text):
+    """{state key: hash} for Codex's hooks.json at hooks_path once the installer rewrote it from before_text to
+    after_text to point at a new install folder: each handler of ours whose old definition config.toml trusted at the
+    same index gets the hash of its new one, so the move does not stop it. An unreadable config.toml raises ValueError."""
+    states = _codex_states(os.path.join(os.path.dirname(hooks_path), "config.toml"))
+    before = json.loads(before_text).get("hooks") or {}
+    wanted = {}
+    for event, groups in (json.loads(after_text).get("hooks") or {}).items():
+        old = {position[:2]: position for position in _command_handlers(before.get(event) or [])}
+        for group_index, handler_index, group, hook in _command_handlers(groups):
+            key = _codex_key(event, group_index, handler_index, hooks_path)
+            was = old.get((group_index, handler_index))
+            if (_our_hook(hook) or _audit_hook(hook)) and was and (states.get(key) or {}).get("trusted_hash") == \
+                    _codex_hash(_codex_event(event), was[2], handler_index):
+                wanted[key] = _codex_hash(_codex_event(event), group, handler_index)
+    return wanted
+
+
+def record_codex_trust(wanted, path=None):
+    """Records Codex's approval of each {state key: hash} in its config.toml at `path` (default: Codex's), as /hooks
+    does, after a timestamped backup; every other line keeps its text. A file that does not read back with these hashes
+    is restored and raises. Returns the backup path, None when there was nothing to record or no file before."""
+    if not wanted:
+        return None
+    path = path or CLIENTS["codex"]["files"][1]
+    try:
+        with open(path, encoding="utf-8", newline="") as stream:
+            text = stream.read()
+    except FileNotFoundError:
+        text = ""
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines(keepends=True)
+    for key, value in wanted.items():
+        lines = _with_trusted_hash(lines, key, value, newline)
+    backup = backup_file(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = path + ".smart-tool-tmp"
+    with open(temporary, "w", encoding="utf-8", newline="") as stream:
+        stream.write("".join(lines))
+    os.replace(temporary, path)
+    try:
+        states = _codex_states(path)
+        recorded = all((states.get(key) or {}).get("trusted_hash") == value for key, value in wanted.items())
+    except ValueError:
+        recorded = False
+    if not recorded:
+        if backup:
+            shutil.copy2(backup, path)
+        else:
+            os.remove(path)
+        raise RuntimeError(f"The hook approval does not read back from {path} after writing; the file was restored.")
+    return backup
+
+
 def audit_state(client="claude"):
     """The SessionStart audit hook in the client's hooks file: `current` (our entry equals this version's and, in
-    Codex, was approved in /hooks), `waiting_approval` (Codex only: written but not approved, so it does not run yet),
+    Codex, config.toml trusts it), `waiting_approval` (Codex only: written but not trusted, so it does not run yet),
     `outdated` (an entry of ours that differs) or `missing`."""
     path = _audit_client(client)["files"][0]
     try:
@@ -373,11 +547,11 @@ def audit_state(client="claude"):
         return "missing"
     if _audit_entry() not in found:
         return "outdated"
-    return "current" if client != "codex" or _codex_approved(groups) else AUDIT_WAITING
+    return "current" if client != "codex" or _codex_trusted("SessionStart", groups, _audit_hook) else AUDIT_WAITING
 
 
 def audit_hook_installed(client):
-    """The session-start hook is on and running (Codex: approved in /hooks), so a search need not repeat the redirect
+    """The session-start hook is on and running (Codex: trusted in config.toml), so a search need not repeat the redirect
     proposals it already carries.
     An unreadable config file counts as off here; `audit_state` raises for it on the setup screen."""
     if client not in AUDIT_CLIENTS:
@@ -389,16 +563,16 @@ def audit_hook_installed(client):
 
 
 def _audit_after(client):
-    """{after_install: ...} for a client whose new hooks need the user's approval, else nothing."""
+    """{after_install: ...} for a client whose new hooks run only once approved, else nothing."""
     note = CLIENTS[client].get("after_install")
     return {"after_install": note} if note else {}
 
 
 def audit_preview(client="claude"):
     """The change that turns the SessionStart audit report on in the client, with a token for `audit_install`."""
-    path, _data, _groups = _audit_plan(client)
+    path = _audit_plan(client)[0]
     entry = _audit_entry()
-    if audit_state(client) in (AUDIT_ON, AUDIT_WAITING):
+    if audit_state(client) == AUDIT_ON:
         return {"installed": True, "file": path, "change": None}
     token = secrets.token_urlsafe(12)
     _PREVIEWS[token] = {"client": f"audit:{client}", "at": time.time()}
@@ -408,25 +582,34 @@ def audit_preview(client="claude"):
 
 def audit_install(token, confirm, client="claude"):
     """Writes the SessionStart audit entry into the client's hooks file with a backup; needs the `audit_preview` token
-    (10 min) and confirm=True. Returns {installed, changed, file, backup}, plus `after_install` in Codex: the hook
-    runs only after the user approves it in /hooks."""
+    (10 min) and confirm=True; in Codex it also records the approval in config.toml. Returns {installed, changed, file,
+    backup}, plus `after_install` in Codex."""
     planned = _PREVIEWS.pop(token or "", None)
     if confirm is not True or not planned or planned["client"] != f"audit:{client}" or time.time() - planned["at"] > PREVIEW_TTL_S:
         raise ValueError("Turning the audit report on requires the preview token (valid for 10 min) and confirm=true.")
-    path, data, groups = _audit_plan(client)
-    if audit_state(client) in (AUDIT_ON, AUDIT_WAITING):
+    path, data, groups, slot, before = _audit_plan(client)
+    if audit_state(client) == AUDIT_ON:
         return {"installed": True, "changed": False, "file": path}
-    groups.append(_audit_entry())
+    if client == "codex":
+        _codex_states()
+    groups.insert(slot, _audit_entry())
     backup = _write_checked(path, data, lambda: audit_state(client) in (AUDIT_ON, AUDIT_WAITING), "The audit hook")
+    if client == "codex":
+        record_codex_trust(_codex_trust("SessionStart", before, groups))
+        if audit_state(client) != AUDIT_ON:
+            raise RuntimeError(f"Codex does not trust the audit hook in {path} after recording its approval.")
     return {"installed": True, "changed": True, "file": path, "backup": backup, **_audit_after(client)}
 
 
 def audit_remove(client="claude"):
-    """Takes only our SessionStart entry out of the client's hooks file (after a backup); nothing else is touched."""
-    path, data, groups = _audit_plan(client)
+    """Takes only our SessionStart entry out of the client's hooks file (after a backup); in Codex the hooks after it
+    keep their approval at their new index. Nothing else is touched."""
+    path, data, groups, _slot_at, before = _audit_plan(client)
     if audit_state(client) == "missing":
         return {"installed": False, "changed": False, "file": path}
     if not groups:
         del data["hooks"]["SessionStart"]
     backup = _write_checked(path, data, lambda: audit_state(client) == "missing", "The removal")
+    if client == "codex":
+        record_codex_trust(_codex_trust("SessionStart", before, groups))
     return {"installed": False, "changed": True, "file": path, "backup": backup}

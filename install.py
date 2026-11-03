@@ -12,6 +12,7 @@ import urllib.request
 import venv
 from pathlib import Path
 
+import client_hooks
 import paths
 import version
 
@@ -129,8 +130,9 @@ def _daemon_up():
 
 
 def hook_files():
+    """Claude Code's settings.json and Codex's hooks.json (CLAUDE_CONFIG_DIR and CODEX_HOME when set)."""
     claude = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-    return claude / "settings.json", Path.home() / ".codex" / "hooks.json"
+    return claude / "settings.json", Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "hooks.json"
 
 
 def _script_paths(text):
@@ -179,10 +181,11 @@ def _repointed(text, folder, target):
 
 
 def remove_other_installs(target):
-    """An older installation in another folder keeps the port and the hooks: stop it, point the hooks at target and
-    delete its program folder. Its state folders are left alone."""
+    """An older installation in another folder keeps the port and the hooks: stop it, point the hooks at target (in
+    Codex, with the approval of each trusted hook of ours carried to its new command) and delete its program folder.
+    Its state folders are left alone."""
     removed = []
-    stamp = time.strftime("%Y%m%d-%H%M%S")
+    codex = hook_files()[1]
     for folder in other_installs(target):
         print(f"Older Smart Tool installation found at {folder}; removing it.")
         stop_processes(folder)
@@ -190,8 +193,10 @@ def remove_other_installs(target):
             original = path.read_text(encoding="utf-8") if path.is_file() else ""
             text = _repointed(original, folder, target)
             if text != original:
-                shutil.copy2(path, path.with_name(f"{path.name}.smart-tool-backup-{stamp}"))
+                trust = client_hooks.repoint_trust(str(path), original, text) if path == codex else {}
+                client_hooks.backup_file(str(path))
                 path.write_text(text, encoding="utf-8")
+                client_hooks.record_codex_trust(trust, str(path.with_name("config.toml")))
                 print(f"Hooks in {path} now point to {target}.")
         startup = STARTUP_SCRIPT.read_text(encoding="utf-8", errors="replace") if STARTUP_SCRIPT.is_file() else ""
         if any(_same_folder(_script_folder(script), folder) for script in _script_paths(startup)):

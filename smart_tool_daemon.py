@@ -2225,7 +2225,10 @@ def _project_action_locked(arguments):
         return {"current_client": client_hooks.status(client), **integration_metrics.summary(arguments.get("days", 7))}
     if action == "install_hook_preview":
         _session, client = _session_client()
-        return client_hooks.preview(client)
+        plan = client_hooks.preview(client)
+        if "token" in plan:
+            plan["plan_id"] = plan.pop("token")
+        return plan
     if action == "install_hook":
         _session, client = _session_client()
         result = client_hooks.install(client, arguments.get("plan_id"), arguments.get("confirm"))

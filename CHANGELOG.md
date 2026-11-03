@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.57 - beta
+
+- Codex runs Smart Tool's hooks with no `/hooks` step. Installing or updating the Codex redirect hook or the
+  session-start hook also records the approval of the new definition in Codex's `config.toml`, as `/hooks` does: the
+  `trusted_hash` Codex computes for that handler, written after a backup with every other line left as it was, and
+  read back before the step reports success. The new entry takes the place of the old one, so the other hooks keep
+  their index and their approval; turning the session-start hook off carries the approval of an approved hook that
+  moves up to its new index. When the installer points the hooks at a new install folder, each Smart Tool hook that
+  was approved keeps its approval. A Codex entry that is current but not approved shows as outdated (session-start
+  hook: "Not approved in Codex"), and updating records the approval. A `config.toml` that is not valid TOML stops the
+  step before `hooks.json` is written (`tests/test_codex_audit_hook.py`, `tests/test_install_legacy.py`).
+- `project_manage action=install_hook_preview` returns the `plan_id` that `action=install_hook` takes, as its
+  description says; it returned the identifier under `token`, so an agent could not finish the update.
+- Two hook steps in the same second (updating the redirect hook, then the session-start hook) keep separate backups:
+  the second gets a numbered name instead of overwriting the first, which holds the file as it was before both.
+
 ## 0.9.56 - beta
 
 - Every command hook Smart Tool writes ends with `--hook-origin=smart-tool`: the Codex redirect hook

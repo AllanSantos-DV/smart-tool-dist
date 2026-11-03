@@ -17,7 +17,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.56 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.57 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -83,7 +83,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.56 install
+npx @allansantos-dev/smart-tool@0.9.57 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -150,7 +150,9 @@ Redirects) and Maintenance (Setup audit, Startup).
    command hook it writes (the Codex redirect hook and the session-start hook) ends with
    `--hook-origin=smart-tool`, so its command line names Smart Tool as its owner; an entry written before that shows
    as outdated, and updating replaces it instead of adding a second one. Claude Code's redirect hooks are HTTP
-   entries with no command line.
+   entries with no command line. In Codex, installing or updating a hook replaces Smart Tool's entry in place and
+   records its approval in `~/.codex/config.toml`, as `/hooks` would, so Codex runs it with no approval step; the
+   other hooks keep theirs.
 
    **Browser control** comes with the registration, and with every update for clients where smart-tool is registered:
    the official Playwright MCP (pinned in `web_adapters/node`) is registered as the `playwright` server, driving the
@@ -270,8 +272,9 @@ Redirects) and Maintenance (Setup audit, Startup).
    when none is stored. Optionally, **Report at session start** on the Setup audit page (Claude Code or Codex) starts
    every new session with the update notices and the redirect proposals waiting for a decision: it previews the exact
    SessionStart entry, adds it to `~/.claude/settings.json` or `~/.codex/hooks.json` only after you confirm (backup
-   first), and **Turn off** removes only that entry. Codex runs a new hook only after you approve it in `/hooks`;
-   until then the page shows "waiting for your approval". It is off by default. The hook script
+   first), and **Turn off** removes only that entry. In Codex the same step records the approval of the new
+   definition in `~/.codex/config.toml`, as `/hooks` would, so no `/hooks` step is left; an entry Codex does not trust
+   shows "Not approved in Codex", and **Update** records it. It is off by default. The hook script
    (`hooks/session_audit.py`) only asks the running service and prints nothing when the service is down.
 4. **Local models** (optional): if the mcp-memory embedding sidecar is installed on the machine, its local embedder
    can serve as a fallback (or preferred) embedding model.
