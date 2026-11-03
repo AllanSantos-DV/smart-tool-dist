@@ -31,7 +31,6 @@ import yaml
 
 import atomic_io
 import endpoint_sync
-import i18n
 import paths
 
 REPORT_DIR = os.path.join(paths.DATA_DIR, "setup-audit")
@@ -43,9 +42,7 @@ PROBE_MAX_AGE_S = 6 * 3600
 SKILL_DESCRIPTION_MAX = 1536
 SKILL_BUDGET_CHARS = 8000
 CODEX_PROJECT_DOC_MAX = 32 * 1024
-NOTICE_ITEMS = 3
-NOTICE_ACTION_MAX = 360
-REVIEW_FIRST = ("hook_overlap", "skill_budget")
+NOTICE_CHECKS = 3
 SMART_TOOL_SERVER = "smart-tool"
 CLAUDE_TOOLS = ("Bash", "Read", "Grep", "Glob", "LS", "Edit", "MultiEdit", "Write", "NotebookEdit", "WebFetch",
                 "WebSearch", "Task")
@@ -865,39 +862,28 @@ def stored_for(path):
         folder = parent
 
 
-def top_findings(report, count=NOTICE_ITEMS):
-    """The errors and warnings of report most worth acting on first: errors, then a fix over a check to make
-    (REVIEW_FIRST), then new ones, then the report order."""
-    order = {"error": 0, "warn": 1}
-    ranked = [(order[f["severity"]], f["check"] in REVIEW_FIRST, not f.get("new"), position, f)
-              for position, f in enumerate(report["findings"]) if f["severity"] in order]
-    return [row[-1] for row in sorted(ranked, key=lambda row: row[:4])[:count]]
-
-
-def session_notice(path):
-    """Context for an agent session about the stored audit of path (nothing is run): the project, the counts, the top
-    NOTICE_ITEMS findings with their fix and the exact call that lists all of them. "" when there is no stored report
-    or it holds no error or warning. Each fix changes the user's agent setup, so the agent is told to apply one when
-    the user agrees, never on its own. Stays far below the ~2,500 tokens Codex spills to disk."""
+def agent_notice(path):
+    """(project, text) of the short note an agent gets on its first Smart Tool call in path during a session: the
+    audited project, its error and warning counts, up to NOTICE_CHECKS of their checks (errors first) and the call
+    that shows each one with its fix (nothing is run). None when no stored report covers path or it holds no error or
+    warning. Each fix changes the user's agent setup, so the agent is told to apply one only when the user asks."""
     report = stored_for(path)
     if report is None:
-        return ""
-    summary = report["summary"]
-    if not summary["error"] and not summary["warn"]:
-        return ""
-    new = sum(1 for f in report["findings"] if f.get("new") and f["severity"] in ("error", "warn"))
-    age = max(0, int((time.time() - report["checked_at"]) // 60))
-    lines = [f"Smart Tool setup audit of {report['project']} ({age} min ago): {summary['error']} errors, "
-             f"{summary['warn']} warnings" + (f", {new} new" if new else "") + " in the Claude Code and Codex "
-             "configuration. Top items, each with its fix:"]
-    for number, finding in enumerate(top_findings(report), 1):
-        lines.append(f"{number}. [{finding['harness']}] {finding['severity']} {finding['check']}: "
-                     f"{finding['subject'][:120]}. Fix: {finding['action'][:NOTICE_ACTION_MAX]}")
+        return None
+    errors, warnings = report["summary"]["error"], report["summary"]["warn"]
+    if not errors and not warnings:
+        return None
+    ranked = sorted((f for f in report["findings"] if f["severity"] in ("error", "warn")),
+                    key=lambda f: f["severity"] != "error")
+    checks = list(dict.fromkeys(f["check"] for f in ranked))
+    named = ", ".join(checks[:NOTICE_CHECKS]) + (f" and {len(checks) - NOTICE_CHECKS} more"
+                                                 if len(checks) > NOTICE_CHECKS else "")
     root = report["project"].replace("\\", "/")
-    lines.append(f'All findings with their fixes: project_manage action=setup_audit mode=last project_root="{root}"; '
-                 "after a fix, mode=run checks again. These fixes change the user's agent setup: apply one when the "
-                 "user agrees.")
-    return "\n".join(lines)
+    text = (f"Smart Tool: the project {root} has {errors} error{'' if errors == 1 else 's'} and {warnings} "
+            f"warning{'' if warnings == 1 else 's'} in its agent setup ({named}). To see each one with its fix, call "
+            f'project_manage action=setup_audit mode=last project_root="{root}". This note is for you; fix one only '
+            "when the user asks.")
+    return report["project"], text
 
 
 def index():
@@ -970,51 +956,9 @@ def _save_locked(report):
     key = index_key(report["project"])
     entry = {"project": report["project"], "summary": report["summary"], "new": len(changes.get("new", [])),
              "resolved": len(changes.get("resolved", [])), "checked_at": report["checked_at"],
-             "trigger": report["trigger"], "snapshot_key": report["snapshot_key"],
-             "pending": _pending_notice(data.get(key), report)}
+             "trigger": report["trigger"], "snapshot_key": report["snapshot_key"]}
     data[key] = entry
     _write_index(data)
-
-
-def _pending_notice(previous, report):
-    """The new errors and warnings of a scheduled run not yet told to the user, added to those a former run left
-    unannounced (by finding id). A manual run adds none: the user is looking at its result."""
-    pending = list((previous or {}).get("pending") or [])
-    if report["trigger"] == "schedule":
-        known = {item["id"] for item in pending}
-        pending += [{"id": f["id"], "severity": f["severity"], "check": f["check"], "subject": f["subject"]}
-                    for f in report["findings"]
-                    if f.get("new") and f["severity"] in ("error", "warn") and f["id"] not in known]
-    return pending
-
-
-def notices_due():
-    """[{project, errors, warnings, items}] for the projects whose scheduled audits found new errors or warnings since
-    the last call; marks them announced, so each finding is told once (the tray toast)."""
-    with _INDEX_LOCK:
-        data = index()
-        due = []
-        for entry in data.values():
-            pending = entry.get("pending") or []
-            if pending:
-                due.append({"project": entry["project"], "errors": sum(i["severity"] == "error" for i in pending),
-                            "warnings": sum(i["severity"] == "warn" for i in pending), "items": pending})
-                entry["pending"] = []
-        if due:
-            _write_index(data)
-    return due
-
-
-def toast_text(row):
-    """(title, lines) of the toast for one `notices_due` row, in the interface language."""
-    total = row["errors"] + row["warnings"]
-    title = (i18n.t("Setup audit: 1 new problem in the agent configuration") if total == 1
-             else i18n.t("Setup audit: {count} new problems in the agent configuration", count=total))
-    lines = [os.path.basename(row["project"].rstrip("\\/")) or row["project"]]
-    lines += [f"{item['severity']}: {item['check']} - {item['subject']}"[:120] for item in row["items"][:3]]
-    if len(row["items"]) > 3:
-        lines.append(i18n.t("and {count} more", count=len(row["items"]) - 3))
-    return title, lines
 
 
 class Scheduler:

@@ -17,7 +17,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.54 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.55 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -83,7 +83,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.54 install
+npx @allansantos-dev/smart-tool@0.9.55 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -253,21 +253,22 @@ Redirects) and Maintenance (Setup audit, Startup).
    two minutes after it starts and then every 30 minutes (MCP servers shared by several projects are contacted once
    and their result reused for 6 hours; Run now always contacts them again), and the setup screen's **Setup audit**
    panel shows each project's last report: findings by severity, what is new, what was resolved, the tokens each MCP
-   server's tools cost and what was not verified. When a scheduled run finds new errors or warnings, a Windows
-   notification from the tray names the folder and up to three of them, once per finding, with a button that opens the
-   panel; manual runs and info findings stay silent.
+   server's tools cost and what was not verified. It never raises a Windows notification: a project's problems are
+   told to the agent working in it.
 
-   The agent hears about it without asking for it. `setup_audit` with `mode=last` returns the stored report for the
-   folder (or the nearest audited parent) without auditing again, and fails with what to do when none is stored. On
-   its first `smart_search` of a session, and once per folder, the agent also gets a short notice when the stored
-   report holds errors or warnings: the counts, the top three findings with their fixes and the call that lists them
-   all, with the rule that a fix is applied only when you agree; a clean report adds nothing. Optionally, **Report at session
-   start** on the Setup audit page (Claude Code or Codex) moves that notice to the start of every new session: it
-   previews the exact SessionStart entry, adds it to `~/.claude/settings.json` or `~/.codex/hooks.json` only after you
-   confirm (backup first), and **Turn off** removes only that entry. Codex runs a new hook only after you approve it in
-   `/hooks`; until then the page shows "waiting for your approval" and the search keeps repeating the notice. It is off by default; while it is on, the search no longer repeats the notice. The
-   hook script (`hooks/session_audit.py`) only reads the stored report from the running service and prints nothing
-   when the service is down.
+   The agent hears about it without asking for it. The first Smart Tool call of a session in a project
+   (`smart_search`, `smart_scout` or `project_manage` with that `project_root`) carries, after its answer, a short
+   note for the agent only: the project, its error and warning counts, the checks that found them and the call that
+   shows each one with its fix (`project_manage action=setup_audit mode=last project_root="<project>"`), with the rule
+   that a fix is applied only when you ask. It comes once per session and project (a subfolder counts as its project),
+   a project with a clean report or no report adds nothing, and nothing is fixed on its own. `mode=last` returns the
+   stored report for the folder (or the nearest audited parent) without auditing again, and fails with what to do
+   when none is stored. Optionally, **Report at session start** on the Setup audit page (Claude Code or Codex) starts
+   every new session with the update notices and the redirect proposals waiting for a decision: it previews the exact
+   SessionStart entry, adds it to `~/.claude/settings.json` or `~/.codex/hooks.json` only after you confirm (backup
+   first), and **Turn off** removes only that entry. Codex runs a new hook only after you approve it in `/hooks`;
+   until then the page shows "waiting for your approval". It is off by default. The hook script
+   (`hooks/session_audit.py`) only asks the running service and prints nothing when the service is down.
 4. **Local models** (optional): if the mcp-memory embedding sidecar is installed on the machine, its local embedder
    can serve as a fallback (or preferred) embedding model.
 5. **Web search providers** work without keys on their free public tiers; add your own key for more volume. Set your

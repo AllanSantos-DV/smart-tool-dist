@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.55 - beta
+
+- The agent learns about the problems of the project it works on, and the user is not notified about them. The first
+  Smart Tool call of a session in a project (`smart_search`, `smart_scout` or `project_manage` with that
+  `project_root`) carries, after its answer, a short note: the project, its setup audit error and warning counts, the
+  checks that found them and the `project_manage action=setup_audit mode=last` call that shows each one with its fix.
+  Once per session and project (a subfolder counts as its project); a clean or missing report adds nothing; a stored
+  report that cannot be read is told with its cause; nothing is fixed on its own. The tray no longer raises a Windows
+  notification per project for new audit findings, and the session-start hook now carries only the update notices
+  and the redirect proposals, so the note is not given twice (`tests/test_session_audit.py`,
+  `tests/test_tray_notices.py`).
+- A push to `main` no longer holds the only self-hosted runner waiting for npm to list a version the tag's Release
+  run has not published yet: the Pages workflow checks npm once on a push and skips publishing when the version is not
+  listed (the Release run republishes the page), and waits only when dispatched (`tests/test_pages.py`).
+
 ## 0.9.54 - beta
 
 - A folder whose subfolders are projects is not indexed as one project. When it has no `.git` of its own and two or

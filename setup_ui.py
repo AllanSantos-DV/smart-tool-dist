@@ -203,13 +203,12 @@ def handle_health_get():
 
 
 def handle_notices():
-    """What the tray should show now: the model offer (once a day until answered), models over the failure limit
-    (once a day each) and the new errors or warnings of the scheduled setup audit (once per finding). Fetching marks
-    them announced, so each toast is shown once per reminder period."""
+    """What the tray should show now: the model offer (once a day until answered) and models over the failure limit
+    (once a day each). Fetching marks them announced, so each toast is shown once per reminder period. A project's
+    setup audit is told to the agent working there (first Smart Tool call of a session), never as a toast."""
     upgrade = _checked_upgrade()
     offer = model_upgrade.due() if upgrade["state"] == "pending" else None
-    return {"upgrade": offer, "failing": model_health.alerts_due(), "audit": setup_audit.notices_due(),
-            "check_error": upgrade["check_error"]}
+    return {"upgrade": offer, "failing": model_health.alerts_due(), "check_error": upgrade["check_error"]}
 
 
 def handle_local_models_get():
@@ -828,7 +827,7 @@ __I18N__
       <div class="card">
         <div class="card-head"><h3>Report at session start</h3><span class="pill" id="audit-hook-pill" data-tone="busy">Checking</span></div>
         <div class="field"><label for="sel-audit-hook-client">Client</label><select id="sel-audit-hook-client"><option value="claude">Claude Code</option><option value="codex">Codex</option></select></div>
-        <p class="lede">Off by default. When on, every new session starts with one short line about the stored audit of its folder (errors and warnings only, nothing runs). It adds a SessionStart entry to <span class="mono" id="audit-hook-file"></span>, written after a backup, and turning it off removes only that entry. Codex runs a new hook only after you approve it in /hooks. Without it, the agent gets the same line once, on its first search.</p>
+        <p class="lede">Off by default. When on, every new session starts with the Smart Tool update notices (also shown to you) and the redirect proposals waiting for a decision. It adds a SessionStart entry to <span class="mono" id="audit-hook-file"></span>, written after a backup, and turning it off removes only that entry. Codex runs a new hook only after you approve it in /hooks. Either way, the agent learns about a project's setup audit on its first Smart Tool call there, once per session.</p>
         <div class="actions"><button type="button" class="primary" id="btn-audit-hook-on" hidden>Turn on</button><button type="button" id="btn-audit-hook-off" hidden>Turn off</button></div>
         <div id="audit-hook-confirm" hidden>
           <p class="hint" id="audit-hook-where"></p>

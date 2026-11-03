@@ -372,7 +372,8 @@ def audit_state(client="claude"):
 
 
 def audit_hook_installed(client):
-    """The session-start audit report is on and running (Codex: approved in /hooks), so a search need not repeat it.
+    """The session-start hook is on and running (Codex: approved in /hooks), so a search need not repeat the redirect
+    proposals it already carries.
     An unreadable config file counts as off here; `audit_state` raises for it on the setup screen."""
     if client not in AUDIT_CLIENTS:
         return False

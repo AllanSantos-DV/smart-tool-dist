@@ -1627,28 +1627,60 @@ def _mark_notice_delivered(job_id):
 
 
 def _pending_notices(session, client, project_root):
-    """[(key, text)] the session has not been told yet: the hook state (once), the stored setup audit of the
-    searched folder (once per folder, only with errors or warnings) and the redirect proposals waiting for a decision
-    (once), these two not when the SessionStart audit hook already reports them at the start of the session. An
-    unreadable audit report is logged, not raised, so a search never fails over it."""
+    """[(key, text)] the session has not been told yet: the hook state (once), the update notices (once each) and the
+    redirect proposals waiting for a decision (once, not when the SessionStart hook already reports them at the start
+    of the session). The setup audit of the folder is not here: `_project_notice` adds it to the first Smart Tool
+    call of the session in that project, whatever the tool."""
     delivered = session.get("notices_delivered") or set()
     pending = []
     if session["hook_notice"] and "hook" not in delivered:
         pending.append(("hook", session["hook_notice"]))
     pending += [(key, f"{text} Tell the user.") for key, text in _update_notices() if key not in delivered]
-    key = "audit:" + setup_audit.index_key(project_root)
-    if (key not in delivered or "proposals" not in delivered) and not client_hooks.audit_hook_installed(client):
-        try:
-            text = setup_audit.session_notice(project_root) if key not in delivered else ""
-        except Exception as exc:
-            _log(f"setup audit notice not read: {type(exc).__name__}: {exc}")
-            text = ""
-        if text:
-            pending.append((key, text))
-        proposals = _proposals_notice() if "proposals" not in delivered else ""
+    if "proposals" not in delivered and not client_hooks.audit_hook_installed(client):
+        proposals = _proposals_notice()
         if proposals:
             pending.append(("proposals", proposals))
     return pending
+
+
+_PROJECT_NOTICE_TOOLS = frozenset({"smart_search", "smart_scout", "project_manage"})
+_NOTICE_LOCK = threading.Lock()
+
+
+def _notice_root(arguments):
+    """The folder a tool call is about: arguments["project_root"], or the root of the registered arguments["project_id"];
+    None when the call names neither or the id is not registered."""
+    if not isinstance(arguments, dict):
+        return None
+    if isinstance(arguments.get("project_root"), str):
+        return arguments["project_root"]
+    project = project_store.get(arguments["project_id"]) if isinstance(arguments.get("project_id"), str) else None
+    return project["root"] if project else None
+
+
+def _project_notice(name, arguments):
+    """The setup audit note of the project the call names (project_root or project_id) when this is the first call of
+    the MCP session there (keyed by the audited project, so a subfolder does not repeat it), or "". Marks it told:
+    once per session and project, in the tool answer only (the user gets no notification for it). A setup_audit call
+    marks it told without the note, since its own answer already holds the findings. A stored report that cannot be
+    read is told the same way, with its cause, instead of being skipped."""
+    session, _client = _session_client()
+    root = _notice_root(arguments)
+    if session is None or name not in _PROJECT_NOTICE_TOOLS or not isinstance(root, str) or not os.path.isdir(root):
+        return ""
+    try:
+        found = setup_audit.agent_notice(root)
+    except (OSError, ValueError, KeyError) as exc:
+        found = (root, f"Smart Tool could not read the setup audit of {root.replace(os.sep, '/')}: {exc}")
+    if found is None:
+        return ""
+    key = "audit:" + setup_audit.index_key(found[0])
+    with _NOTICE_LOCK:
+        told = session.setdefault("notices_delivered", set())
+        if key in told:
+            return ""
+        told.add(key)
+    return "" if arguments.get("action") == "setup_audit" else found[1]
 
 
 def _proposals_notice():
@@ -4048,18 +4080,16 @@ def _pretool_hook(handler):
 
 
 def _session_audit_hook(handler):
-    """SessionStart output for the audit report hook: the stored audit notice of the session's folder as
-    additionalContext, and the update notices both as systemMessage (shown to the user) and as context; `{}` when
-    there is nothing to say. Never runs an audit."""
+    """SessionStart output of the session-start hook: the update notices both as systemMessage (shown to the user) and
+    as additionalContext, plus the redirect proposals waiting for a decision as context; `{}` when there is nothing to
+    say. The setup audit of a project reaches the agent on its first Smart Tool call there (`_project_notice`), so it
+    is told once per session and project."""
     try:
-        payload = json.loads(handler._read_body(HOOK_MAX_BODY_BYTES) or b"{}")
-        cwd = payload.get("cwd")
-        text = setup_audit.session_notice(cwd) if isinstance(cwd, str) and os.path.isdir(cwd) else ""
-    except Exception as exc:
-        _log(f"SessionStart audit hook without a report: {type(exc).__name__}: {exc}")
-        text = ""
-    updates = " ".join(notice for _key, notice in _update_notices())
-    context = "\n".join(part for part in (updates, text, _proposals_notice()) if part)
+        handler._read_body(HOOK_MAX_BODY_BYTES)
+    except ValueError as exc:
+        _log(f"SessionStart hook body refused: {exc}")
+    updates =" ".join(notice for _key, notice in _update_notices())
+    context = "\n".join(part for part in (updates, _proposals_notice()) if part)
     if not context:
         return {}
     output = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}
@@ -4144,6 +4174,9 @@ def _dispatch_tool_call(params, session_id=None):
         warning = model_health.warning_text(failures, setup_ui.setup_origin())
         if warning:
             result["content"][0]["text"] += _sanitize_text(warning)
+        notice = _project_notice(name, arguments)
+        if notice:
+            result["content"][0]["text"] += "\n\n" + _sanitize_text(notice)
         return result
     finally:
         if who is not None:

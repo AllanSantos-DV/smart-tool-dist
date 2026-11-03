@@ -26,7 +26,6 @@ import config
 import daemon_launcher
 import i18n
 import paths
-import setup_audit
 import toast_notice
 import update_check
 import version
@@ -156,8 +155,7 @@ def _toast(title, lines, buttons, tag):
 
 
 def _show_notices(icon, notices):
-    """Shows a toast for each pending notice: the new-default-models offer, each model over the failure limit and each
-    project whose scheduled setup audit found new errors or warnings."""
+    """Shows a toast for each pending notice: the new-default-models offer and each model over the failure limit."""
     offer = notices.get("upgrade")
     if offer:
         lines = [f"{role}: {change['current']} -> {change['new']}" for role, change in offer["changes"].items()]
@@ -175,10 +173,6 @@ def _show_notices(icon, notices):
             [(i18n.t("Switch model"), toast_notice.action_uri("open-setup", section="models")),
              (i18n.t("Mute 7 days"), toast_notice.action_uri("mute-model", model=row["model"]))],
             "model-failing:" + row["model"])
-    for row in notices.get("audit") or []:
-        title, lines = setup_audit.toast_text(row)
-        _toast(title, lines, [(i18n.t("Open the audit"), toast_notice.action_uri("open-setup", section="audit"))],
-               "setup-audit:" + row["project"])
 
 
 def _log(text):
