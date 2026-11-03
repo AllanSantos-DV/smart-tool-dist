@@ -17,7 +17,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.55 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.56 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -83,7 +83,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.55 install
+npx @allansantos-dev/smart-tool@0.9.56 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -146,7 +146,11 @@ Redirects) and Maintenance (Setup audit, Startup).
    the usage meter: it is a sidecar on your machine with no price, and its state is the **Local models** section.
 3. **Agents**: register the MCP server in Claude Code or Codex (runs their official `mcp add` command), install the
    hook and choose its behavior under **Agent rules**. A hook written by an older Smart Tool shows as outdated, with
-   what an update changes; updating previews the entry and rewrites only Smart Tool's, after a backup.
+   what an update changes; updating previews the entry and rewrites only Smart Tool's, after a backup. Every
+   command hook it writes (the Codex redirect hook and the session-start hook) ends with
+   `--hook-origin=smart-tool`, so its command line names Smart Tool as its owner; an entry written before that shows
+   as outdated, and updating replaces it instead of adding a second one. Claude Code's redirect hooks are HTTP
+   entries with no command line.
 
    **Browser control** comes with the registration, and with every update for clients where smart-tool is registered:
    the official Playwright MCP (pinned in `web_adapters/node`) is registered as the `playwright` server, driving the

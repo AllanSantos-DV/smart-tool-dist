@@ -14,6 +14,8 @@ HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", 
 MARKER = "pretool_router.py"
 AUDIT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "session_audit.py")
 AUDIT_MARKER = "session_audit.py"
+# Hook origin convention shared by every project that installs hooks: a failed command hook names its owner.
+HOOK_ORIGIN = "--hook-origin=smart-tool"
 AUDIT_MATCHER = "startup|resume|clear|compact|fork"
 AUDIT_TIMEOUT_S = 10
 AUDIT_CLIENTS = ("claude", "codex")
@@ -185,7 +187,8 @@ def _shell_safe(path):
 
 
 def _command(client):
-    return f"{_shell_safe(sys.executable)} {_shell_safe(HOOK_SCRIPT)} --client {client}"
+    """The PreToolUse command of a client without HTTP hooks, signed with HOOK_ORIGIN at the end."""
+    return f"{_shell_safe(sys.executable)} {_shell_safe(HOOK_SCRIPT)} --client {client} {HOOK_ORIGIN}"
 
 
 def _handler(client, route=HTTP_PATH, timeout=HTTP_TIMEOUT_S):
@@ -282,8 +285,10 @@ def _audit_hook(hook):
 
 
 def _audit_entry():
+    """The SessionStart group of the session-start hook, its command signed with HOOK_ORIGIN at the end."""
     return {"matcher": AUDIT_MATCHER,
-            "hooks": [{"type": "command", "command": f"{_shell_safe(sys.executable)} {_shell_safe(AUDIT_SCRIPT)}",
+            "hooks": [{"type": "command",
+                       "command": f"{_shell_safe(sys.executable)} {_shell_safe(AUDIT_SCRIPT)} {HOOK_ORIGIN}",
                        "timeout": AUDIT_TIMEOUT_S}]}
 
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.56 - beta
+
+- Every command hook Smart Tool writes ends with `--hook-origin=smart-tool`: the Codex redirect hook
+  (`hooks/pretool_router.py --client codex`) and the session-start hook (`hooks/session_audit.py`) in Claude Code and
+  Codex. The command line then names its owner under the hook origin convention the other local projects follow. An
+  entry written by an older version shows as outdated on the setup page, and updating it or turning it off takes out
+  the unsigned and the signed form alike, so no second entry is left. In Codex the signed entry waits for approval in
+  `/hooks` like any changed hook. Claude Code's redirect hooks are HTTP entries and have no command line to sign
+  (`tests/test_codex_audit_hook.py`).
+
 ## 0.9.55 - beta
 
 - The agent learns about the problems of the project it works on, and the user is not notified about them. The first

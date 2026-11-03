@@ -4088,7 +4088,7 @@ def _session_audit_hook(handler):
         handler._read_body(HOOK_MAX_BODY_BYTES)
     except ValueError as exc:
         _log(f"SessionStart hook body refused: {exc}")
-    updates =" ".join(notice for _key, notice in _update_notices())
+    updates = " ".join(notice for _key, notice in _update_notices())
     context = "\n".join(part for part in (updates, _proposals_notice()) if part)
     if not context:
         return {}
