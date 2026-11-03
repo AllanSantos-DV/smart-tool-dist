@@ -7,6 +7,7 @@ only HKCU keys (no admin): one AppUserModelId key (name and icon of the toast) a
 write the config file, never state held by the tray.
 """
 import base64
+import hashlib
 import os
 import subprocess
 import sys
@@ -15,10 +16,12 @@ from xml.sax.saxutils import quoteattr, escape
 
 APP_ID = "SmartTool.Notifications"
 PROTOCOL = "smart-tool-action"
+TAG_MAX = 64
 ACTION_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notice_action.py")
 
 _SHOW_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
 $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
@@ -84,6 +87,15 @@ def toast_xml(title, lines, buttons):
             + (f'<actions>{actions}</actions>' if actions else '') + '</toast>')
 
 
+def _fit_tag(tag):
+    """Windows refuses a toast whose Tag is longer than 64 characters. A longer tag (one built from a project path) keeps
+    its start and ends in a hash of the whole, so each project still replaces its own toast."""
+    if len(tag) <= TAG_MAX:
+        return tag
+    digest = hashlib.sha256(tag.encode("utf-8")).hexdigest()[:24]
+    return tag[:TAG_MAX - len(digest) - 1] + "~" + digest
+
+
 def show(title, lines, buttons, tag=None):
     """Shows the toast; raises RuntimeError with PowerShell's message when Windows refuses it."""
     if sys.platform != "win32":
@@ -91,7 +103,7 @@ def show(title, lines, buttons, tag=None):
     register()
     script = base64.b64encode(_SHOW_SCRIPT.encode("utf-16-le")).decode("ascii")
     env = {**os.environ, "SMART_TOOL_TOAST_XML": toast_xml(title, lines, buttons),
-           "SMART_TOOL_TOAST_APPID": APP_ID, "SMART_TOOL_TOAST_TAG": tag or ""}
+           "SMART_TOOL_TOAST_APPID": APP_ID, "SMART_TOOL_TOAST_TAG": _fit_tag(tag or "")}
     done = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", script],
         env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,

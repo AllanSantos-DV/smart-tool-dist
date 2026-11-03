@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.50 - beta
+
+- Windows refused the setup-audit toast of a project whose path made the toast tag longer than 64 characters
+  (`ToastNotification.Tag` limit since the Creators Update); before 0.9.49 that refusal became a second notification
+  "Could not show a Smart Tool notice". `toast_notice.show` now fits a longer tag to 64 characters (its start plus a hash
+  of the whole, so each project still replaces its own toast), and each notice in `_show_notices` is shown on its own: a
+  refused one goes to `tray.log` and the next ones are still shown. The toast script no longer writes PowerShell's
+  progress records, so a refusal in the log reads as the error itself (`tests/test_tray_notices.py`).
+
 ## 0.9.49 - beta
 
 - No more "Could not show a Smart Tool notice: [WinError 10061]" right after logon. The tray's notice loop asked the

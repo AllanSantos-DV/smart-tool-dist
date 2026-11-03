@@ -145,6 +145,14 @@ def _poll_loop(icon):
         time.sleep(POLL_INTERVAL_S)
 
 
+def _toast(title, lines, buttons, tag):
+    """One notice: a toast Windows refuses goes to `tray.log` and does not keep the next notices from being shown."""
+    try:
+        toast_notice.show(title, lines, buttons, tag=tag)
+    except Exception as exc:
+        _log(f"notice {tag}: {type(exc).__name__}: {exc}")
+
+
 def _show_notices(icon, notices):
     """Shows a toast for each pending notice: the new-default-models offer, each model over the failure limit and each
     project whose scheduled setup audit found new errors or warnings."""
@@ -152,23 +160,23 @@ def _show_notices(icon, notices):
     if offer:
         lines = [f"{role}: {change['current']} -> {change['new']}" for role, change in offer["changes"].items()]
         nonce = offer["nonce"]
-        toast_notice.show(i18n.t("Smart Tool has new recommended models"), lines, [
+        _toast(i18n.t("Smart Tool has new recommended models"), lines, [
             (i18n.t("Apply now"), toast_notice.action_uri("models-apply", n=nonce)),
             (i18n.t("Don't show again"), toast_notice.action_uri("models-decline", n=nonce)),
-        ], tag="models-upgrade")
+        ], "models-upgrade")
     for row in notices.get("failing") or []:
         last = row.get("last_error") or i18n.t("see the failure log in the settings")
-        toast_notice.show(
+        _toast(
             i18n.t("{model} is failing", model=row["model"]),
             [i18n.t("{errors} of {calls} calls failed in 24 h as {role}.", errors=row["errors"], calls=row["calls"],
                     role=row["role"]), last[:160]],
             [(i18n.t("Switch model"), toast_notice.action_uri("open-setup", section="models")),
              (i18n.t("Mute 7 days"), toast_notice.action_uri("mute-model", model=row["model"]))],
-            tag="model-failing:" + row["model"])
+            "model-failing:" + row["model"])
     for row in notices.get("audit") or []:
         title, lines = setup_audit.toast_text(row)
-        toast_notice.show(title, lines, [(i18n.t("Open the audit"), toast_notice.action_uri("open-setup", section="audit"))],
-                          tag="setup-audit:" + row["project"])
+        _toast(title, lines, [(i18n.t("Open the audit"), toast_notice.action_uri("open-setup", section="audit"))],
+               "setup-audit:" + row["project"])
 
 
 def _log(text):
