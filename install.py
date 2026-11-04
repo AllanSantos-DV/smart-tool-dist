@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import filecmp
+import hashlib
 import json
 import os
 import re
@@ -24,6 +25,10 @@ HOOK_SCRIPTS = ("pretool_router.py", "session_audit.py")
 STARTUP_SCRIPT = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "Microsoft" / "Windows" / \
     "Start Menu" / "Programs" / "Startup" / "SmartTool-Tray.vbs"
 MANIFEST = ".install-manifest.json"
+DEPENDENCY_INPUTS = ("requirements.txt", "install_runtime.py", "node_locator.py", "web_adapters/node/package.json",
+                     "web_adapters/node/package-lock.json", "web_adapters/browser/requirements.txt",
+                     "web_adapters/browser/fetch_camoufox.py", "web_adapters/browser/ranged_download.py")
+DEPENDENCY_STAMP = ".dependencies.sha256"
 REGISTRY = Path(paths.DATA_DIR) / "daemon.json"
 BLOCKED = {"__pycache__", ".token-guard", ".git", ".pytest_cache", ".data", ".artifacts", ".claude", ".vscode",
            ".impeccable", "tests", "sessions", "results", "dist", "node_modules", ".node-runtime", ".venv",
@@ -280,6 +285,50 @@ def restore_packages(python, frozen, backup):
                     str(backup / "requirements.frozen.txt")], check=True)
 
 
+def dependency_digest(root):
+    """SHA-256 over the DEPENDENCY_INPUTS under root: the files that decide what pip and install_runtime.py install."""
+    digest = hashlib.sha256()
+    for rel in DEPENDENCY_INPUTS:
+        digest.update(rel.encode("utf-8") + b"\0" + (root / rel).read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
+def runtime_complete(target, python):
+    """`install_runtime.py --check` of target: Node, parsers, browser packages and browsers all present. It only
+    reads, so it runs while the daemon is still up."""
+    return subprocess.run([str(python), str(target / "install_runtime.py"), "--check"], cwd=target,
+                          capture_output=True, text=True, timeout=120).returncode == 0
+
+
+def dependencies_current(target, python):
+    """True when the last update that completed in target ran the dependency step with the inputs this package
+    ships and the web runtime is still complete, so pip and install_runtime.py would change nothing. Running them
+    anyway keeps the daemon down for about 48 s, longer than an MCP client keeps reconnecting (Claude Code gives up
+    after 5 attempts, about 15 s)."""
+    stamp = target / DEPENDENCY_STAMP
+    return (python.is_file() and stamp.is_file()
+            and stamp.read_text(encoding="utf-8").strip() == dependency_digest(SOURCE)
+            and runtime_complete(target, python))
+
+
+def refresh_camoufox(target):
+    """Runs target's `fetch_camoufox.py` while the daemon is still up, so a newer browser build for the same library
+    version arrives on every update. Camoufox installs each build in its own folder and switches the active one only
+    after the download checks out, so the running browser keeps its files; with no newer build it only looks up the
+    releases."""
+    browser = target / "web_adapters" / "browser"
+    subprocess.run([str(browser / ".venv" / "Scripts" / "python.exe"), str(browser / "fetch_camoufox.py")], check=True)
+
+
+def prune_camoufox(target):
+    """Runs target's `prune_camoufox.py` after a verified update, so the Camoufox builds older than the active one leave
+    the user's cache. The update is already complete, so a failure is reported, not rolled back."""
+    browser = target / "web_adapters" / "browser"
+    result = subprocess.run([str(browser / ".venv" / "Scripts" / "python.exe"), str(browser / "prune_camoufox.py")])
+    if result.returncode:
+        print(f"Old Camoufox builds not pruned: prune_camoufox.py exited {result.returncode}.", file=sys.stderr)
+
+
 def install_dependencies(target, python):
     if not python.exists():
         venv.create(python.parent.parent, with_pip=True)
@@ -411,6 +460,9 @@ def prune_backups(target):
 
 def _update(args, target, files, existed, python, pythonw):
     """Replaces the installed files, dependencies and daemon, restoring the previous version on any failure."""
+    run_deps = not args.skip_deps and not dependencies_current(target, python)
+    if not args.skip_deps and not run_deps:
+        refresh_camoufox(target)
     stop_processes(target)
     if not args.no_start:
         wait_port_free(target)
@@ -421,10 +473,12 @@ def _update(args, target, files, existed, python, pythonw):
         copy_files(target, files, backup, changed, removed)
         clear_bytecode(target)
         print(f"Files changed: {len(changed)}; removed as obsolete: {len(removed)}")
-        if not args.skip_deps:
+        if run_deps:
             frozen = freeze(python)
             deps_touched = True
             install_dependencies(target, python)
+        elif not args.skip_deps:
+            print("Dependencies unchanged since the last update; pip and install_runtime.py skipped.")
         if not args.no_start:
             mark_updating(False)
             start(target, python, pythonw)
@@ -448,7 +502,11 @@ def _update(args, target, files, existed, python, pythonw):
             raise SystemExit(1)
         shutil.rmtree(backup, ignore_errors=True)
         raise SystemExit(1)
+    if run_deps:
+        (target / DEPENDENCY_STAMP).write_text(dependency_digest(SOURCE), encoding="utf-8")
     shutil.rmtree(backup)
+    if not args.skip_deps and not args.no_start:
+        prune_camoufox(target)
 
 
 if __name__ == "__main__":

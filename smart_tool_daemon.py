@@ -88,6 +88,10 @@ REGISTRY_PATH = os.path.join(RUN_DIR, "daemon.json")
 DEFAULT_PORT = int(os.environ.get("SMART_TOOL_PORT", "8765"))
 PROTOCOL_VERSION = "2025-06-18"
 MCP_MAX_REQUEST_BYTES = 10 * 1024 * 1024
+# Claude Code aborts an MCP POST whose response has not started within 60 s; a tool call still running after
+# MCP_STREAM_AFTER_S is answered as an SSE stream instead, with a comment every MCP_KEEPALIVE_S.
+MCP_STREAM_AFTER_S = 10
+MCP_KEEPALIVE_S = 15
 _BOUND_PORT = DEFAULT_PORT
 
 DDG_SEARCH_SCRIPT = web_search_adapters.DDG_SEARCH_SCRIPT
@@ -4211,6 +4215,16 @@ def _dispatch(method, params, session_id):
     raise KeyError(method)
 
 
+def _rpc_reply(method, params, session_id, req_id):
+    """JSON-RPC response to one request: its result, or the error the client should see."""
+    try:
+        return {"jsonrpc": "2.0", "id": req_id, "result": _dispatch(method, params, session_id)}
+    except KeyError:
+        return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"method not supported: {method}"}}
+    except Exception as exc:
+        return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": _sanitize_text(str(exc))}}
+
+
 _LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
@@ -4350,8 +4364,30 @@ class MCPHandler(BaseHTTPRequestHandler):
             raise RequestTooLarge(f"Request body over {max_bytes} bytes")
         return self.rfile.read(length) if length else b""
 
-    def do_GET(self):
+    def _mcp_method_not_allowed(self):
+        """405 for GET and DELETE on /mcp: no server-initiated stream and no client-ended sessions. The spec's answer for
+        both; the MCP SDK client treats any other status, 404 included, as a broken connection."""
+        self.send_response(405)
+        self.send_header("Allow", "POST")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_DELETE(self):
+        """Routes a DELETE: 405 on /mcp, 404 elsewhere."""
         if self._reject_foreign_origin():
+            return
+        if self.path == "/mcp":
+            self._mcp_method_not_allowed()
+            return
+        self._write_json(404, {"error": "not found"})
+
+    def do_GET(self):
+        """Routes a GET: 405 on /mcp, the health and status probes, the setup and project pages and their data; 404
+        elsewhere."""
+        if self._reject_foreign_origin():
+            return
+        if self.path == "/mcp":
+            self._mcp_method_not_allowed()
             return
         if self.path == "/health":
             self._write_json(200, {"status": "ok", "version": version.VERSION})
@@ -4508,17 +4544,42 @@ class MCPHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        try:
-            result = _dispatch(method, params, session_id)
-        except KeyError:
-            self._write_json(200, {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"method not supported: {method}"}})
+        if method == "tools/call" and "text/event-stream" in (self.headers.get("Accept") or ""):
+            self._answer_tool_call(params, session_id, req_id)
             return
-        except Exception as exc:
-            self._write_json(200, {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": _sanitize_text(str(exc))}})
-            return
+        reply = _rpc_reply(method, params, session_id, req_id)
+        headers = {"Mcp-Session-Id": session_id} if method == "initialize" and "result" in reply else {}
+        self._write_json(200, reply, headers)
 
-        headers = {"Mcp-Session-Id": session_id} if method == "initialize" else {}
-        self._write_json(200, {"jsonrpc": "2.0", "id": req_id, "result": result}, headers)
+    def _answer_tool_call(self, params, session_id, req_id):
+        """Answers a tools/call from a client that accepts SSE: one JSON body when the call ends within
+        MCP_STREAM_AFTER_S, else an SSE stream started at once, a comment every MCP_KEEPALIVE_S and the reply as its
+        only event. A client gone before the end leaves the call to finish unanswered, as a closed JSON request does."""
+        box = {}
+        worker = threading.Thread(target=lambda: box.update(reply=_rpc_reply("tools/call", params, session_id, req_id)),
+                                  daemon=True)
+        worker.start()
+        worker.join(MCP_STREAM_AFTER_S)
+        if not worker.is_alive():
+            self._write_json(200, box["reply"])
+            return
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.flush()
+            worker.join(MCP_KEEPALIVE_S)
+            while worker.is_alive():
+                self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+                worker.join(MCP_KEEPALIVE_S)
+            event = json.dumps(box["reply"], ensure_ascii=False)
+            self.wfile.write(f"event: message\ndata: {event}\n\n".encode("utf-8"))
+            self.wfile.flush()
+        except (ConnectionError, BrokenPipeError):
+            pass
 
 
 def _write_registry(port):
@@ -4551,9 +4612,11 @@ def _smart_tool_answers(port):
 
 
 def _bind_server():
-    """Default port, then the port clients already know, then any free port (announced in daemon.json and synced to
-    the clients by endpoint_sync). A port held by another live Smart Tool stops this start instead of duplicating it."""
-    for port in dict.fromkeys(p for p in (DEFAULT_PORT, endpoint_sync.known_port(), 0) if p is not None):
+    """The port clients already know, then the default port, then any free port (announced in daemon.json and synced
+    to the clients by endpoint_sync). A connected session keeps the URL it started with, so a restart that moved
+    back to the default would cut every session on the known port. A port held by another live Smart Tool stops this
+    start instead of duplicating it."""
+    for port in dict.fromkeys(p for p in (endpoint_sync.known_port(), DEFAULT_PORT, 0) if p is not None):
         try:
             return _ExclusiveThreadingHTTPServer(("127.0.0.1", port), MCPHandler)
         except OSError:

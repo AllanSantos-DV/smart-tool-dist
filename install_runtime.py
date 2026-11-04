@@ -239,10 +239,39 @@ def _run_once(args, cwd, env, flags, label, idle_s, stream):
             raise RuntimeError(f"{label} failed (exit {process.returncode}): {tail[-1] if tail else 'no output'}")
 
 
+def _lock_digest():
+    return hashlib.sha256((NODE_DIR / "package-lock.json").read_bytes()).hexdigest()
+
+
+def _lock_stamp():
+    """Written after `npm ci` succeeds; `npm ci` deletes node_modules first, so a failed run leaves no stamp."""
+    return NODE_DIR / "node_modules" / ".smart-tool-lock.sha256"
+
+
+def _node_packages_current():
+    """node_modules was installed from the package-lock.json shipped now and still holds every entry point. npm's own
+    hidden lockfile is not compared because npm ignores it whenever another tool touched the tree."""
+    try:
+        stamped = _lock_stamp().read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return stamped == _lock_digest() and all(path.is_file() for path in (
+        OPEN_WEBSEARCH_CLI, TYPESCRIPT_PARSER, JAVA_PARSER, ANGULAR_PARSER, PLAYWRIGHT_MCP_CLI))
+
+
+def _install_node_packages(npm):
+    if _node_packages_current():
+        return
+    _run([npm, "ci", "--omit=dev", "--no-audit", "--no-fund"], cwd=NODE_DIR,
+         label="Web adapters and code parser via npm", idle_s=300)
+    _lock_stamp().write_text(_lock_digest(), encoding="utf-8")
+
+
 def _check():
     node, _npm = _node_commands()
     status = {
         "node": bool(node),
+        "node_packages": bool(node and _node_packages_current()),
         "open_websearch": bool(node and OPEN_WEBSEARCH_CLI.is_file()),
         "typescript_parser": bool(node and TYPESCRIPT_PARSER.is_file()),
         "java_parser":bool(node and JAVA_PARSER.is_file()),
@@ -318,10 +347,7 @@ def install(reuse_browser_runtime=None):
     if not node or not npm:
         _install_node()
         node, npm = _node_commands()
-    if not all(path.is_file() for path in (OPEN_WEBSEARCH_CLI, TYPESCRIPT_PARSER, JAVA_PARSER, ANGULAR_PARSER,
-                                               PLAYWRIGHT_MCP_CLI)):
-        _run([npm, "ci", "--omit=dev", "--no-audit", "--no-fund"], cwd=NODE_DIR,
-             label="Web adapters and code parser via npm", idle_s=300)
+    _install_node_packages(npm)
     if reuse_browser_runtime:
         existing = Path(reuse_browser_runtime).expanduser().resolve()
         if not (existing / "Scripts" / "python.exe").is_file():

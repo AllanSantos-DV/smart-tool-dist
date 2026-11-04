@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.9.61 - beta
+
+- Old Camoufox builds leave the user's cache. camoufox 0.5.6 installs each build in its own folder and never deletes
+  the previous one, so the cache grew by about 2.5 GB per build (8.2 GB on this machine, 2.5 GB of it in use). After
+  an update has been verified, the installer runs `web_adapters/browser/prune_camoufox.py`, which deletes the builds
+  of the active build's repository older than the active one and logs each removal with its size and the total freed.
+  It removes nothing when `pinned` is set in Camoufox's `config.json` or no build is active, and never touches the
+  active build, a newer one or another repository's. Each folder is renamed to a hidden name in `browsers/` before it
+  is deleted, which Windows refuses while a file inside is open, so a build in use is kept whole and logged; a
+  deletion cut short is finished on the next run. A failed pruning is reported and the update stays
+  (`tests/test_prune_camoufox.py`, `tests/test_install_legacy.py`). Research:
+  `docs/research/2026-11-04-camoufox-cache-pruning.md`.
+
+## 0.9.60 - beta
+
+- A new `package-lock.json` reaches every install. `install_runtime.py` ran `npm ci` only when a parser file was
+  missing, so an install that already had them kept the old TypeScript, java-parser, Angular compiler and Playwright
+  MCP. After `npm ci` succeeds it now records the lock's SHA-256 in `node_modules/.smart-tool-lock.sha256`; a lock
+  that differs runs `npm ci` again, and `install_runtime.py --check` reports `node_packages: missing`, so an update
+  runs the dependency step for an install whose packages came from another lock, including one installed before this
+  version (`tests/test_install_runtime.py`). npm's own `node_modules/.package-lock.json` is not compared, because npm
+  ignores it whenever another tool touched the tree.
+- A newer Camoufox browser build for the same library version arrives on every update. Since 0.9.59 an update whose
+  dependency files did not change skipped `fetch_camoufox.py`, so a new build reached an install only when one of
+  those files changed. When the dependency step is skipped, the installer now runs `fetch_camoufox.py` before stopping
+  the service. Camoufox compares the active build with the newest supported release, downloads a newer one into its
+  own folder and switches to it only after the SHA-256 check, so the running browser keeps its files and the stop
+  window does not grow. A failed download ends the update before anything was stopped or copied
+  (`tests/test_install_legacy.py`).
+
+## 0.9.59 - beta
+
+- An update keeps open Claude Code sessions connected. The installer ran pip and `install_runtime.py` while the
+  service was stopped, about 48 s on a current machine, and Claude Code stops reconnecting after 5 attempts (about
+  15 s), so every open session lost Smart Tool until `/mcp` (33 times in Claude Code's logs from 2026-10-02 to
+  2026-11-04). After a completed update the installer records a SHA-256 of the files that decide the dependencies
+  (`requirements.txt`, `install_runtime.py`, `node_locator.py`, the Node `package.json` and `package-lock.json`, the
+  browser `requirements.txt`, `fetch_camoufox.py` and `ranged_download.py`) in `.dependencies.sha256`; the next update
+  whose files match skips that step and says so. A changed file, a missing record or a missing venv runs it as before,
+  and an update rolled back after the step leaves the old record (`tests/test_install_legacy.py`).
+- A restart keeps the port the clients already know. The service tried the default port first, so a restart after
+  it had moved to another port went back to the default and cut every session still on the other one; it now tries
+  the port in the clients' configuration first, then the default, then any free port (`tests/test_endpoint_sync.py`).
+- A search inside `$(...)` or `` `...` `` is judged in the folder its segment runs in. The redirect hook decided every
+  substitution of a command with the folder at its start, so `cd outside; echo $(grep -rn x .)` was redirected as a
+  search of the session folder, and a `cd` inside a substitution moved the commands after it; a substitution is now
+  decided with the state of its own segment, and its `cd` stays inside it (`tests/test_router.py`).
+- The test files can run in one process (`python -m unittest a b ...`, as the `affected_tests` command suggests).
+  Classes replaced functions of shared modules in `setUpClass` without restoring them, and the gateway tests left a
+  user adapter folder behind, so 21 tests failed and 8 errored together while each file passed alone; the
+  replacements now go through `mock.patch.object` with a class cleanup (`tests/_env.py`, `patch_for_class`).
+- `server/discover`, which Claude Code 2.1.316 sends before `initialize`, keeps its JSON-RPC -32601 answer: the
+  daemon speaks protocol 2025-06-18, and a client that gets any error other than -32022 falls back to `initialize`, as
+  the protocol revision that defines the method asks (`tests/test_mcp_transport.py`).
+
+## 0.9.58 - beta
+
+- Claude Code no longer drops the Smart Tool connection while the service is up. `GET /mcp` and `DELETE /mcp` answer
+  405 with `Allow: POST`, as the MCP Streamable HTTP transport allows for a server with no server-initiated stream and
+  no client-ended sessions; they answered 404, which the MCP SDK client treats as a broken connection: Claude Code's
+  logs held two `Failed to open SSE stream: Not Found` per connection, 4,838 between 2026-10-02 and 2026-11-04, and the
+  connection was later closed "with errors" and reopened. A DELETE elsewhere answers 404 instead of 501
+  (`tests/test_mcp_transport.py`).
+- A tool call longer than a minute reaches Claude Code. Claude Code aborts an MCP request whose response has not
+  started within 60 s, so a long `web_search`, `web_fetch` or `smart_scout` ended in `The operation timed out.` (202
+  times in the same logs). A `tools/call` from a client that accepts `text/event-stream` and still running after 10 s
+  is answered as an SSE stream: headers at once, a comment every 15 s, and the result as its only event. A faster call,
+  or a client that does not accept SSE, gets the single JSON body as before (`tests/test_mcp_transport.py`; diagnosis
+  in `docs/research/2026-11-04-mcp-client-drops.md`).
+
 ## 0.9.57 - beta
 
 - Codex runs Smart Tool's hooks with no `/hooks` step. Installing or updating the Codex redirect hook or the

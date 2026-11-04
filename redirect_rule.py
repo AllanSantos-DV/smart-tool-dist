@@ -404,16 +404,20 @@ def _bash(command, cwd, powershell=False):
 
 
 def _shell(command, cwd, state, powershell, depth):
-    """(decision, target, reason) of one shell script; substitutions and `bash -c`/`powershell -Command` scripts are
-    decided with the same state (folder, variables, loop variables)."""
+    """(decision, target, reason) of one shell script; `bash -c`/`powershell -Command` scripts are decided with the
+    same state (folder, variables, loop variables), and each substitution with the state of the segment it sits in,
+    as a subshell whose `cd` does not leak out."""
     verdict = ("allow", None, "No content search over a folder.")
     text, inner = _substitutions(_strip_heredocs(command), powershell)
-    for script in inner if depth < MAX_NESTING else ():
-        found = _shell(script, cwd, state, powershell, depth + 1)
-        if found[0] == "redirect":
-            return found
+    pending = inner if depth < MAX_NESTING else []
     variables, lists, listing = state["variables"], state["lists"], None
     for segment, after_pipe in segments(text):
+        count = segment.count(LISTING) + segment.count(SUBSTITUTION)
+        for script in pending[:count]:
+            found = _shell(script, cwd, {**state}, powershell, depth + 1)
+            if found[0] == "redirect":
+                return found
+        pending = pending[count:]
         words = _split(segment, powershell)
         if words[:2] == ["while", "read"]:
             name = next((t for t in words[2:] if not t.startswith("-")), None)
