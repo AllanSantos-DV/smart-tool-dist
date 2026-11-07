@@ -1,15 +1,24 @@
 // Análise estática conservadora de Java a partir de snapshots; nenhum código é executado.
 import fs from 'node:fs';
-import {parse} from './web_adapters/node/node_modules/java-parser/src/index.js';
+import * as nodeModule from 'node:module';
+const modules=new URL('./web_adapters/node/node_modules/',import.meta.url);
+// java-parser reaches chevrotain's sources and lodash one file per function (744 module files, ~0.9 s of startup on
+// every run); the package's own bundle and lodash's single file load the same code from 3 files.
+if(nodeModule.registerHooks){const bundle=new URL('chevrotain/lib/chevrotain.mjs',modules).href,lodash=new URL('lodash/lodash.js',modules).href;
+ nodeModule.registerHooks({resolve(specifier,context,next){if(specifier==='chevrotain')return{url:bundle,shortCircuit:true};const fn=/^lodash(?:-es)?\/(\w+)\.js$/.exec(specifier);return fn?{url:'lodash-function:'+fn[1],shortCircuit:true}:next(specifier,context)},
+  load(url,context,next){return url.startsWith('lodash-function:')?{format:'module',source:`import _ from ${JSON.stringify(lodash)};export default _.${url.slice(16)};`,shortCircuit:true}:next(url,context)}})}
+const {parse}=await import(new URL('java-parser/src/index.js',modules).href);
 const input=JSON.parse(fs.readFileSync(0,'utf8'));
-const symbols=[],dependencies=[],calls=[],unresolved=[],diagnostics=[],units=[],classes=new Map(),methodNodes=new Map();
-const MAX_SYMBOLS=8000,MAX_EDGES=20000;
-function children(n){return n?.children?Object.values(n.children).flat().filter(x=>x.children):[]}
+const symbols=[],dependencies=[],calls=[],unresolved=[],diagnostics=[],units=[],classes=new Map(),methodNodes=new Map(),kids=new WeakMap();
+const {symbols:MAX_SYMBOLS,edges:MAX_EDGES}=input.limits;let dropped=false;
+function room(list,max){if(list.length<max)return true;dropped=true;return false}
+const NO_CHILDREN=Object.freeze([]);
+function children(n){const groups=n?.children;if(!groups)return NO_CHILDREN;let list=kids.get(n);if(list)return list;list=[];for(const key in groups)for(const child of groups[key])if(child.children)list.push(child);kids.set(n,list);return list}
 function all(n,name,stop=false){const result=[];function visit(node){if(node?.name===name){result.push(node);if(stop)return}for(const child of children(node))visit(child)}visit(n);return result}
 function first(n,name){return all(n,name,true)[0]}
 function identifiers(n){const out=[];function visit(node){if(node?.children)for(const [key,items] of Object.entries(node.children))for(const child of items){if(child.children)visit(child);else if(key==='Identifier')out.push(child)}}visit(n);return out.sort((a,b)=>a.startOffset-b.startOffset)}
 function text(u,n){return n?.location?u.text.slice(n.location.startOffset,n.location.endOffset+1):''}
-function addSymbol(u,n,name,kind){if(symbols.length>=MAX_SYMBOLS)return null;const s={id:u.path+'::'+name+'@'+n.location.startLine+':'+n.location.startOffset,path:u.path,name,kind,language:'java',start_line:n.location.startLine,end_line:n.location.endLine};symbols.push(s);return s}
+function addSymbol(u,n,name,kind){if(!room(symbols,MAX_SYMBOLS))return null;const s={id:u.path+'::'+name+'@'+n.location.startLine+':'+n.location.startOffset,path:u.path,name,kind,language:'java',start_line:n.location.startLine,end_line:n.location.endLine};symbols.push(s);return s}
 const classKinds=new Set(['normalClassDeclaration','normalInterfaceDeclaration','enumDeclaration','recordDeclaration']);
 for(const file of input.files){try{const tree=parse(file.text),pkg=first(tree,'packageDeclaration'),unit={...file,tree,package:pkg?identifiers(pkg).map(t=>t.image).join('.'): '',imports:[],classes:[]};
  for(const n of all(tree,'importDeclaration')){const raw=text(unit,n).replace(/^import\s+/,'').replace(/;\s*$/,'').trim(),stat=raw.startsWith('static '),spec=(stat?raw.slice(7):raw).replace(/\s+/g,'');unit.imports.push({spec,static:stat,line:n.location.startLine})}
@@ -29,18 +38,18 @@ for(const unit of units){
  function walk(n,cls=null,method=null,vars=new Map(),owner=null){if(classKinds.has(n.name))cls=unit.classes.find(c=>c.node===n)||cls;if(cls&&n.name==='classBody'&&n!==cls.body)return;
  if(methodNodes.has(n)){method=methodNodes.get(n);vars=new Map(cls.fields);collectVariables(unit,n,vars);owner=method.symbol}
  if(n.name==='lambdaExpression'){vars=new Map(vars);for(const param of identifiers(n.children.lambdaParameters?.[0]))vars.set(param.image,null);owner=addSymbol(unit,n,(cls?.local||'')+'.lambda@'+n.location.startLine,'function')||owner}
- if(cls&&['unannType','classType','interfaceType'].includes(n.name)){const type=resolveType(unit,text(unit,n),cls);if(type&&type.unit.path!==unit.path&&dependencies.length<MAX_EDGES)dependencies.push({source:unit.path,target:type.unit.path,specifier:type.fqn,line:n.location.startLine,kind:'java_type',resolution:'resolved'})}
+ if(cls&&['unannType','classType','interfaceType'].includes(n.name)){const type=resolveType(unit,text(unit,n),cls);if(type&&type.unit.path!==unit.path&&room(dependencies,MAX_EDGES))dependencies.push({source:unit.path,target:type.unit.path,specifier:type.fqn,line:n.location.startLine,kind:'java_type',resolution:'resolved'})}
  if(cls&&n.name==='primary'){
    const prefix=n.children.primaryPrefix?.[0],prefixText=text(unit,prefix).trim(),suffixes=n.children.primarySuffix||[];let chain=prefixText,fluent=false;
    const newMatch=/^new\s+([\w.$]+)/.exec(prefixText);let constructed=newMatch?resolveType(unit,newMatch[1],cls):null;
-   const link=(type,line)=>{if(type&&type.unit.path!==unit.path&&dependencies.length<MAX_EDGES)dependencies.push({source:unit.path,target:type.unit.path,specifier:type.fqn,line,kind:'java_type',resolution:'resolved'})};
-   if(constructed&&calls.length<MAX_EDGES)calls.push({source:(owner||cls.symbol).id,target:constructed.symbol.id,line:n.location.startLine,kind:'construct',resolution:'static'});
+   const link=(type,line)=>{if(type&&type.unit.path!==unit.path&&room(dependencies,MAX_EDGES))dependencies.push({source:unit.path,target:type.unit.path,specifier:type.fqn,line,kind:'java_type',resolution:'resolved'})};
+   if(constructed&&room(calls,MAX_EDGES))calls.push({source:(owner||cls.symbol).id,target:constructed.symbol.id,line:n.location.startLine,kind:'construct',resolution:'static'});
    link(constructed,n.location.startLine);
    const staticHead=/^([A-Z][\w$]*)\./.exec(prefixText);if(staticHead&&!vars.has(staticHead[1]))link(resolveType(unit,staticHead[1],cls),n.location.startLine);
    for(const suffix of suffixes){const invoke=suffix.children.methodInvocationSuffix?.[0];if(!invoke){chain+=text(unit,suffix);continue}const args=invoke.children.argumentList?.[0],arity=args?(args.children.expression||[]).length:0;const match=/^(?:([\w.$]+)\.)?([\w$]+)$/.exec(chain);let target=null;
      if(match&&!fluent){const receiver=match[1],name=match[2];let type=null;if(!receiver||receiver==='this')type=cls;else if(receiver==='super')type=resolveType(unit,cls.extends,cls);else if(receiver.startsWith('this.'))type=resolveType(unit,cls.fields.get(receiver.slice(5))||'',cls);else if(vars.has(receiver))type=resolveType(unit,vars.get(receiver)||'',cls);else{type=resolveType(unit,receiver,cls);link(type,invoke.location.startLine)}target=lookupMethod(type,name,arity);if(!target&&!receiver){const candidates=unit.imports.filter(i=>i.static&&(i.spec.endsWith('.'+name)||i.spec.endsWith('.*'))).map(i=>lookupMethod(classes.get(i.spec.split('.').slice(0,-1).join('.')),name,arity)).filter(Boolean);if(candidates.length===1)target=candidates[0]}}
      if(constructed&&!fluent){const methodName=/\.([\w$]+)$/.exec(chain)?.[1];if(methodName)target=lookupMethod(constructed,methodName,arity)}
-     if(target&&calls.length<MAX_EDGES)calls.push({source:(owner||cls.symbol).id,target:target.id,line:invoke.location.startLine,kind:'call',resolution:'static'});
+     if(target&&room(calls,MAX_EDGES))calls.push({source:(owner||cls.symbol).id,target:target.id,line:invoke.location.startLine,kind:'call',resolution:'static'});
      else if(unresolved.length<1000)unresolved.push({path:unit.path,line:invoke.location.startLine,expression:chain.slice(0,140),reason:'External/dynamic type, interface without implementation, or ambiguous overload in the Java snapshot.'});
      fluent=true;chain+='<result>';
    }
@@ -49,4 +58,4 @@ for(const unit of units){
  }walk(unit.tree)
 }
 const ids=new Set(symbols.map(s=>s.id));
-process.stdout.write(JSON.stringify({symbols,dependencies:dependencies.slice(0,MAX_EDGES),calls:calls.filter(c=>ids.has(c.source)&&ids.has(c.target)),unresolved,diagnostics,parsed:units.map(u=>u.path),truncated:symbols.length>=MAX_SYMBOLS||dependencies.length>MAX_EDGES||calls.length>=MAX_EDGES}));
+process.stdout.write(JSON.stringify({symbols,dependencies:dependencies.slice(0,MAX_EDGES),calls:calls.filter(c=>ids.has(c.source)&&ids.has(c.target)),unresolved,diagnostics,parsed:units.map(u=>u.path),truncated:dropped||dependencies.length>MAX_EDGES}));

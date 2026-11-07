@@ -19,6 +19,7 @@ import glob
 import os
 import re
 import shlex
+import tempfile
 import time
 
 import index_scope
@@ -109,13 +110,20 @@ def count_files(path):
     return files, False
 
 
+def system_temp():
+    """The system's temporary folder."""
+    return tempfile.gettempdir()
+
+
 def _in_project(target, cwd):
-    """A registered project holds target, or target is inside the session's directory."""
+    """A registered project holds target, or target is inside the session's directory and not in the system's
+    temporary folder: a copy made there for a measurement or a build is gone soon, and the redirected smart_search
+    would register and index it."""
     key = os.path.normcase(os.path.abspath(target)) + os.sep
     if any(key.startswith(os.path.normcase(os.path.abspath(p["root"])).rstrip(os.sep) + os.sep)
            for p in project_store.all_projects()):
         return True
-    return bool(cwd) and index_scope._within_root(cwd, target)
+    return bool(cwd) and index_scope._within_root(cwd, target) and not index_scope._within_root(system_temp(), target)
 
 
 def _has_files(target):

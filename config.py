@@ -21,7 +21,13 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 _LOCK = threading.RLock()
 
 # The config fields that select a gateway model; every per-role table (recommended models, failure log) keys on these.
-MODEL_ROLES = ("router_model", "scope_model", "scout_model", "research_model", "embedding_model", "rerank_model")
+MODEL_ROLES = ("router_model", "scope_model", "scout_model", "research_model", "docs_model", "embedding_model",
+               "rerank_model")
+
+# Extra documents written by `project_manage action=docs generate=true` beside docs/scope's three levels; each key is a
+# document and true (the default) writes it, false skips it and removes the file Smart Tool wrote earlier.
+DOCS_EXTRAS = ("structure", "coverage", "modules", "tests", "configuration", "dependencies", "adr", "flows",
+               "features_tests", "hotspots", "coupling", "dead_code", "tour", "glossary", "index")
 
 DEFAULT_CONFIG = {
     "router_model": "",
@@ -30,14 +36,17 @@ DEFAULT_CONFIG = {
     "embedding_model": "",
     "rerank_model": "",
     "research_model": "",
+    "docs_model": "",
     "research_max_iterations": 3,
     "quick_search_timeout_s": 120,
     "site_memory_similarity_threshold": 0.35,
     "local_models": "fallback",
     "hook_mode": "redirect",
-    "doc_mode": "remind",
+    "doc_mode": "require",
+    "comment_mode": "require",
     "duplicate_mode": "warn",
     "dependency_mode": "warn",
+    "docs_extras": {key: True for key in DOCS_EXTRAS},
     "auto_update": True,
     "language": "",
     "pattern_proposals": "on",
@@ -60,6 +69,10 @@ HOOK_MODES = ("redirect", "advise", "off")
 # Edit hook on functions without a docstring: require = deny the edit until it adds one; remind = let it run and tell
 # the agent; off = say nothing. Independent of hook_mode, which only routes searches and reads.
 DOC_MODES = ("require", "remind", "off")
+# Edit hook on comments an edit adds in the wrong place (commented-out code, ticket or history tags, a loose block above
+# a function instead of its docstring, a long block inside a body): require = deny the edit until they are gone;
+# remind = let it run and tell the agent; off = say nothing. A short comment explaining a non-obvious reason is allowed.
+COMMENT_MODES = ("require", "remind", "off")
 # Edit hook on functions that copy one already indexed (exact or near-identical body): warn = let the edit run and
 # point to the existing function; off = say nothing. Never blocks: near matches are leads, not defects.
 DUPLICATE_MODES = ("warn", "off")
@@ -71,8 +84,9 @@ DEPENDENCY_MODES = ("warn", "off")
 PATTERN_PROPOSAL_MODES = ("on", "off")
 # Structured output of the model calls that must return JSON (research, scout, freshness): response_format = the
 # OpenAI-style `response_format` json_schema (applied on every gateway route); output_config = Anthropic `output_config`
-# in the chat body (also reports truncation as finish_reason "length"); auto = output_config for the models whose route
-# (the id prefix before the first dot) is in `output_config_routes`, response_format for all others.
+# in the chat body (also reports truncation as finish_reason "length"); auto = output_config for the Claude models whose route
+# (the id prefix before the first dot) is in `output_config_routes`, response_format for all others (Gemini on
+# vertex_ai ignores output_config and answers loose text).
 STRUCTURED_OUTPUT_MODES = ("auto", "response_format", "output_config")
 
 
@@ -80,6 +94,13 @@ def doc_mode(cfg=None):
     value = (cfg if cfg is not None else load_config()).get("doc_mode") or DEFAULT_CONFIG["doc_mode"]
     if value not in DOC_MODES:
         raise ValueError(f"Invalid doc_mode ({value!r}) in {CONFIG_PATH}: use require, remind or off.")
+    return value
+
+
+def comment_mode(cfg=None):
+    value = (cfg if cfg is not None else load_config()).get("comment_mode") or DEFAULT_CONFIG["comment_mode"]
+    if value not in COMMENT_MODES:
+        raise ValueError(f"Invalid comment_mode ({value!r}) in {CONFIG_PATH}: use require, remind or off.")
     return value
 
 
@@ -95,6 +116,17 @@ def dependency_mode(cfg=None):
     if value not in DEPENDENCY_MODES:
         raise ValueError(f"Invalid dependency_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
     return value
+
+
+def docs_extras(cfg=None):
+    """Which extra documents the docs generator writes: every key of DOCS_EXTRAS, true unless the stored `docs_extras`
+    object sets it to false; an unknown key or a value that is not true or false fails loudly."""
+    stored = (cfg if cfg is not None else load_config()).get("docs_extras")
+    if stored is None:
+        stored = {}
+    if not isinstance(stored, dict) or set(stored) - set(DOCS_EXTRAS) or any(type(v) is not bool for v in stored.values()):
+        raise ValueError(f"Invalid docs_extras in {CONFIG_PATH}: an object with only {', '.join(DOCS_EXTRAS)}, each true or false.")
+    return {**{key: True for key in DOCS_EXTRAS}, **stored}
 
 
 def pattern_proposals(cfg=None):

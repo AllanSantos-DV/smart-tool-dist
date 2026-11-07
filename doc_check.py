@@ -1,7 +1,9 @@
 """Function docstrings: which functions a file has, whether each one is documented, and which ones an edit touched.
 Python is read with ast; TypeScript/JavaScript and Java with the code graph analyzers, where the documentation is the
-/** */ block right above the function. Used by the edit hook (missing or possibly stale docstrings), the docstring
-coverage listing and the one-line summaries in graph and impact results."""
+/** */ block right above the function; Go with the Go reader of the code graph, where the documentation is the doc
+comment of each exported declaration (functions, methods, types, consts and vars) and must start with its name. Used by
+the edit hook (missing or possibly stale docstrings), the docstring coverage listing and the one-line summaries in
+graph and impact results."""
 import ast
 import difflib
 import hashlib
@@ -11,13 +13,18 @@ import threading
 from collections import Counter, OrderedDict, defaultdict
 
 import code_graph
+import code_graph_go
 import index_profile
 import index_scope
 
 PYTHON = (".py",)
 SCRIPT = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts")
 JAVA = (".java",)
-SUPPORTED = PYTHON + SCRIPT + JAVA
+GO = (".go",)
+SUPPORTED = PYTHON + SCRIPT + JAVA + GO
+GO_COMMON_METHODS = {"Error", "Read", "ServeHTTP", "String", "Write", "Unwrap"}
+GO_SORT_METHODS = {"Len", "Less", "Swap"}
+GO_ARTICLES = ("A ", "An ", "The ", "This ")
 MAX_PARSED = 64
 _SPACE = re.compile(r"\s+")
 _PARSED = OrderedDict()
@@ -41,23 +48,45 @@ def _python_functions(source):
     function) and PEP 698: an @override method inherits its documentation."""
     tree = ast.parse(source)
     found = []
+    imported = _imported_names(tree)
 
-    def visit(node, owner, public, nested):
+    def visit(node, owner, public, nested, bases=()):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 doc = ast.get_docstring(child)
                 returns = f" -> {ast.unparse(child.returns)}" if child.returns else ""
                 found.append({"name": f"{owner}{child.name}", "start": child.lineno, "end": child.end_lineno,
                               "documented": doc is not None, "doc": _first_line(doc or ""),
+                              "decorators": [ast.unparse(d) for d in child.decorator_list], "bases": list(bases),
                               "signature": f"{child.name}({ast.unparse(child.args)}){returns}",
                               "required": public and not nested and _public_name(child.name)
                                           and not any(ast.unparse(d).split(".")[-1] == "override"
                                                       for d in child.decorator_list)})
                 visit(child, f"{owner}{child.name}.", False, True)
             elif isinstance(child, ast.ClassDef):
-                visit(child, f"{owner}{child.name}.", public and _public_name(child.name), nested)
+                bases = [_dotted(ast.unparse(b), imported) for b in child.bases]
+                visit(child, f"{owner}{child.name}.", public and _public_name(child.name), nested, bases)
     visit(tree, "", True, False)
     return found
+
+
+def _imported_names(tree):
+    """Local name -> dotted origin for the imports of a module; a relative import keeps its leading dots."""
+    names = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names[alias.asname or alias.name.split(".")[0]] = alias.name if alias.asname else alias.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                names[alias.asname or alias.name] = f"{'.' * node.level}{node.module or ''}.{alias.name}"
+    return names
+
+
+def _dotted(expression, imported):
+    """Base-class expression with its first name replaced by the module it was imported from."""
+    head, _dot, rest = expression.partition(".")
+    return imported[head] + (f".{rest}" if rest else "") if head in imported else expression
 
 
 def _overload_head(lines, index, name):
@@ -131,7 +160,7 @@ def _required(path, symbol, parent, first_line, annotations):
 
 
 def _braced_functions(path, source, symbols):
-    lines = source.splitlines()
+    lines = source.split("\n")
     by_id = {s.get("id"): s for s in symbols}
     script = path.lower().endswith(SCRIPT)
     found = []
@@ -150,6 +179,65 @@ def _braced_functions(path, source, symbols):
     return found
 
 
+def _go_form(doc, name, articles):
+    """Whether a Go doc comment starts with the declared name, after an article for a type (revive exported rule)."""
+    first = next((line.strip() for line in doc.splitlines() if line.strip()), "")
+    if articles:
+        first = next((first[len(a):] for a in GO_ARTICLES if first.startswith(a)), first)
+    return first.startswith(name + " ")
+
+
+def _go_functions(path, source):
+    """Exported Go declarations as the revive exported rule checks them: "required" outside test files and package
+    main, for exported functions, types, consts and vars and the exported methods of exported types (Error, String,
+    ServeHTTP and the other common interface methods, and Len/Less/Swap of a sortable type, are left out). A doc
+    comment that does not start with the name counts as undocumented ("malformed"). A parenthesized const or var
+    block is satisfied by its own doc comment; without one, its first exported spec lacking a comment stands for the
+    block, as revive reports it once."""
+    package, decls = code_graph_go.declarations(source)
+    importable = not path.lower().endswith("_test.go") and package != "main"
+    methods = defaultdict(set)
+    for decl in decls:
+        if decl["kind"] == "method":
+            methods[decl["receiver"]].add(decl["name"])
+    sortable = {receiver for receiver, names in methods.items() if GO_SORT_METHODS <= names}
+    found, reported_blocks = [], set()
+
+    def add(decl, name, short, required, doc, articles=False):
+        documented = bool(doc) and _go_form(doc, short, articles)
+        found.append({"name": name, "start": decl["start"], "end": decl["end"], "documented": documented,
+                      "doc": _first_line(doc or ""), "signature": decl["signature"], "required": required,
+                      "kind": decl["kind"], "convention": "go", "malformed": bool(doc) and not documented})
+
+    for decl in decls:
+        short = decl["name"]
+        if decl["kind"] in ("function", "method"):
+            receiver = decl["receiver"]
+            required = importable and short[:1].isupper() and (
+                not receiver or receiver[:1].isupper() and short not in GO_COMMON_METHODS
+                and not (short in GO_SORT_METHODS and receiver in sortable))
+            add(decl, f"{receiver}.{short}" if receiver else short, short, required, decl["doc"])
+        elif decl["kind"] in ("type", "interface"):
+            add(decl, short, short, importable and short[:1].isupper(), decl["doc"] or decl["group_doc"], True)
+        else:
+            exported = next((n for n in decl["names"] if n[:1].isupper()), None)
+            if exported is None:
+                continue
+            if decl["grouped"] and decl["group_doc"]:
+                if decl["block"] not in reported_blocks:
+                    reported_blocks.add(decl["block"])
+                    found.append({"name": exported, "start": decl["start"], "end": decl["end"], "documented": True,
+                                  "doc": _first_line(decl["group_doc"]), "signature": "", "required": importable,
+                                  "kind": decl["kind"], "convention": "go", "malformed": False})
+                continue
+            if decl["grouped"] and not decl["doc"]:
+                if decl["block"] in reported_blocks:
+                    continue
+                reported_blocks.add(decl["block"])
+            add(decl, exported, exported, importable, decl["doc"])
+    return found
+
+
 def functions(path, source, symbols=None):
     """Functions of one file with start/end lines, documented flag, first doc line and normalized signature. symbols
     are the code graph symbols of that file when already known; otherwise the analyzer runs on source."""
@@ -159,29 +247,40 @@ def functions(path, source, symbols=None):
             return _python_functions(source)
         except SyntaxError:
             return []
+    if lower.endswith(GO):
+        return _go_functions(path, source)
     if symbols is None:
         symbols = analyze(path, source)[0]
     return _braced_functions(path, source, symbols)
 
 
 def analyze(path, *sources):
-    """Analyzer symbols of several versions of one TypeScript/JavaScript/Java file, from one analyzer run for the
-    versions not seen yet (an edit hook needs the file before and after; the next edit's 'before' is this 'after').
+    """Analyzer symbols of several versions of one TypeScript/JavaScript/Java file (an edit hook needs the file before
+    and after; the next edit's 'before' is this 'after'). See analyze_files."""
+    return analyze_files([(path, source) for source in sources])
+
+
+def analyze_files(items):
+    """Analyzer symbols of each (path, source) pair, in order, from one analyzer run per language for the pairs not
+    seen yet: starting the analyzer costs more than reading a file, so callers with many files pass them together.
     An analysis that failed or timed out is returned empty but not cached, so the next call tries again."""
-    lower, name = path.lower(), os.path.basename(path)
-    keys = [hashlib.sha1(f"{name}\0{source}".encode("utf-8")).hexdigest() for source in sources]
+    keys = [hashlib.sha1(f"{os.path.basename(path)}\0{source}".encode("utf-8")).hexdigest() for path, source in items]
     with _PARSED_LOCK:
-        missing = {key: source for key, source in zip(keys, sources) if key not in _PARSED}
+        missing = {key: item for key, item in zip(keys, items) if key not in _PARSED}
     found = {}
-    if missing:
-        batch = {f"v{i}/{name}": source for i, source in enumerate(missing.values())}
-        analysis = (code_graph._javascript_graph(batch) if lower.endswith(SCRIPT)
-                    else code_graph._java_graph(batch) if lower.endswith(JAVA) else {})
-        found = {key: [dict(s, path=name) for s in analysis.get("symbols") or [] if s.get("path") == f"v{i}/{name}"]
-                 for i, key in enumerate(missing)}
+    for extensions, analyzer in ((SCRIPT, code_graph._javascript_graph), (JAVA, code_graph._java_graph)):
+        group = [(key, path, source) for key, (path, source) in missing.items() if path.lower().endswith(extensions)]
+        if not group:
+            continue
+        batch = {f"v{i}/{os.path.basename(path)}": source for i, (_key, path, source) in enumerate(group)}
+        analysis = analyzer(batch)
+        names = list(batch)
+        result = {key: [dict(s, path=os.path.basename(path)) for s in analysis.get("symbols") or []
+                        if s.get("path") == names[i]] for i, (key, path, _source) in enumerate(group)}
+        found.update(result)
         with _PARSED_LOCK:
             if not analysis.get("retryable"):
-                _PARSED.update(found)
+                _PARSED.update(result)
             while len(_PARSED) > MAX_PARSED:
                 _PARSED.popitem(last=False)
     with _PARSED_LOCK:
@@ -190,7 +289,7 @@ def analyze(path, *sources):
 
 
 def _touched_lines(before, after):
-    old, new = (before or "").splitlines(), after.splitlines()
+    old, new = (before or "").split("\n"), after.split("\n")
     touched = set()
     for tag, _i1, _i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
         if tag != "equal":
@@ -249,7 +348,8 @@ def coverage(root, include_tests=False, limit=30, view_id=None):
             continue
         found = [f for f in functions(path, source, by_path[path]) if f["required"] or f["documented"]]
         total += len(found)
-        missing += [{"path": path, "function": f["name"], "line": f["start"]} for f in found if not f["documented"]]
+        missing += [{"path": path, "function": f["name"], "line": f["start"], **({"malformed": True} if f.get("malformed")
+                     else {})} for f in found if not f["documented"]]
     per_file = Counter(item["path"] for item in missing)
     return {"functions": total, "documented": total - len(missing),
             "coverage_percent": round(100 * (total - len(missing)) / total, 1) if total else None,

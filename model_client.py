@@ -131,22 +131,27 @@ def _route(model):
     return str(model or "").replace("/", ".").replace(":", ".").split(".")[0].lower()
 
 
+def _claude(model):
+    """Whether the model id names a Claude model, the only family that reads Anthropic's `output_config`."""
+    return "claude" in str(model or "").lower()
+
+
 def structured(model, system, user, tool, timeout=30):
     """One chat call whose answer is a JSON object validated against the parameters schema of `tool` (the tool
     definition is only the carrier of name and schema; `system` may be empty). The request format comes from the `structured_output`
-    configuration: `output_config` for the routes listed there, `response_format` otherwise; never `temperature`.
+    configuration: `output_config` for the Claude models on the routes listed there, `response_format` otherwise; never `temperature`.
     Raises RuntimeError on a stop other than a normal one, a refusal or an empty answer, and ValueError when the
     object breaks the schema."""
     settings = config.structured_output()
     schema = _strict_schema(tool["function"]["parameters"], set(settings["unsupported_keywords"]))
     route = _route(model)
     routes = {item.lower() for item in settings["output_config_routes"]}
-    if settings["mode"] == "output_config" and route not in routes:
-        raise ValueError(f"structured_output.mode is output_config but the route {route!r} of {model} is not in "
-                         f"output_config_routes {sorted(routes)}.")
+    if settings["mode"] == "output_config" and (route not in routes or not _claude(model)):
+        raise ValueError(f"structured_output.mode is output_config but {model} is not a Claude model on a route of "
+                         f"output_config_routes {sorted(routes)}; use mode auto or response_format.")
     messages = [{"role": "system", "content": system}] if system else []
     body = {"model": model, "messages": messages + [{"role": "user", "content": user}]}
-    if settings["mode"] == "output_config" or (settings["mode"] == "auto" and route in routes):
+    if settings["mode"] == "output_config" or (settings["mode"] == "auto" and route in routes and _claude(model)):
         body["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
     else:
         body["response_format"] = {"type": "json_schema", "json_schema": {

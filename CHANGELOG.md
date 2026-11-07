@@ -1,5 +1,133 @@
 # Changelog
 
+## 0.9.65 - beta
+
+- An entry paragraph of `functional.md` and `simple.md` records the code it was written for (`code="..."` in its
+  marker): when the body of the function changes under the same signature, `action=docs check=true` reports
+  `prose_stale` and the validation fails the markers check. Before, a paragraph describing old behaviour passed both
+  with score 100. Empty the block and run `write_prose=true` again, or rewrite it by hand and delete the stamp
+  (`doc_scope.py`, `doc_validate.py`, `doc_prose.py`, `tests/test_doc_scope.py`, `tests/test_doc_prose.py`).
+- The code graph records a function handed over as a value (callback, thread target, signal handler, dispatch table,
+  `http.HandleFunc` handler) as a `reference` edge, in Python and Go. Dead-code candidates drop the functions used this
+  way or by module-level code, and unnamed `callback`/`anonymous` functions: on three real projects the list went from
+  13 to 5 and from 18 to 4, every removed one a real use (`code_graph.py`, `code_graph_go.py`, `doc_insights.py`,
+  `tests/test_code_graph_limits.py`, `tests/test_code_graph_go.py`, `tests/test_doc_insights.py`).
+- `write_prose=true` rejects a paragraph that is not in English and asks again with the reason; the instruction also
+  tells the model to describe only what the context shows, not a behaviour guessed from the names of the functions it
+  calls, and not to open with "This feature". In the measured run 8 of 242 written paragraphs were in Portuguese
+  (`doc_prose.py`, `tests/test_doc_prose.py`).
+- The calls of `write_prose=true` are counted in the usage meter under the `docs` purpose of the project
+  (`usage_meter.py`).
+- A model failure is blamed on the role that made the call: when the docs model and the router model are the same model,
+  a timed-out `write_prose` call warned "router_model failed" and the setup screen counted it under the router
+  (`model_health.py`, `tests/test_model_health.py`).
+- `write_prose=true` accepts a paragraph whose code span holds angle brackets, such as `logs/<name>.log` copied from a
+  docstring: it was rejected as HTML on every attempt (`doc_prose.py`, `tests/test_doc_prose.py`).
+- Line numbers in `docs/scope` stay right in files with a form feed or other line separators Python's `splitlines`
+  splits on (`doc_check.py`, `doc_extras.py`, `tests/test_doc_check.py`, `tests/test_doc_extras.py`).
+- The validation notes, instead of failing, a manifest command that runs a file which is not in the repository (a build
+  output such as `bin/...`) (`doc_validate.py`, `tests/test_doc_validate.py`).
+
+## 0.9.64 - beta
+
+- `project_manage action=docs write_prose=true` writes the empty prose blocks of `docs/scope` with the new docs model
+  role (`docs_model`, "Docs model" in the setup screen, filled with Claude Haiku 5.5 when the gateway has it). Each block
+  is a task of its kind (module, entry point, plain-language entry point, overview) with a fixed instruction and a
+  context read from the code (docstrings, signatures, source, flow, command line, tests, manifest and README), marked as
+  data the model must not obey. A paragraph is written only when every name, option and version it cites exists in the
+  code and its form fits the kind; a rejected one is asked again once with the reason, then left empty and reported with
+  its fix, without the model's text. A call stops after about 40 s, under the MCP client's tool timeout, and says how
+  many blocks are left; the regeneration that follows validates the prose again (`doc_prose.py`,
+  `tests/test_doc_prose.py`). The model was chosen by measuring seven candidates on 36 blocks of a real project each,
+  judged by Claude Opus 5.5 (`docs/research/2026-11-05-modelo-e-instrucao-da-prosa.md`).
+- Structured output sends Anthropic's `output_config` only to Claude models: Gemini on the `vertex_ai` route ignored it
+  and answered loose text, so every structured call with a Gemini model failed (`tests/test_structured_output.py`).
+
+## 0.9.63 - beta
+
+- `action=docs generate=true` validates what it wrote, and `action=docs validate=true` runs the same validation alone:
+  every claim of `docs/scope` is checked against the code and the report `docs/scope/validation.md` gives pass/fail per
+  check with evidence, a score and the verdict (fail, pass with prose pending, or pass). The checks: anchors and
+  signatures, every relative link, line numbers, callers/calls/tests against the graph, the declared coverage and the
+  undocumented gaps, why each entry point is one and its flow, the scripts the manifests and `__main__` blocks run, the
+  command lines, the names, options and versions the written prose cites, the tests per entry point, link labels,
+  counts and the project name across pages, the glossary, navigation from the index, and the dependency versions. A
+  failing validation leads the guidance of `generate` (`tests/test_doc_validate.py`).
+- `functional.md` gains a "Command line" section with the commands, arguments, options, defaults and help the code
+  declares with argparse (read from the syntax tree, loops over literal names expanded), and the functions a
+  `__main__` block runs are entry points. Links to entry points carry their file when the name repeats, and
+  `simple.md` takes the project name from `pyproject.toml`, `package.json`, `Cargo.toml` or `go.mod`.
+- Go joins the code graph: functions, methods, types and interfaces with static calls resolved within the package and
+  through imports, so `graph`, `affected_tests`, the duplicate check and the documentation check read Go code. The
+  documentation check follows the revive `exported` rule: a doc comment must start with the declared name, and one
+  that does not is reported as malformed. On a real Go project: 262 symbols and 289 calls in 0.52 s
+  (`tests/test_code_graph_go.py`, `tests/test_doc_check.py`).
+- `project_manage action=layers` declares the project's layers, highest first, each by path globs and annotations,
+  as import-linter's layers contract, ArchUnit and dependency-cruiser define them. Without a rule it suggests one from
+  folder names and annotations, with the files, symbols and calls between layers (down or against the order); a rule
+  passed in `layers` is a preview until `confirm=true` saves it to `.smart-tool/layers.json` (`tests/test_layers.py`).
+- `action=pr_impact` (read-only) returns a Markdown impact report of the change set against `base`: touched functions
+  with their callers, documentation anchors left out of date in the changed files, and the tests to run with their
+  commands; it joins `code_impact`, `affected_tests` and the documentation check and publishes nothing
+  (`tests/test_pr_impact.py`).
+- `action=docs generate=true` writes five more optional pages, on by default with opt-outs `hotspots`, `coupling`,
+  `dead_code`, `tour` and `glossary`: hotspots (commits × lines, the method code-maat publishes), hidden change coupling
+  (shared commits over average commits, bulk commits skipped, pairs that already import each other only counted),
+  dead-code candidates (no static caller, or only tests), an onboarding tour of the entry points, and a glossary of the
+  words in function names that also feeds `simple.md`. The `adr` page gains decision candidates from the git log (decision
+  wording or a dependency-manifest change) with drafts for the latest. Without readable git history the pages say so
+  (`tests/test_doc_insights.py`). No code of the GPL code-maat is used.
+- `action=docs generate=true` also writes ten optional documents beside the scope, all from the code graph and all on
+  by default, each with its own opt-out in `docs_extras` of `config.json` (`structure`, `coverage`, `modules`, `tests`,
+  `configuration`, `dependencies`, `adr`, `flows`, `features_tests`, `index`; an unknown key or a non-boolean fails
+  naming the config path): the folder structure drawn without `tree`, the docstring coverage per folder, the module
+  Mermaid, the tests README linked to the functional anchors, the configuration the code reads (environment variables,
+  config files, ports), the external dependencies with the licenses of the installed packages only, the decision
+  record index with an ADR template, a Mermaid sequence per entry point, and the entry points × tests matrix. The flows
+  and matrix pages carry signature markers, so `action=docs check=true` and the edit hook cover them. The short index
+  goes between `smart-tool:index` markers in an existing `AGENTS.md` (or `llms.txt`) and is never created; regeneration
+  replaces only the block and unbalanced markers fail. Every page repeats the `truncated` warning of the graph
+  (`tests/test_doc_extras.py`). Measured: on Smart Tool itself 105 files, 910 KB (62 KB of them extras) in 8.0 s with
+  `check` clean in 2.0 s; on a Go project with three layers 25 files, 104 KB (22 KB extras) in 1.2 s, `check` clean.
+- `project_manage action=docs generate=true` writes the documentation scope to `docs/scope` from the code graph,
+  without a model: technical pages by folder, or by module when a folder has more than 150 public functions, with an
+  entry per public function (anchor `path::name`, signature, first
+  doc line, layer, callers, calls, the tests that reach it) and a Mermaid flow of the folders by layer;
+  `functional.md` with each entry point and the functions its calls reach, by layer; `simple.md`. The agent writes the
+  prose between prose markers and regeneration keeps it, as terraform-docs keeps the text around its block; a file
+  Smart Tool did not write is never overwritten. On a real Go project with three declared layers: 95 public
+  functions on 11 pages, 16 entry points, 15 files and 71 KB in 1.2 s; on Smart Tool itself, 803 public functions on 90
+  pages, the largest 53 KB (`tests/test_doc_scope.py`).
+- Each documentation anchor records the signature it was generated from, like Swimm's smart tokens:
+  `action=docs check=true` lists anchors whose function changed signature or is gone and links to missing anchors,
+  `action=docs symbol=NAME` tells where a function is documented, and the documentation hook warns when an edit makes
+  a documented entry out of date. The link lives in the documents and the query, never inside docstrings.
+- The edit hook now keeps documentation in the docstring by default: `doc_mode` defaults to `require` (was `remind`)
+  and the new `comment_mode` (`require`, `remind`, `off`; default `require`) blocks, among the comments an edit adds or
+  changes in a code file, commented-out code, ticket, version and history tags, a loose block above a function instead
+  of its docstring and a block of more than two lines inside a body. A short comment that says why, directives and
+  dividers pass. Opt out with `"doc_mode": "off"` and `"comment_mode": "off"` (or Off on both cards of the setup
+  screen); a setting already saved is kept, so documentation generated afterwards finds every function documented in
+  place (`tests/test_comment_check.py`).
+
+## 0.9.62 - beta
+
+- The code graph keeps up to 100,000 symbols and 250,000 edges (calls and dependencies); before, it stopped at 8,000
+  and 20,000. A real Node project already had 8,103 symbols, and a 968-file one had 17,651 symbols and 16,695 calls,
+  of which the graph kept 8,000 and 6,852. The Python analyzer passes its limits to the JS/TS and Java analyzers, and
+  `truncated` is set only when a symbol or an edge was really left out, including symbols of several languages that
+  fit one by one but not together; before, `counts.symbols` could report 8,190 for a project with 17,651
+  (`tests/test_code_graph_limits.py`).
+- The Java analyzer starts in 0.2 s instead of 1.1 s. java-parser reaches chevrotain's sources and lodash one module
+  file per function, 744 files read on every run; with Node's `module.registerHooks` the analyzer loads chevrotain's
+  own bundle and lodash's single file instead, with byte-identical output on 167 and 199 real files (36 files: 1.76 s
+  → 0.84 s; 199 files: 6.91 s → 3.80 s). A Node without `registerHooks` loads java-parser as published.
+- Duplicate and documentation checks analyze many TypeScript or Java files in one analyzer run per language instead
+  of one run per file (`doc_check.analyze_files`): 36 Java files took 28.7 s before.
+- A search in a folder of the system's temporary folder runs natively unless a registered project holds it. The
+  session folder used to count as a project there, so the redirected `smart_search` registered and indexed a copy
+  made for a measurement or a build (`tests/test_router.py`).
+
 ## 0.9.61 - beta
 
 - Old Camoufox builds leave the user's cache. camoufox 0.5.6 installs each build in its own folder and never deletes

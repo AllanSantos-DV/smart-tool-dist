@@ -15,9 +15,11 @@ import os
 import affected_tests
 import code_graph
 import code_impact
+import comment_check
 import config
 import dependency_notice
 import doc_check
+import doc_scope
 import duplicates
 import edit_preview
 import index_profile
@@ -210,7 +212,12 @@ def _run_command(root, tests):
 def _doc_lines(findings):
     lines = []
     for root, rel, item in findings[:MAX_DOC_FINDINGS]:
-        if item["issue"] == "missing":
+        short = item["name"].split(".")[-1]
+        if item["issue"] == "missing" and item.get("malformed"):
+            text = f"{item['name']} ({rel}:{item['start']}) has a doc comment that does not start with '{short} ': fix it."
+        elif item["issue"] == "missing" and item.get("convention") == "go":
+            text = f"{item['name']} ({rel}:{item['start']}) has no doc comment: write one starting with '{short} '."
+        elif item["issue"] == "missing":
             text = f"{item['name']} ({rel}:{item['start']}) has no docstring: write one (purpose, parameters, return)."
         else:
             text = (f"{item['name']} ({rel}:{item['start']}) changed its signature: update its docstring if the "
@@ -219,6 +226,32 @@ def _doc_lines(findings):
     if len(findings) > MAX_DOC_FINDINGS:
         lines.append(f"{len(findings) - MAX_DOC_FINDINGS} more function(s) in the same situation.")
     return "Smart Tool docs: " + " ".join(lines)
+
+
+_COMMENT_FIX = {
+    "commented_code": "is commented-out code: delete it, version control keeps it",
+    "history_tag": "carries a ticket, version or history tag: drop it, that belongs in the commit message",
+    "loose_docs": "documents the function below as a loose comment: move it into the docstring in the language's "
+                  "standard format",
+    "inline_long": "is a long comment inside a function: keep one short line that says why, or move the contract "
+                   "into the docstring",
+}
+
+
+def _comment_lines(findings):
+    lines = [f"{rel}:{item['line']} {_COMMENT_FIX[item['issue']]}" for rel, item in findings[:MAX_DOC_FINDINGS]]
+    if len(findings) > MAX_DOC_FINDINGS:
+        lines.append(f"{len(findings) - MAX_DOC_FINDINGS} more comment(s) in the same situation.")
+    return "Smart Tool comments: " + "; ".join(lines) + "."
+
+
+def _scope_lines(findings):
+    shown = [f"{item['id']} ({'signature changed' if item['issue'] == 'signature_changed' else 'removed'}, "
+             f"{item['file']})" for item in findings[:MAX_DOC_FINDINGS]]
+    more = f" and {len(findings) - MAX_DOC_FINDINGS} more" if len(findings) > MAX_DOC_FINDINGS else ""
+    return ("Smart Tool docs scope: this edit leaves documented entries out of date: " + "; ".join(shown) + more
+            + ". After the edit, regenerate with project_manage action=docs generate=true and review the prose of "
+              "those entries.")
 
 
 def _duplicate_lines(findings):
@@ -237,14 +270,15 @@ def _duplicate_lines(findings):
             + " If the copy is intentional (moving the function, a deliberate fork), go ahead.")
 
 
-def _edit_review(payload, doc_mode, duplicate_mode, dependency_mode):
+def _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode="off"):
     """Checks of an edit before it runs. Docstrings follow doc_mode, in code files of registered projects only (tests,
     docs and files outside a project are left out, as in the docs coverage): missing ones deny the edit in require mode and become a reminder in remind mode; a
-    documented function whose signature changed always gets a reminder. Copies of indexed functions follow
-    duplicate_mode and only add context, never deny. An edit of a package.json, requirements*.txt or go.mod follows dependency_mode: advisories
+    documented function whose signature changed always gets a reminder. Comments the edit adds in the wrong place
+    (see comment_check) follow comment_mode in the same files: require denies, remind adds context. Copies of indexed
+    functions follow duplicate_mode and only add context, never deny. An edit of a package.json, requirements*.txt or go.mod follows dependency_mode: advisories
     of the added or changed dependencies are added as context, never a denial."""
     with code_graph.pending_scope():
-        return _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode)
+        return _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode)
 
 
 def _dependency_part(before, after, ecosystem):
@@ -260,9 +294,10 @@ def _dependency_part(before, after, ecosystem):
         return f"{dependency_notice.PREFIX}dependency check skipped: {exc}"
 
 
-def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode):
+def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode="off"):
     """`_edit_review` inside one `code_graph.pending_scope`, so the pending-changes scan runs once per review."""
-    doc_findings, duplicate_findings, failures, dependency_parts = [], [], [], []
+    doc_findings, scope_findings, duplicate_findings, failures, dependency_parts = [], [], [], [], []
+    comment_findings = []
     for path, before, after in edit_preview.preview(payload.get("tool_name"), payload.get("tool_input"), payload.get("cwd")):
         ecosystem = dependency_notice.ecosystem_of(path)
         if dependency_mode != "off" and ecosystem:
@@ -271,23 +306,36 @@ def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode):
         if not doc_check.supported(path):
             continue
         root = _project_of(path)
-        rel = os.path.relpath(path, root).replace(os.sep, "/") if root else os.path.basename(path)
+        rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root)).replace(os.sep, "/") if root else os.path.basename(path)
         edited = doc_check.written(path, before, after)
         profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile")) if root else None
         if doc_mode != "off" and root and index_profile.kind(rel, profile) == "code":
             doc_findings += [(root, rel, item) for item in doc_check.review(path, before, after, edited)]
+        if comment_mode != "off" and root and index_profile.kind(rel, profile) == "code":
+            comment_findings += [(rel, item) for item in comment_check.review(path, before, after, edited)]
+        if doc_mode != "off" and root:
+            try:
+                scope_findings += doc_scope.on_edit(root, rel, before, edited["all"])
+            except (OSError, UnicodeDecodeError) as exc:
+                failures.append(f"Smart Tool docs scope check skipped: {exc}")
         if duplicate_mode != "off" and root and edited["touched"]:
             try:
                 duplicate_findings += [(rel, item) for item in duplicates.on_write(root, path, before, after, edited)]
             except (ValueError, RuntimeError) as exc:
                 failures.append(f"Smart Tool duplicates check skipped: {exc}")
     parts = ([_doc_lines(doc_findings)] if doc_findings else []) + \
+        ([_comment_lines(comment_findings)] if comment_findings else []) + \
+        ([_scope_lines(scope_findings)] if scope_findings else []) + \
         ([_duplicate_lines(duplicate_findings)] if duplicate_findings else []) + failures + dependency_parts
     if not parts:
         return {}
     message = " ".join(parts)
-    if doc_mode == "require" and any(item["issue"] == "missing" for _root, _rel, item in doc_findings):
-        return deny(message + " Redo the edit with the docstring.")
+    missing_docs = doc_mode == "require" and any(item["issue"] == "missing" for _root, _rel, item in doc_findings)
+    wrong_comments = comment_mode == "require" and bool(comment_findings)
+    if missing_docs or wrong_comments:
+        fixes = " and ".join(text for text, needed in (("the docstring", missing_docs),
+                                                      ("the comments fixed", wrong_comments)) if needed)
+        return deny(message + f" Redo the edit with {fixes}.")
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": message}}
 
 
@@ -299,11 +347,11 @@ def decide(payload, client, web_route, jobs):
     subagent whose tool list has no Smart Tool MCP tool: it has nothing to switch to."""
     cfg = config.load_config()
     if isinstance(payload, dict) and payload.get("tool_name") in EDIT_TOOLS:
-        doc_mode, duplicate_mode, dependency_mode = (config.doc_mode(cfg), config.duplicate_mode(cfg),
-                                                     config.dependency_mode(cfg))
-        if doc_mode == "off" and duplicate_mode == "off" and dependency_mode == "off":
+        doc_mode, duplicate_mode, dependency_mode, comment_mode = (
+            config.doc_mode(cfg), config.duplicate_mode(cfg), config.dependency_mode(cfg), config.comment_mode(cfg))
+        if "off" == doc_mode == duplicate_mode == dependency_mode == comment_mode:
             return {}
-        return _edit_review(payload, doc_mode, duplicate_mode, dependency_mode)
+        return _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode)
     if isinstance(payload, dict) and str(payload.get("tool_name")).startswith(f"mcp__{SMART_TOOL_SERVER}__"):
         if payload["tool_name"] == SMART_SEARCH_TOOL:
             router.CLIENT.set(client)

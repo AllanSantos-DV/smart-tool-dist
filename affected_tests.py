@@ -353,7 +353,7 @@ def affected(root, base="HEAD", limit=30, view_id=None):
                                                "index scope)"})
     if not_analyzed:
         run_all.append(f"{len(not_analyzed)} changed code file(s) outside the import graph; see not_analyzed")
-    touched = [s for s in by_id.values() if s["path"] in changes and s.get("kind") not in ("module", "class", "interface")
+    touched = [s for s in by_id.values() if s["path"] in changes and s.get("kind") not in ("module", "class", "interface", "type")
                and (changes[s["path"]]["lines"] is None
                     or changes[s["path"]]["lines"].intersection(range(s["start_line"], s["end_line"] + 1)))]
     touched = [s for s in touched if not any(o is not s and o["path"] == s["path"] and o in touched

@@ -17,7 +17,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.61 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.65 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -83,7 +83,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.61 install
+npx @allansantos-dev/smart-tool@0.9.65 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -115,10 +115,10 @@ searches, the router's tier and sufficiency decisions, the index profile and the
 `temperature`, and the answer is validated against the schema before use. A stop other than a normal one (cut at the
 token limit, refusal), an empty answer, a missing field or a value outside an enum fails the call with its reason
 instead of passing as an empty result. The `structured_output` object of `config.json` chooses the format:
-`mode` is `auto` (default: `output_config` for the models whose route, the id prefix before the first dot, is in
-`output_config_routes`, which is `["vertex_ai"]` by default; `response_format`, applied on every gateway route, for all
-others, Bedrock included), `response_format` or `output_config`; `output_config` for a route outside the list is
-refused. `unsupported_keywords` lists the schema keywords the gateway does not apply (`maxItems`, `minLength`...); they
+`mode` is `auto` (default: `output_config` for the Claude models whose route, the id prefix before the first dot, is
+in `output_config_routes`, which is `["vertex_ai"]` by default; `response_format`, applied on every gateway route, for
+all others, Bedrock and Gemini on Vertex included), `response_format` or `output_config`; `output_config` for a model
+that is not Claude or for a route outside the list is refused. `unsupported_keywords` lists the schema keywords the gateway does not apply (`maxItems`, `minLength`...); they
 are left out of the request and the code that reads the answer keeps enforcing them.
 
 ## Set up
@@ -133,7 +133,8 @@ Redirects) and Maintenance (Setup audit, Startup).
    `https://openrouter.ai/api/v1`, `http://localhost:11434/v1`), and an optional API key. Saving tests `/models` first.
 2. **Models**: embedding, rerank (optional; without it results use the hybrid order), the router model (small, no
    reasoning: web search tier order and result checks), the index classification model (also reviews block patterns), the
-   scout model (the short answer of `smart_scout`) and the research model. Any id the gateway accepts works; the catalog is
+   scout model (the short answer of `smart_scout`), the research model and the docs model (the prose of the generated
+   documentation). Any id the gateway accepts works; the catalog is
    shown as suggestions. Empty roles are filled with the recommended models the gateway offers.
 
    When a new version recommends other models than the ones you use, a Windows notification (**Apply now**, **Don't
@@ -208,18 +209,66 @@ Redirects) and Maintenance (Setup audit, Startup).
    - **Advise only**: the native tool runs; the agent receives the same advice next to the result and decides.
    - **Off**: no routing.
 
-   **Documentation on edit** checks the public functions an edit touches (Python docstrings, JSDoc, Javadoc), in
-   Claude Code edits and Codex patches. Private (`_name`, `#name`, `private`), nested and override (`@Override`,
+   **Documentation on edit** checks the public functions an edit touches (Python docstrings, JSDoc, Javadoc, and Go
+   doc comments, which must start with the declared name as the revive `exported` rule asks), in Claude Code edits and
+   Codex patches. Private (`_name`, `#name`, `private`), nested and override (`@Override`,
    `@override`) functions are exempt, as in pydocstyle, eslint-plugin-jsdoc and Checkstyle, and a JSDoc above a set of
    TypeScript overloads documents the implementation:
-   - **Remind** (default): the edit runs and the agent is told which touched functions have no docstring, and which
+   - **Require** (default): an edit that leaves a touched function without a docstring is blocked until it adds one.
+   - **Remind**: the edit runs and the agent is told which touched functions have no docstring, and which
      documented ones changed their signature, with their callers, the tests calling them and the command that runs those tests
   (from the code graph, only when it is already cached: the hook never waits for an analysis).
-   - **Require**: an edit that leaves a touched function without a docstring is blocked until it adds one.
    - **Off**: no checks.
+
+   **Comments in the wrong place** keeps the documentation in the docstring, where `action=docs` reads it. Of the
+   comments an edit adds or changes in a code file (not tests), it blocks four kinds: commented-out code (the ruff
+   `ERA001` rule), a ticket, version or history tag (`PEDIDO 1304`, `JIRA-12`, `added in v2.1`), a loose comment block
+   right above a function instead of its docstring, and a block of more than two lines inside a function body. A
+   short comment that says why (`// The gateway drops the first frame after a reconnect.`) passes, as do directives
+   (`# noqa`, `//go:build`, `// eslint-disable`), dividers and comments the edit did not touch. `comment_mode` in
+   `config.json`: `require` (default, the edit is blocked until the comment is fixed), `remind` (the edit runs and the
+   agent is told) or `off`. To turn the whole rule off set `"doc_mode": "off"` and `"comment_mode": "off"` in
+   `~/.smart-tool/config.json`, or pick Off on both cards of the setup screen. A setting you already saved stays as
+   saved; only a config without the key follows the new default.
 
    A documented function edited only in its body is not mentioned. `project_manage` with `action=docs` lists the
    public functions still without a docstring, for documenting a project that started without them.
+
+   **Documentation scope**: `action=layers` declares the project's layers, highest first (entry points, services,
+   domain, data access), each by path globs and annotations, as import-linter's layers contract, ArchUnit and
+   dependency-cruiser define them. Without a rule it suggests one from folder names (`cmd`, `handler`, `service`,
+   `repository`...) and annotations (`@RestController`, `@Service`, `@app.route`...), with the calls between layers;
+   passing `layers` previews a rule and the same `layers` with `confirm=true` saves it to `.smart-tool/layers.json`.
+   `action=docs generate=true` writes `docs/scope` in the project from the code graph, without a model: a technical page
+   per folder (a page per module when the folder has more than 150 public functions) with an entry per public function
+   (anchor `path::name`, signature, first doc line, layer, callers, calls and the tests that reach it) and a Mermaid flow of the folders by layer; `functional.md` with each entry point (the
+   public functions of the highest layer and every `main`) and the functions its calls reach, by layer; and
+   `simple.md`. `action=docs write_prose=true` writes the empty prose blocks with the docs model (Claude Haiku 5.5 by
+   default): each block gets an instruction for its kind (module, entry point, plain-language entry, overview) and a
+   context read from the code, and a paragraph is written only when every name, option and version it cites exists in
+   the code and it is in English; a rejected one is asked again once with the reason, then reported with its fix. A call stops after about
+   40 s and says how many blocks are left. The prose can also be written by hand between the markers; regenerating keeps it, reports blocks whose module
+   or entry point is gone, and never overwrites a file that Smart Tool did not write. Each anchor records the signature
+   it was generated from: `action=docs check=true` lists anchors whose function changed signature or is gone, links
+   to missing anchors and entry paragraphs written for an older body of their function (the `code="..."` stamp of the
+   block; delete it after rewriting the paragraph by hand), `action=docs validate=true` checks every claim of `docs/scope` against the code and writes `docs/scope/validation.md`, `action=docs symbol=NAME` tells where a function is documented, and the documentation hook warns
+   when an edit makes a documented entry out of date. The link lives in the documents, never inside docstrings.
+   The same run writes fifteen optional documents under `docs/scope/extras`, all from the graph and the git log: folder
+   structure, docstring coverage per folder, module Mermaid, tests README, configuration read by the code, dependencies
+   with the licenses of installed packages, decision index with an ADR template and the decision candidates found in the
+   git log, a sequence per entry point, the entry points × tests matrix, hotspots (commits × lines), hidden change
+   coupling (files that change together without an import), dead-code candidates, an onboarding tour of the entry
+   points and a glossary of the words the code uses (which also feeds `simple.md`). Each is on by default; turn one
+   off with `"docs_extras": {"modules": false}` in `config.json` (keys: `structure`, `coverage`, `modules`, `tests`,
+   `configuration`, `dependencies`, `adr`, `flows`, `features_tests`, `hotspots`, `coupling`, `dead_code`, `tour`,
+   `glossary`, `index`). The history pages say so on the page when the folder has no readable git history. `index`
+   keeps a short index of the documentation between `smart-tool:index` markers in an existing `AGENTS.md` or
+   `llms.txt`; it never creates the file and rewrites only the block.
+
+   **Impact of a change**: `project_manage action=pr_impact [base=main]` returns a Markdown report of the change set
+   against `base` (default `HEAD`): the touched functions with their callers, the documentation anchors left out of
+   date, and the tests to run with their commands. It reads only; publishing it as a pull-request comment is left to
+   the CI step that calls it.
 
    **Dependency check on edit**: an edit of `package.json`, `requirements*.txt` or `go.mod` that adds or changes a dependency lists the OSV advisory IDs of up to 5 of them (exact version, or the lower bound of `^`, `~`, `~=` and `>=`), answered from a 6 h disk cache or one 2.5 s batch call that sends only package names and versions; when OSV cannot answer, the reminder says the check was skipped and the edit goes on. `dependency_mode` in `config.json`: `warn` (default) or `off`.
 
@@ -245,7 +294,7 @@ Redirects) and Maintenance (Setup audit, Startup).
    count before the project is reindexed. `run_all` is true, with
    the reason, when a configuration or lockfile changed or a changed code file is outside the import graph. Go is read
    by package: a file that imports a package depends on every file of it, so a changed package selects the tests of every
-   package that imports it (`go test ./pkg ...`); the Go and Rust documentation and duplicate hooks stay silent.
+   package that imports it (`go test ./pkg ...`); the Rust documentation and duplicate hooks stay silent.
 
    `project_manage` with `action=setup_audit` and a `project_root` (or `python setup_audit.py --project <folder>`)
    reports what Claude Code and Codex actually load for that folder (settings layers, enabled plugins of both,

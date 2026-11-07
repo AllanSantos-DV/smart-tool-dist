@@ -85,6 +85,7 @@ def status_payload():
         "scope_model": cfg.get("scope_model", ""),
         "scout_model": cfg.get("scout_model", ""),
         "research_model": cfg.get("research_model", ""),
+        "docs_model": cfg.get("docs_model", ""),
         "research_max_iterations": cfg.get("research_max_iterations", config.DEFAULT_CONFIG["research_max_iterations"]),
         "quick_search_timeout_s": cfg.get("quick_search_timeout_s", config.DEFAULT_CONFIG["quick_search_timeout_s"]),
         "site_memory_similarity_threshold": cfg.get("site_memory_similarity_threshold", config.DEFAULT_CONFIG["site_memory_similarity_threshold"]),
@@ -140,6 +141,7 @@ def handle_models_get():
             "scope_model": cfg.get("scope_model", ""),
             "scout_model": cfg.get("scout_model", ""),
             "research_model": cfg.get("research_model", ""),
+            "docs_model": cfg.get("docs_model", ""),
             "research_max_iterations": cfg.get("research_max_iterations", config.DEFAULT_CONFIG["research_max_iterations"]),
             "quick_search_timeout_s": cfg.get("quick_search_timeout_s", config.DEFAULT_CONFIG["quick_search_timeout_s"]),
             "site_memory_similarity_threshold": cfg.get("site_memory_similarity_threshold", config.DEFAULT_CONFIG["site_memory_similarity_threshold"]),
@@ -253,6 +255,10 @@ def handle_integration_get():
     except ValueError as exc:
         doc_mode, doc_error = "", str(exc)
     try:
+        comment_mode, comment_error = config.comment_mode(), ""
+    except ValueError as exc:
+        comment_mode, comment_error = "", str(exc)
+    try:
         duplicate_mode, duplicate_error = config.duplicate_mode(), ""
     except ValueError as exc:
         duplicate_mode, duplicate_error = "", str(exc)
@@ -270,7 +276,8 @@ def handle_integration_get():
         stored, patterns_error = block_patterns._empty(), str(exc)
     return {"daemon_url": setup_origin(), "clients": clients, "hook_mode": mode, "hook_mode_error": mode_error,
             "hook_modes": list(config.HOOK_MODES), "doc_mode": doc_mode, "doc_mode_error": doc_error,
-            "doc_modes": list(config.DOC_MODES), "duplicate_mode": duplicate_mode,
+            "doc_modes": list(config.DOC_MODES), "comment_mode": comment_mode, "comment_mode_error": comment_error,
+            "comment_modes": list(config.COMMENT_MODES), "duplicate_mode": duplicate_mode,
             "duplicate_mode_error": duplicate_error, "duplicate_modes": list(config.DUPLICATE_MODES),
             "dependency_mode": dependency_mode, "dependency_mode_error": dependency_error,
             "dependency_modes": list(config.DEPENDENCY_MODES),
@@ -292,9 +299,9 @@ def handle_integration_save(body):
         except (OSError, ValueError) as exc:
             raise SetupError(str(exc))
         return handle_integration_get()
-    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "duplicate_mode", "dependency_mode", "pattern_proposals"):
+    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "comment_mode", "duplicate_mode", "dependency_mode", "pattern_proposals"):
         action = body["action"]
-        allowed = {"hook_mode": config.HOOK_MODES, "doc_mode": config.DOC_MODES,
+        allowed = {"hook_mode": config.HOOK_MODES, "doc_mode": config.DOC_MODES, "comment_mode": config.COMMENT_MODES,
                    "duplicate_mode": config.DUPLICATE_MODES, "dependency_mode": config.DEPENDENCY_MODES,
                    "pattern_proposals": config.PATTERN_PROPOSAL_MODES}[action]
         if body.get("mode") not in allowed:
@@ -451,6 +458,7 @@ _MODEL_FIELDS = {
     "scope_model": "chat",
     "scout_model": "chat",
     "research_model": "chat",
+    "docs_model": "chat",
     "embedding_model": "embedding",
     "rerank_model": "rerank",
 }
@@ -783,6 +791,7 @@ __I18N__
           </div>
           <div class="field"><label for="sel-scout">Code scout (optional)</label><span class="explain">smart_scout: writes a short answer over the lines it read and keeps only the ones that answer. Empty returns the literal lines without a model.</span><input id="sel-scout" list="dl-scout" autocomplete="off" spellcheck="false"><datalist id="dl-scout"></datalist></div>
           <div class="field"><label for="sel-research">Web research</label><span class="explain">Used by web_search with depth=research. Empty uses the router model.</span><input id="sel-research" list="dl-research" autocomplete="off" spellcheck="false"><datalist id="dl-research"></datalist></div>
+          <div class="field"><label for="sel-docs">Docs model</label><span class="explain">Writes the prose of the generated documentation (project_manage action=docs write_prose=true); each paragraph is checked against the code before it is written.</span><input id="sel-docs" list="dl-docs" autocomplete="off" spellcheck="false"><datalist id="dl-docs"></datalist></div>
           <details class="more">
             <summary>Advanced web research limits</summary>
             <div class="pair" style="margin-top:12px">
@@ -1135,6 +1144,7 @@ async function loadModels() {
     fillSuggestions($("sel-scope"), data.chat, data.current.scope_model);
     fillSuggestions($("sel-scout"), data.chat_lightweight.length ? data.chat_lightweight : data.chat, data.current.scout_model);
     fillSuggestions($("sel-research"), data.chat, data.current.research_model);
+    fillSuggestions($("sel-docs"), data.chat, data.current.docs_model);
     fillSuggestions($("sel-embedding"), data.embedding, data.current.embedding_model);
     fillSuggestions($("sel-rerank"), data.rerank, data.current.rerank_model);
     fillNumber("num-research-iterations", "research-iterations-hint", data.ranges.research_max_iterations, data.current.research_max_iterations, data.recommended.research_max_iterations, "");
@@ -1211,7 +1221,7 @@ $("btn-save-models").addEventListener("click", async () => {
   setMsg("models-msg", "", "Saving…");
   try {
     await post("/setup/models", {
-      router_model: $("sel-router").value, scope_model: $("sel-scope").value, scout_model: $("sel-scout").value, research_model: $("sel-research").value,
+      router_model: $("sel-router").value, scope_model: $("sel-scope").value, scout_model: $("sel-scout").value, research_model: $("sel-research").value, docs_model: $("sel-docs").value,
       research_max_iterations: Number($("num-research-iterations").value), quick_search_timeout_s: Number($("num-quick-timeout").value),
       site_memory_similarity_threshold: Number($("num-site-memory-threshold").value),
       embedding_model: $("sel-embedding").value, rerank_model: $("sel-rerank").value,
@@ -1302,9 +1312,14 @@ const RULES = [
               ["off", "Off", "No routing; agents use their native tools as usual."]] },
   { key: "doc_mode", title: "Documentation on edit", applies: "Applies on the next edit.",
     intro: "Checks the public functions an edit touches. Private, nested and override functions are exempt, as in pydocstyle, eslint-plugin-jsdoc and Checkstyle. A documented function comes up again only when its signature changes.",
-    options: [["remind", "Remind", "The edit runs; the agent is told which touched functions lack a docstring.", true],
-              ["require", "Require", "An edit that leaves a touched function without a docstring is blocked until it adds one."],
+    options: [["require", "Require", "An edit that leaves a touched function without a docstring is blocked until it adds one.", true],
+              ["remind", "Remind", "The edit runs; the agent is told which touched functions lack a docstring."],
               ["off", "Off", "No documentation checks."]] },
+  { key: "comment_mode", title: "Comments in the wrong place", applies: "Applies on the next edit.",
+    intro: "Checks the comments an edit adds: commented-out code, ticket or history tags, a loose block above a function instead of its docstring, and a long block inside a function body. A short comment that says why stays allowed.",
+    options: [["require", "Require", "An edit that adds a comment in the wrong place is blocked until it is fixed.", true],
+              ["remind", "Remind", "The edit runs; the agent is told which comments are misplaced."],
+              ["off", "Off", "No comment checks."]] },
   { key: "duplicate_mode", title: "Duplicate functions on edit", applies: "Applies on the next edit.",
     intro: "Compares the functions an edit writes with the indexed code: identical bodies, and near-identical ones with only local names changed. It never blocks.",
     options: [["warn", "Warn", "The edit runs; the agent is told when a function copies one already in the project.", true],

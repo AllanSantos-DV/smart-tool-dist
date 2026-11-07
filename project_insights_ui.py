@@ -13,7 +13,7 @@ SCRIPT=r'''
 window.SmartInsights=(()=>{
  const $i=id=>document.getElementById(id);let sequence=0,storage=null,plan=null,comparison=null,compareRequest=0,diffRequest=0;
  const count=n=>Number(n||0).toLocaleString('en-US'),size=n=>n>=1048576?(n/1048576).toLocaleString('en-US',{maximumFractionDigits:2})+' MiB':(n/1024).toLocaleString('en-US',{maximumFractionDigits:1})+' KiB';
- const phaseNames={index_embedding:'Indexing',query_embedding:'Query',embedding_probe:'Model check',scope:'Scope',rerank:'Rerank',other:'Other step'};
+ const phaseNames={index_embedding:'Indexing',query_embedding:'Query',embedding_probe:'Model check',scope:'Scope',scout:'Scout',docs:'Documentation',rerank:'Rerank',other:'Other step'};
  function summary(host,rows){host.innerHTML=rows.map(([title,value,note])=>`<div><small>${esc(title)}</small><strong>${esc(value)}</strong>${note?'<small>'+esc(note)+'</small>':''}</div>`).join('')}
  function table(headers,rows){return '<table class="insights-table"><thead><tr>'+headers.map(x=>'<th>'+esc(x)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(row=>'<tr>'+row.map(value=>'<td>'+value+'</td>').join('')+'</tr>').join('')+'</tbody></table>'}
  async function run(button,task){const seq=sequence,key=selected;button.disabled=true;try{await task(key,()=>seq===sequence&&key===selected)}catch(e){if(seq===sequence)message(e.message,true)}finally{if(seq===sequence)button.disabled=false}}

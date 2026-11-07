@@ -56,7 +56,7 @@ def sweep_orphans(final_path, max_age_s=ORPHAN_AGE_S):
             pass
 
 
-def _write_and_replace(final_path, data, encoding=None):
+def _write_and_replace(final_path, data, encoding=None, permissions=0o600):
     sweep_orphans(final_path)
     tmp_path = tmp_path_for(final_path)
     try:
@@ -64,7 +64,7 @@ def _write_and_replace(final_path, data, encoding=None):
         # conteúdo); `0o600` é o pedido de permissão restrita onde o SO honra (no Windows
         # só liga o atributo read-only — lá a confidencialidade vem da ACL do diretório).
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
-        fd = os.open(tmp_path, flags, 0o600)
+        fd = os.open(tmp_path, flags, permissions)
         mode = "wb" if encoding is None else "w"
         extra = {} if encoding is None else {"encoding": encoding, "newline": ""}
         with os.fdopen(fd, mode, **extra) as f:
@@ -92,3 +92,9 @@ def write_secret_bytes(final_path, data):
 def write_secret_text(final_path, text, encoding="utf-8"):
     """Mesmo contrato de `write_secret_bytes`, para conteúdo textual (JSON de token)."""
     _write_and_replace(final_path, text, encoding=encoding)
+
+
+def write_text(final_path, text, encoding="utf-8"):
+    """Atomic text write of a file other programs and people read and edit (project files): the same temp, fsync and
+    replace as write_secret_text, with the permissions the user's umask gives a new file."""
+    _write_and_replace(final_path, text, encoding=encoding, permissions=0o666)

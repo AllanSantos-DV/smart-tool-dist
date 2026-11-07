@@ -71,7 +71,7 @@ def _ip_allowed(ip):
 
 
 def _public_address(host, port):
-    """Resolves once; every address must be publicly routable (no private, loopback, link-local, CGNAT/Tailscale)."""
+    """Resolves once; every address must be publicly routable (no private, loopback, link-local, CGNAT)."""
     try:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except (socket.gaierror, UnicodeError):

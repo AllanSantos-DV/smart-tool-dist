@@ -23,13 +23,14 @@ import web_document_graph
 import code_graph_go
 import document_text
 
-VERSION = 3
+VERSION = 5
 SOURCE_EXTENSIONS = ('.py','.go','.mod','.java','.js','.jsx','.ts','.tsx','.mjs','.cjs','.mts','.cts','.json','.html','.htm','.css','.scss','.sass','.less','.md','.markdown')
 MAX_OVERLAY_BYTES = 5 * 1024 * 1024
 MAX_FILES = 3000
 MAX_TEXT = 24 * 1024 * 1024
-MAX_SYMBOLS = 8000
-MAX_EDGES = 20000
+MAX_SYMBOLS = 100000
+MAX_EDGES = 250000
+ANALYZER_LIMITS = {'symbols': MAX_SYMBOLS, 'edges': MAX_EDGES}
 _CACHE = collections.OrderedDict()
 _LOCK = threading.Lock()
 _ANALYSIS_SLOTS = threading.BoundedSemaphore(2)
@@ -97,6 +98,7 @@ def _snapshot(path):
 def _python_graph(sources):
     trees, symbols, dependencies, calls, unresolved, diagnostics = {}, [], [], [], [], []
     decls, aliases, scopes, classes, owners, shadow_scopes, node_symbols = {}, {}, {}, {}, {}, {}, {}
+    dropped = {'symbols': 0, 'calls': 0}
     def bind_import(path,scope,name,binding):
         table=aliases[path].setdefault(scope,{})
         table[name]=binding if name not in table or table[name]==binding else None
@@ -121,6 +123,7 @@ def _python_graph(sources):
                 scopes[id(node)]=qual;node_symbols[id(node)]=sym
                 if isinstance(node,ast.ClassDef):classes[path][qual]=node
                 if len(symbols)<MAX_SYMBOLS:symbols.append(sym)
+                else:dropped['symbols']+=1
                 owner=sym
             owners[id(node)]=qual
             for child in ast.iter_child_nodes(node):collect(child,qual,owner)
@@ -175,6 +178,7 @@ def _python_graph(sources):
                     rest=(([imported] if imported and imported!='*' else [])+parts[length:])
                     return decls.get(target_path,{}).get(tuple(rest))
         return None
+    function_names={s['name'].split('.')[-1] for s in symbols if s['kind']=='function'}
     for path,tree in trees.items():
         module={'id':path+'::<module>','path':path,'name':'<module>','start_line':1,'end_line':1,'kind':'module','language':'python'}
         used_module=False
@@ -216,8 +220,20 @@ def _python_graph(sources):
                 if target:
                     if owner is module:used_module=True
                     if len(calls)<MAX_EDGES:calls.append({'source':owner['id'],'target':target['id'],'line':n.lineno,'kind':'construct' if target['kind']=='class' else 'call','resolution':'static'})
+                    else:dropped['calls']+=1
                 elif len(unresolved)<1000:
                     unresolved.append({'path':path,'line':n.lineno,'expression':expr or '<dynamic expression>','reason':'External, dynamic or unresolved target in this snapshot.'})
+            # A function handed over as a value (callback, thread target, dispatch table) runs later through the receiver.
+            skipped={id(n.func) for n in local if isinstance(n,ast.Call)}|{id(n.value) for n in local if isinstance(n,ast.Attribute)}
+            for n in local:
+                if not isinstance(n,(ast.Name,ast.Attribute)) or not isinstance(n.ctx,ast.Load) or id(n) in skipped \
+                        or (n.id if isinstance(n,ast.Name) else n.attr) not in function_names:
+                    continue
+                target=resolve(path,qual,chain(n),shadow,instances)
+                if target and target['kind']=='function' and target['id']!=owner['id']:
+                    if owner is module:used_module=True
+                    if len(calls)<MAX_EDGES:calls.append({'source':owner['id'],'target':target['id'],'line':n.lineno,'kind':'reference','resolution':'static'})
+                    else:dropped['calls']+=1
             for child in ast.iter_child_nodes(node):
                 if isinstance(child,(ast.FunctionDef,ast.AsyncFunctionDef,ast.ClassDef)):
                     visit_scope(child,scopes[id(child)])
@@ -231,7 +247,7 @@ def _python_graph(sources):
         visit_scope(tree)
         if used_module:symbols.append(module)
     return {'symbols':symbols,'dependencies':dependencies[:MAX_EDGES],'calls':calls,'unresolved':unresolved,
-            'diagnostics':diagnostics,'parsed':list(trees),'truncated':len(symbols)>=MAX_SYMBOLS or len(dependencies)>MAX_EDGES}
+            'diagnostics':diagnostics,'parsed':list(trees),'truncated':any(dropped.values()) or len(dependencies)>MAX_EDGES}
 
 
 NODE_HEAP_MB = (1024, 4096)
@@ -262,7 +278,7 @@ def _javascript_graph(sources, all_paths=None):
     try:
         return _run_analyzer('code_graph_js.cjs',
                              json.dumps({'files':[{'path':path,'text':text} for path,text in relevant.items()],
-                                         'paths':list(all_paths or sources)},ensure_ascii=False),
+                                         'paths':list(all_paths or sources),'limits':ANALYZER_LIMITS},ensure_ascii=False),
                              'The TypeScript analyzer did not finish. Check the local code-analysis runtime.')
     except (OSError,subprocess.TimeoutExpired,ValueError,RuntimeError) as exc:
         return {'diagnostics':[{'path':'JavaScript/TypeScript','reason':str(exc)[:250]}],'parsed':[],'retryable':True}
@@ -272,7 +288,7 @@ def _java_graph(sources):
     files=[{'path':path,'text':text} for path,text in sources.items() if path.lower().endswith('.java')]
     if not files:return {}
     try:
-        return _run_analyzer('code_graph_java.mjs',json.dumps({'files':files},ensure_ascii=False),
+        return _run_analyzer('code_graph_java.mjs',json.dumps({'files':files,'limits':ANALYZER_LIMITS},ensure_ascii=False),
                              'The Java analyzer did not finish. Check the local runtime.')
     except (OSError,ValueError,RuntimeError,subprocess.TimeoutExpired) as exc:
         return {'diagnostics':[{'path':'Java','reason':str(exc)[:250]}],'parsed':[],'retryable':True}
@@ -285,10 +301,11 @@ def _analyze(path):
 def _analyze_sources(files,sources,diagnostics,truncated):
     merged={'symbols':[],'dependencies':[],'calls':[],'unresolved':[],'diagnostics':diagnostics,'parsed':[]}
     retryable=False
-    for output in (_python_graph(sources),_javascript_graph(sources,[f['path'] for f in files]),_java_graph(sources),code_graph_go.analyze(sources),web_document_graph.analyze(sources,[f['path'] for f in files])):
+    for output in (_python_graph(sources),_javascript_graph(sources,[f['path'] for f in files]),_java_graph(sources),code_graph_go.analyze(sources,ANALYZER_LIMITS),web_document_graph.analyze(sources,[f['path'] for f in files])):
         for key in merged:merged[key].extend(output.get(key,[]))
         truncated |= output.get('truncated',False)
         retryable |= output.get('retryable',False)
+    truncated |= len(merged['symbols'])>MAX_SYMBOLS
     by_id={sym['id']:sym for sym in merged['symbols'][:MAX_SYMBOLS]}
     # Relações repetidas preservam contagem e locais de chamada sem poluir o desenho.
     def collapse(rows,fields):
@@ -479,7 +496,7 @@ def build(root,view_id=None,storage_id=None,file_path=None,background=False):
     data.update(views=inventory['views'],selected=inventory['selected'],current_view=inventory['current_view'],
                 message=inventory['message'],read_only=True,source='indexed_snapshot',generated_at=time.time(),
                 limits={'files':MAX_FILES,'symbols':MAX_SYMBOLS,'edges':MAX_EDGES,'display_nodes_default':120},
-                languages=['Java','Angular','Python','JavaScript','TypeScript','JSX','TSX','HTML','CSS','Markdown'],cache_hit=was_cached)
+                languages=['Java','Angular','Python','JavaScript','TypeScript','JSX','TSX','Go','HTML','CSS','Markdown'],cache_hit=was_cached)
     return _focus(data,file_path) if file_path else data
 
 

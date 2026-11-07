@@ -11,7 +11,7 @@ import project_store
 
 _CONTEXT=contextvars.ContextVar('smart_usage',default=None)
 _PHASES={'scope':'scope','embedding_query':'query_embedding','model_probe':'embedding_probe',
-         'indexing':'index_embedding','reranking':'rerank','scout':'scout'}
+         'indexing':'index_embedding','reranking':'rerank','scout':'scout','docs':'docs'}
 
 
 @contextlib.contextmanager
@@ -21,6 +21,11 @@ def job(root,view,job_id):
     token=_CONTEXT.set(value)
     try:yield
     finally:_CONTEXT.reset(token)
+
+
+def purpose():
+    """Purpose of the model calls made now ('scope', 'docs'...), None outside a metered job."""
+    return (_CONTEXT.get() or {}).get('purpose')
 
 
 def phase(name):

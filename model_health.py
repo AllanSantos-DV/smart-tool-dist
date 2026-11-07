@@ -29,6 +29,8 @@ SAMPLE_CHARS = 160
 GROUP_ROWS = 20
 PURPOSES = ("index_embedding", "query_embedding", "rerank", "embedding_probe", "scope")
 _PATHS = ("/v1/chat/completions", "/v1/embeddings", "/v1/rerank")
+_PURPOSE_ROLE = {"scope": "scope_model", "scout": "scout_model", "docs": "docs_model", "rerank": "rerank_model",
+                 "index_embedding": "embedding_model", "query_embedding": "embedding_model"}
 _TOOL = contextvars.ContextVar("model_health_tool", default=None)
 _COLLECTED = contextvars.ContextVar("model_health_collected", default=None)
 _SCHEMA = set()
@@ -81,9 +83,13 @@ def classify(error):
     return "connection" if _CONNECTION.search(error or "") else "other"
 
 
-def role_of(model, cfg=None):
-    """Name of the config field that selects `model` ('other' when none does)."""
+def role_of(model, cfg=None, purpose=None):
+    """Name of the config field that selects `model` ('other' when none does). Several roles may hold the same model:
+    the role of the running `purpose` (usage_meter.purpose) wins over the first field in MODEL_ROLES order."""
     cfg = cfg if cfg is not None else config.load_config()
+    declared = _PURPOSE_ROLE.get(purpose)
+    if declared and cfg.get(declared) == model:
+        return declared
     return next((field for field in config.MODEL_ROLES if cfg.get(field) == model), "other")
 
 
@@ -107,7 +113,7 @@ def record(path, body, failure=None):
         return
     try:
         model = str((body or {}).get("model", "")) if isinstance(body, dict) else ""
-        role = role_of(model)
+        role = role_of(model, purpose=usage_meter.purpose())
         now = time.time()
         text = error_text(failure) if failure is not None else None
         with project_store._LOCK, _db() as db:
