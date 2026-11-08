@@ -29,6 +29,7 @@ import time
 import tomllib
 
 import atomic_io
+import codex_config
 import endpoint_sync
 import install_runtime
 import lazy_mcp_proxy
@@ -358,6 +359,23 @@ def _clip(text, limit=300):
     return text if len(text) <= limit else text[:limit // 3] + " ... " + text[-(limit - limit // 3 - 5):]
 
 
+def _add(client, command):
+    """Registers the stdio server: Codex's config.toml is edited in place (its CLI rewrites the whole file and drops
+    other tools' comments), Claude Code goes through its CLI."""
+    if client == "codex":
+        codex_config.set_server(_codex_config(), SERVER, {"command": command[0], "args": command[1:]})
+    else:
+        endpoint_sync.run_cli(register_command(client, command))
+
+
+def _remove(client):
+    """Removes the server `_add` registered."""
+    if client == "codex":
+        codex_config.remove_server(_codex_config(), SERVER)
+    else:
+        endpoint_sync.run_cli(remove_command(client))
+
+
 def ensure(client, log=None):
     """Registers Playwright MCP in the client, or refreshes the registration Smart Tool made before (Node, Chromium
     and install paths change between versions). A `playwright` server the user registered is kept. When the browser
@@ -376,22 +394,22 @@ def ensure(client, log=None):
         problem = str(exc)
     try:
         if ours and registered().get(client):
-            endpoint_sync.run_cli(remove_command(client))
+            _remove(client)
         if problem:
             if ours and client == "claude":
                 set_claude_deny(False)
             return _record(client, "unavailable", problem[:300], log)
-        endpoint_sync.run_cli(register_command(client, lazy_command(command)))
+        _add(client, lazy_command(command))
         if not registered().get(client):
-            return _record(client, "unavailable", "the client CLI finished, but the server did not appear in its "
-                           "configuration", log)
+            return _record(client, "unavailable", "the registration finished, but the server did not appear in the "
+                           "client's configuration", log)
         try:
             deny_unsafe_tools(client)
         except (OSError, ValueError) as exc:
             problem = f"{', '.join(DENIED_TOOLS)} could not be denied ({exc})"
             try:
-                endpoint_sync.run_cli(remove_command(client))
-            except RuntimeError as removal:
+                _remove(client)
+            except (OSError, RuntimeError, ValueError) as removal:
                 return _record(client, "undenied", f"remove it with `{' '.join(remove_command(client))}`: {problem} "
                                f"and removing it failed ({removal})"[:300], log)
             return _record(client, "unavailable", f"{problem}, so the server was removed"[:300], log)

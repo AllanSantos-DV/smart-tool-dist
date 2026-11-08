@@ -12,6 +12,7 @@ import subprocess
 import time
 import urllib.parse
 
+import codex_config
 import node_locator
 
 SERVER = "smart-tool"
@@ -139,13 +140,21 @@ def remove_command(client):
 
 
 def register(client, base):
-    """Makes the client's smart-tool MCP entry point to base, through the client's own CLI (it owns its config file;
-    ~/.claude.json is rewritten by Claude Code all the time). Idempotent: the same URL runs nothing, another URL (the
-    port changed) is removed first because `mcp add` refuses an existing name, no entry only adds. Returns what was run."""
+    """Makes the client's smart-tool MCP entry point to base. Claude Code goes through its own CLI (it owns its config
+    file; ~/.claude.json is rewritten by Claude Code all the time): another URL (the port changed) is removed first
+    because `mcp add` refuses an existing name, no entry only adds. Codex's config.toml is edited in place, its table
+    only (`codex mcp add` rewrites the whole file and drops other tools' comment markers). Idempotent: the same URL
+    changes nothing. Returns what was done."""
     url = f"{base}/mcp"
     current = registrations().get(client)
     if current == url:
         return f"nothing to run: {client} already points to {url}"
+    if client == "codex":
+        path = os.path.join(codex_dir(), "config.toml")
+        codex_config.set_server(path, SERVER, {"url": url})
+        if registrations().get(client) != url:
+            raise RuntimeError(f"{path} was edited, but [mcp_servers.{SERVER}] does not hold {url}.")
+        return f"edited {path}: [mcp_servers.{SERVER}] url = {url}"
     command = register_command(client, base)
     if current:
         run_cli(remove_command(client))

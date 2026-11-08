@@ -41,8 +41,9 @@ _PROJECT_TYPE_EXCLUDES = (
     (("Podfile",), ("Pods",)),
 )
 
-# Files a tool writes while it works and replaces or deletes right after (atomic-write temp, backup, editor swap).
-TRANSIENT_FILES = {"*.tmp", "*.bak", "*.swp", "*~"}
+# Files a tool writes while it works and replaces or deletes right after (atomic-write temp, backup, editor swap, the
+# journal and shared-memory files SQLite keeps beside a database).
+TRANSIENT_FILES = {"*.tmp", "*.bak", "*.swp", "*~", "*-journal", "*-wal", "*-shm", "~$*", "*.crdownload", "*.part"}
 
 # Mesmo critério do `_ALWAYS_EXCLUDE`, para arquivo: o significado não varia por
 # projeto. Lockfile é grafo de dependência resolvido por ferramenta — nunca é fonte de
@@ -115,7 +116,7 @@ def normalize_include(include):
 
 
 def is_transient(name):
-    """Whether a file name is a temporary, backup or editor-swap file (`*.tmp`, `*.bak`, `*.swp`, `*~`)."""
+    """Whether a file name is a temporary, backup or editor-swap file (`*.tmp`, `*.bak`, `*.swp`, `*~`, SQLite `*-journal`)."""
     return any(fnmatch.fnmatch(name.casefold(), pattern) for pattern in TRANSIENT_FILES)
 
 

@@ -15,6 +15,8 @@ DB_PATH = os.path.join(paths.DATA_DIR, "projects.sqlite3")
 _LOCK = threading.RLock()
 _SCHEMA_READY = set()
 MAX_JOBS = 500
+_GENERATION = 0
+_LISTING = {"key": None, "rows": []}
 
 
 @contextmanager
@@ -24,7 +26,7 @@ def _db():
         _SCHEMA_READY.discard(DB_PATH)
     db = sqlite3.connect(DB_PATH, timeout=10)
     try:
-        db.execute("PRAGMA secure_delete=ON")
+        db.execute("PRAGMA secure_delete=OFF")
         if DB_PATH not in _SCHEMA_READY:
             db.execute("CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, root TEXT NOT NULL, data TEXT NOT NULL, updated_at REAL NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, project_id TEXT, status TEXT NOT NULL, updated_at REAL NOT NULL, payload TEXT NOT NULL)")
@@ -34,8 +36,15 @@ def _db():
             _SCHEMA_READY.add(DB_PATH)
         with db:
             yield db
+        if db.total_changes:
+            _bump_generation()
     finally:
         db.close()
+
+
+def _bump_generation():
+    global _GENERATION
+    _GENERATION += 1
 
 
 CONTAINER_MIN_PROJECTS = 2
@@ -115,9 +124,20 @@ def containing(path):
 
 
 def all_projects():
-    with _LOCK, _db() as db:
-        rows = db.execute("SELECT data FROM projects ORDER BY root COLLATE NOCASE").fetchall()
-    return [json.loads(row[0]) for row in rows]
+    """Every registered project. The rows are read again only after a write by this process or a change of the
+    registry file, because the monitor lists the whole registry every few seconds."""
+    with _LOCK:
+        try:
+            stat = os.stat(DB_PATH)
+            key = (DB_PATH, _GENERATION, stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            key = None
+        if key is None or _LISTING["key"] != key:
+            with _db() as db:
+                rows = [row[0] for row in db.execute("SELECT data FROM projects ORDER BY root COLLATE NOCASE")]
+            _LISTING["key"], _LISTING["rows"] = key, rows
+        rows = _LISTING["rows"]
+    return [json.loads(row) for row in rows]
 
 
 def update(project_id, **fields):

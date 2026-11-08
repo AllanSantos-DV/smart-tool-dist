@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.67 - beta
+
+- The idle daemon no longer rewrites its own registry in a loop. The folder where Smart Tool keeps its state was a
+  watched project: every registry commit raised file events whose handling wrote the registry again (about 1,300
+  events and 570-700 writes of 60 KB per 120 s). That folder is never watched, reconciled or noted
+  (`project_monitor.holds_own_state`), SQLite `-journal`, `-wal` and `-shm` files, Office lock files (`~$*`) and unfinished downloads (`*.crdownload`, `*.part`) are transient (`index_scope.py`), the
+  event batches of one debounce window are recorded in a single registry write, and a quiet tick dispatches ready jobs
+  without listing every project (`project_monitor.py`, `tests/test_monitor_io.py`). Measured with
+  `tests/daemon_idle_io_probe.py` on the same registry copy, 75 watched projects, idle: 1.068 to 0.263 MB/s read and
+  0.393 to 0.071 MB/s written; `note_changes` calls 346 to 54. Note: `docs/research/2026-11-08-daemon-idle-disk-load.md`.
+- The project registry no longer runs with `secure_delete=ON`: it holds folder paths and change notes, no content or
+  secrets (the indexes keep it), and SQLite documents that option as zero-filling every freed page, extra I/O it leaves
+  off by default. `project_store.all_projects` is read from disk again only after a write by the process or a change of
+  the file: the monitor listed the whole registry (about 565 KB) every 5 s, which was nearly all of the idle read. A
+  project whose index was last updated more than 7 days ago gets no folder watcher and is reconciled every 15 minutes;
+  its first update gives it a watcher again. A project whose folder no longer exists is marked `unavailable` once instead
+  of on every 5 s pass, and a start no longer rewrites `watch_backend` that already holds the right value
+  (`project_store.py`, `project_monitor.py`, `tests/test_monitor_io.py`).
+
 ## 0.9.66 - beta
 
 - A daemon that starts while its port is busy retries that port for a few seconds, re-checking `/health`, before it

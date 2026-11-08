@@ -8,6 +8,8 @@ import directory_watch
 import indexer
 import local_embedder
 import index_scope
+import paths
+import project_identity
 import project_store
 import index_views
 
@@ -17,6 +19,9 @@ RECONCILE_S = 180
 # lost, so it runs less often (a buffer overflow already forces a stat comparison of the whole scope).
 RECONCILE_WATCHED_S = 900
 IDLE_TICK_S = 5
+# A project whose index was last updated longer ago than this gets no folder watcher: its folder is checked by the
+# reconciliation instead, and the first update it needs gives it a watcher again.
+DORMANT_S = 7 * 86400
 # A folder that changes all the time (a tool's state folder) is indexed at most this often by the monitor; the changes
 # keep accumulating and one job covers them, and a search meanwhile reads the stale files straight from disk.
 MIN_JOB_GAP_S = 60
@@ -31,6 +36,26 @@ def relevant_path(path):
     return bool(parts and all(part not in ("", ".", "..") and not part.startswith(".")
                               and not index_scope.always_excluded(part) for part in parts)
                 and not index_scope.is_transient(parts[-1]))
+
+
+def holds_own_state(root):
+    """Whether `root` is the folder where Smart Tool keeps its state, or lies inside it. Every write the daemon makes
+    there (registry, indexes, logs, metrics) would raise a file event for the folder, and handling that event writes the
+    registry again, so such a folder is never watched or reconciled by the monitor."""
+    folder, state = (project_identity.canonical_root(path) for path in (root, paths.HOME_DIR))
+    return folder == state or folder.startswith(state + os.sep)
+
+
+def monitored(project):
+    """Whether the monitor follows this project: watched by the user, enabled, not paused, and not Smart Tool's own state."""
+    return bool(project.get("watch") and project.get("enabled") and not project.get("paused")
+                and not holds_own_state(project["root"]))
+
+
+def dormant(project, now=None):
+    """Whether the index of a monitored project has not been updated for DORMANT_S; one never updated is not dormant."""
+    indexed = project.get("last_indexed")
+    return bool(indexed) and (time.time() if now is None else now) - indexed > DORMANT_S
 
 
 def snapshot(root, scope):
@@ -60,6 +85,8 @@ class ProjectMonitor:
         self._git_seen = {}
         self._git_checked = {}
         self._pending = {}
+        self._unsaved = {}
+        self._recent = {}
         self._next_job = {}
         self._gap_level = {}
         self._filters = {}
@@ -76,6 +103,7 @@ class ProjectMonitor:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=3)
+        self._flush_notes(time.monotonic(), force=True)
         with self._lock:
             watchers = list(self._watchers.values())
             self._watchers.clear()
@@ -102,8 +130,12 @@ class ProjectMonitor:
         return scope, keep
 
     def events(self, project_id, rows, overflow=False):
-        project = project_store.get(project_id)
-        if not project or project.get("paused") or not project.get("watch") or not project.get("enabled"):
+        now = time.monotonic()
+        with self._lock:
+            recent = self._recent.get(project_id)
+        window_open = bool(recent) and now - recent[0] < DEBOUNCE_S
+        project = recent[1] if window_open else project_store.get(project_id)
+        if not project or not monitored(project):
             return
         # An event under a folder the scope leaves out (plugin cache, session logs) changes nothing in the index.
         scope, keep = self._scope_for(project)
@@ -130,7 +162,31 @@ class ProjectMonitor:
             # changed without reading and hashing every file the way a full check does.
             if len(state["paths"]) > MAX_EVENT_PATHS:
                 state["paths"].clear()
-        project_store.note_changes(project_id, "Changes detected by the monitor.", paths, scope=force_scope)
+            if window_open:
+                unsaved = self._unsaved.setdefault(project_id, {"paths": set(), "scope": False})
+                unsaved["paths"].update(paths)
+                unsaved["scope"] |= force_scope
+                return
+        self._note(project_id, paths, force_scope, now)
+
+    def _note(self, project_id, paths, scope, now):
+        """Records the changes in the registry; later batches of the same project wait in memory and go in one write
+        once DEBOUNCE_S has passed, because a folder that changes all the time would otherwise rewrite the registry
+        for every batch of events."""
+        data = project_store.note_changes(project_id, "Changes detected by the monitor.", paths, scope=scope)
+        with self._lock:
+            if data:
+                self._recent[project_id] = (now, data)
+            else:
+                self._recent.pop(project_id, None)
+
+    def _flush_notes(self, now, force=False):
+        """Writes the batches held back by `_note` for the projects whose window has passed (all of them when forced)."""
+        with self._lock:
+            due = [key for key in self._unsaved if force or now - self._recent.get(key, (0,))[0] >= DEBOUNCE_S]
+            batches = {key: self._unsaved.pop(key) for key in due}
+        for key, batch in batches.items():
+            self._note(key, batch["paths"], batch["scope"], now)
 
     def _watch_error(self, project_id, message):
         project_store.update(project_id, watch_backend="reconciliation", watch_error=message[:300])
@@ -138,13 +194,17 @@ class ProjectMonitor:
         self.events(project_id, [], overflow=True)
 
     def _sync_watchers(self, projects, now):
-        wanted = {p["id"]: p for p in projects if p.get("watch") and p.get("enabled")
-                  and not p.get("paused") and os.path.isdir(p["root"])}
+        followed = {p["id"]: p for p in projects if monitored(p) and os.path.isdir(p["root"])}
+        wall = time.time()
+        wanted = {key: p for key, p in followed.items() if not dormant(p, wall)}
         for key in list(self._watchers):
             if key not in wanted:
                 watcher = self._watchers.pop(key)
                 watcher.stop()
-                project_store.update(key, watch_backend="off")
+                project_store.update(key, watch_backend="reconciliation" if key in followed else "off")
+        for key, project in followed.items():
+            if key not in wanted and project.get("watch_backend") != "reconciliation":
+                project_store.update(key, watch_backend="reconciliation", watch_error="")
         for key, project in wanted.items():
             current = self._watchers.get(key)
             if current and current.alive:
@@ -156,7 +216,8 @@ class ProjectMonitor:
                 lambda error, k=key: self._watch_error(k, error),
             )
             self._watchers[key] = watcher
-            project_store.update(key, watch_backend="windows_events", watch_error="")
+            if project.get("watch_backend") != "windows_events" or project.get("watch_error"):
+                project_store.update(key, watch_backend="windows_events", watch_error="")
             watcher.start()
 
     def _job_gap(self, key, now):
@@ -172,15 +233,17 @@ class ProjectMonitor:
 
     def tick(self):
         now = time.monotonic()
+        self._flush_notes(now)
         projects = project_store.all_projects()
         self._sync_watchers(projects, now)
         busy = project_store.projects_with_pending_job()
         for project in projects:
             key = project["id"]
-            if not project.get("watch") or not project.get("enabled") or project.get("paused"):
+            if not monitored(project):
                 continue
             if not os.path.isdir(project["root"]):
-                project_store.update(key, status="unavailable", last_error="The folder is not accessible.")
+                if project.get("status") != "unavailable":
+                    project_store.update(key, status="unavailable", last_error="The folder is not accessible.")
                 continue
             if key in busy:
                 continue  # Não planejar outra geração com metadados de uma ainda em curso.
@@ -195,7 +258,7 @@ class ProjectMonitor:
                 self._git_seen[key] = signature
                 self._git_checked[key] = now
             watcher = self._watchers.get(key)
-            interval = RECONCILE_WATCHED_S if watcher is not None and watcher.alive else RECONCILE_S
+            interval = RECONCILE_WATCHED_S if watcher is not None and watcher.alive or dormant(project) else RECONCILE_S
             if now - self._checked.get(key, -interval) >= interval:
                 self._checked[key] = now
                 scope = index_scope.load_scope(project["root"])
@@ -223,31 +286,56 @@ class ProjectMonitor:
                 with self._lock:
                     self._pending.pop(key, None)
                 continue
-            with self._lock:
-                pending = self._pending.get(key)
-                if not pending or now - pending["last"] < DEBOUNCE_S or now < self._next_job.get(key, 0):
-                    continue
-                options = {"changed_paths": sorted(pending["paths"]), "full_check": pending["full"],
-                           "force_scope": pending["force_scope"]}
-                revision = pending.get("revision", 0)
-            current = project_store.get(key)
-            if time.time() < current.get("next_retry_at", 0):
-                continue
-            try:
-                self.enqueue(key, **options)
-            except Exception as exc:
-                project_store.update(key, status="error", last_error=str(exc)[:300], next_retry_at=time.time() + 60)
-                continue
-            self._next_job[key] = now + self._job_gap(key, now)
-            with self._lock:
-                # Um evento recebido durante o submit continua pendente para a próxima geração.
-                if self._pending.get(key) is pending and pending.get("revision", 0) == revision:
-                    self._pending.pop(key, None)
+            self._dispatch(key, now)
+
+    def _dispatch(self, key, now):
+        """Enqueues the update of a project whose changes have been quiet for DEBOUNCE_S and whose job gap has passed."""
+        with self._lock:
+            pending = self._pending.get(key)
+            if not pending or now - pending["last"] < DEBOUNCE_S or now < self._next_job.get(key, 0):
+                return
+            options = {"changed_paths": sorted(pending["paths"]), "full_check": pending["full"],
+                       "force_scope": pending["force_scope"]}
+            revision = pending.get("revision", 0)
+        current = project_store.get(key)
+        if time.time() < current.get("next_retry_at", 0):
+            return
+        try:
+            self.enqueue(key, **options)
+        except Exception as exc:
+            project_store.update(key, status="error", last_error=str(exc)[:300], next_retry_at=time.time() + 60)
+            return
+        self._next_job[key] = now + self._job_gap(key, now)
+        with self._lock:
+            # Um evento recebido durante o submit continua pendente para a próxima geração.
+            if self._pending.get(key) is pending and pending.get("revision", 0) == revision:
+                self._pending.pop(key, None)
+
+    def _dispatch_quiet(self, now):
+        """Between full passes: sends the projects whose debounce ended, without listing every project of the registry.
+        A project that is not eager, is busy or is no longer monitored is left to the next full pass."""
+        self._flush_notes(now)
+        with self._lock:
+            ready = [key for key, pending in self._pending.items()
+                     if now - pending["last"] >= DEBOUNCE_S and now >= self._next_job.get(key, 0)]
+        if not ready:
+            return
+        busy = project_store.projects_with_pending_job()
+        for key in ready:
+            project = project_store.get(key)
+            if (project and key not in busy and monitored(project) and project.get("update_mode", "on_search") == "eager"):
+                self._dispatch(key, now)
 
     def _run(self):
+        last_pass = None
         while not self._stop.is_set():
+            now = time.monotonic()
             try:
-                self.tick()
+                if last_pass is None or now - last_pass >= IDLE_TICK_S:
+                    last_pass = now
+                    self.tick()
+                else:
+                    self._dispatch_quiet(now)
             except Exception:
                 pass  # Falha opcional do monitor não derruba o daemon MCP.
-            self._stop.wait(1 if self._pending else IDLE_TICK_S)
+            self._stop.wait(1 if self._pending or self._unsaved else IDLE_TICK_S)
