@@ -17,7 +17,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.65 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.66 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -83,7 +83,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.65 install
+npx @allansantos-dev/smart-tool@0.9.66 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -105,7 +105,9 @@ version came out minutes ago); `~/.smart-tool` is kept. It downloads [uv](https:
 verified) and a private Python 3.12 into `~/.smart-tool/runtime`, with nothing added to `PATH` and, in the registry, only two per-user (HKCU) keys that make the notification buttons work, then
 copies Smart Tool to `%LOCALAPPDATA%\Programs\SmartTool` with its own virtual environment,
 installs the web runtime, registers a per-user Scheduled Task that starts the tray at logon and starts the daemon on
-`http://127.0.0.1:8765` (another free port is used, and announced, if 8765 is taken).
+`http://127.0.0.1:8765`. A busy port is retried for a few seconds (the old daemon may still be closing) and the port
+the clients already hold is kept; another free port is used, and announced in `~/.smart-tool/data/daemon.json`, only
+when a program keeps the port.
 
 State lives in `~/.smart-tool`: `config.json`, your model adapters in `adapters/` and indexes, caches and logs in
 `data/`. Secrets (API keys) are encrypted with Windows DPAPI for your user.
@@ -123,7 +125,7 @@ are left out of the request and the code that reads the answer keeps enforcing t
 
 ## Set up
 
-Open the setup screen from the tray icon ("Open settings") or at `http://127.0.0.1:8765/setup`. It opens on
+Open the setup screen from the tray icon ("Open settings") or at `/setup` on the daemon address in `~/.smart-tool/data/daemon.json` (`http://127.0.0.1:8765/setup` by default). It opens on
 **Overview**: everything Smart Tool needs, checked on this machine, with what needs you first and a button that takes
 you to the fix. The side menu groups the rest under Connect (Agents, Models, Web search), Behavior (Agent rules,
 Redirects) and Maintenance (Setup audit, Startup).

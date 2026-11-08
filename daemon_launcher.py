@@ -5,7 +5,7 @@ caído neste ambiente por isso mesmo), este cliente sobe o processo sozinho se e
 fora do ar, protegido por lockfile contra corrida entre sessões simultâneas.
 
 Contrato de registry (mesmo formato usado pelo probe de grafo em `capabilities.py`):
-`~/.smart-tool/data/daemon.json` = `{"url": "http://127.0.0.1:<porta>"}` —
+`~/.smart-tool/data/daemon.json` = `{"url": "http://127.0.0.1:<porta>", "pid": <pid>, "port": <porta>}` —
 `url` é a base do daemon; o endpoint MCP em si é `<url>/mcp`.
 """
 import json
@@ -47,8 +47,8 @@ def health(url, timeout=1):
     toda tool call do agente paga antes de seguir."""
     try:
         with urllib.request.urlopen(url.rstrip("/") + "/health", timeout=timeout) as resp:
-            return resp.status == 200
-    except (urllib.error.URLError, OSError, ValueError):
+            return resp.status == 200 and json.loads(resp.read()).get("status") == "ok"
+    except (urllib.error.URLError, OSError, ValueError, AttributeError):
         return False
 
 
@@ -117,7 +117,7 @@ def updating():
         return False
 
 
-def ensure_daemon_running(wait_seconds=10):
+def ensure_daemon_running(wait_seconds=20):
     """Retorna a URL base do daemon (sem `/mcp`), subindo o processo se necessário."""
     info = read_registry()
     if info and health(info["url"]):

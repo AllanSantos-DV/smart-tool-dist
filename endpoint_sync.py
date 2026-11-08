@@ -250,9 +250,11 @@ def run_cli(command):
 
 
 def known_port():
-    """Port the Claude Code MCP entry already points to, so a fallback bind can reuse it without any rewrite."""
+    """Port the Claude Code MCP entry (else the Codex one) already points to, so a fallback bind can reuse it without
+    any rewrite."""
+    held = registrations()
     try:
-        parsed = urllib.parse.urlsplit(registrations()["claude"] or "")
+        parsed = urllib.parse.urlsplit(held["claude"] or held["codex"] or "")
         return parsed.port if parsed.hostname == "127.0.0.1" else None
     except ValueError:
         return None

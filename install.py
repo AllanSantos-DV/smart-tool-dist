@@ -129,8 +129,8 @@ def _daemon_up():
     try:
         url = json.loads(REGISTRY.read_text(encoding="utf-8"))["url"]
         with _OPENER.open(url + "/health", timeout=1) as response:
-            return response.status == 200
-    except (OSError, ValueError, KeyError):
+            return response.status == 200 and json.loads(response.read()).get("status") == "ok"
+    except (OSError, ValueError, KeyError, AttributeError):
         return False
 
 

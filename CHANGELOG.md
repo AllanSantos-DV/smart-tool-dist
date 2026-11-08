@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.66 - beta
+
+- A daemon that starts while its port is busy retries that port for a few seconds, re-checking `/health`, before it
+  moves to the next candidate. A restart that overlapped the shutdown of the old daemon, two starts at once or a
+  loaded machine used to move the daemon to another port and rewrite the client files, leaving open Claude Code
+  sessions calling the old hook address (`smart_tool_daemon.py`, `tests/test_endpoint_sync.py`). The port preferred
+  at start also reads the Codex MCP address when Claude Code holds none (`endpoint_sync.py`).
+- `daemon.json` is written whole (temporary file and replace) and a daemon removes it at exit only when its `pid` is
+  the one recorded, so an old daemon closing late no longer erases the announcement of the new one.
+- The launcher and the installer take a daemon as up only when `/health` answers `status: ok`, not on any HTTP 200
+  from another program that now holds a stale port (`daemon_launcher.py`, `install.py`). The launcher waits up to
+  20 s for a start, enough for the port retry.
+- README: the setup address and the port rule describe `daemon.json`.
+
 ## 0.9.65 - beta
 
 - An entry paragraph of `functional.md` and `simple.md` records the code it was written for (`code="..."` in its

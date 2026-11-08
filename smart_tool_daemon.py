@@ -35,6 +35,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import atomic_io
 import browser_control
 import capabilities
 import client_hooks
@@ -93,6 +94,8 @@ MCP_MAX_REQUEST_BYTES = 10 * 1024 * 1024
 MCP_STREAM_AFTER_S = 10
 MCP_KEEPALIVE_S = 15
 _BOUND_PORT = DEFAULT_PORT
+BIND_WAIT_S = 8
+BIND_RETRY_S = 0.25
 
 DDG_SEARCH_SCRIPT = web_search_adapters.DDG_SEARCH_SCRIPT
 CAMOUFOX_VENV_PYTHON = web_search_adapters.CAMOUFOX_VENV_PYTHON
@@ -4621,14 +4624,18 @@ class MCPHandler(BaseHTTPRequestHandler):
 
 def _write_registry(port):
     os.makedirs(RUN_DIR, exist_ok=True)
-    with open(REGISTRY_PATH, "w", encoding="utf-8") as f:
-        json.dump({"url": f"http://127.0.0.1:{port}", "pid": os.getpid(), "port": port}, f)
+    atomic_io.write_text(REGISTRY_PATH, json.dumps({"url": f"http://127.0.0.1:{port}", "pid": os.getpid(), "port": port}))
 
 
 def _remove_registry():
+    """Removes the announcement only when this process wrote it: an old daemon exiting after its successor announced
+    itself must not erase the successor's entry."""
     try:
+        with open(REGISTRY_PATH, encoding="utf-8") as f:
+            if json.load(f).get("pid") != os.getpid():
+                return
         os.remove(REGISTRY_PATH)
-    except OSError:
+    except (OSError, ValueError, AttributeError):
         pass
 
 
@@ -4652,13 +4659,20 @@ def _bind_server():
     """The port clients already know, then the default port, then any free port (announced in daemon.json and synced
     to the clients by endpoint_sync). A connected session keeps the URL it started with, so a restart that moved
     back to the default would cut every session on the known port. A port held by another live Smart Tool stops this
-    start instead of duplicating it."""
+    start instead of duplicating it. A busy port is retried for BIND_WAIT_S before the next candidate: the daemon it
+    belonged to may still be shutting down in a restart, or too loaded to answer the health check, and moving on then
+    strands every client that wrote the old port."""
     for port in dict.fromkeys(p for p in (endpoint_sync.known_port(), DEFAULT_PORT, 0) if p is not None):
-        try:
-            return _ExclusiveThreadingHTTPServer(("127.0.0.1", port), MCPHandler)
-        except OSError:
-            if port and _smart_tool_answers(port):
-                raise SystemExit(f"Smart Tool is already running on port {port}.")
+        deadline = time.monotonic() + (BIND_WAIT_S if port else 0)
+        while True:
+            try:
+                return _ExclusiveThreadingHTTPServer(("127.0.0.1", port), MCPHandler)
+            except OSError:
+                if port and _smart_tool_answers(port):
+                    raise SystemExit(f"Smart Tool is already running on port {port}.")
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(BIND_RETRY_S)
     raise OSError("No local port available for the daemon.")
 
 
