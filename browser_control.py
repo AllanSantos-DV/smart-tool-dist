@@ -279,8 +279,9 @@ def set_claude_deny(present):
 
 
 def set_codex_disabled():
-    """Adds `disabled_tools` = DENIED_TOOLS to the [mcp_servers.playwright] table `codex mcp add` wrote (the CLI has
-    no flag for it) and checks the file still parses with that value. Raises ValueError otherwise."""
+    """Adds `disabled_tools` = DENIED_TOOLS inside the [mcp_servers.playwright] table of Codex's config.toml, inserting
+    one line and leaving every other byte as it was, and checks the file still parses with that value. Raises
+    ValueError otherwise."""
     path = _codex_config()
     with open(path, encoding="utf-8", newline="") as stream:
         text = stream.read()

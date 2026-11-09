@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.68 - beta
+
+- Another tool's marked block in Codex's `config.toml` survives Smart Tool's writes byte for byte. The in-place edit shipped in
+  0.9.67 is now covered for the hook approval record too (`tests/test_codex_audit_hook.py`), the `set_codex_disabled`
+  docstring describes the one-line insert, and `docs/research/2026-11-08-codex-config-marker-who-rewrites.md` lists every
+  writer of that file and the isolated proof that none of Smart Tool's current paths drops the marker. No behavior change.
+
 ## 0.9.67 - beta
 
 - The idle daemon no longer rewrites its own registry in a loop. The folder where Smart Tool keeps its state was a
