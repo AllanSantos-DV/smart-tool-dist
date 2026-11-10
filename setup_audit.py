@@ -30,6 +30,7 @@ import urllib.request
 import yaml
 
 import atomic_io
+import client_hooks
 import endpoint_sync
 import paths
 
@@ -345,7 +346,9 @@ def _collect_codex_plugins(config, snapshot):
 
 def collect_codex(project, snapshot):
     """Codex's effective set for project: config.toml (MCP, hooks), hooks.json, skills, AGENTS.md chain."""
-    config = snapshot.toml(os.path.join(codex_dir(), "config.toml")) or {}
+    config_path = os.path.join(codex_dir(), "config.toml")
+    config = snapshot.toml(config_path) or {}
+    config_text = snapshot.read(config_path)
     mcp = _mcp_entries(config.get("mcp_servers"), "user", os.path.join(codex_dir(), "config.toml"))
     hooks = _hooks_from(snapshot.json(os.path.join(codex_dir(), "hooks.json")), "hooks.json",
                         os.path.join(codex_dir(), "hooks.json"))
@@ -375,7 +378,13 @@ def collect_codex(project, snapshot):
                 instructions.append({"path": os.path.join(folder, name), "kind": "project",
                                      "bytes": len(text.encode("utf-8")), "_text": text})
                 break
-    return {"plugins": plugins, "hooks": hooks, "mcp": mcp, "skills": skills, "instructions": instructions}
+    try:
+        unapproved = client_hooks.codex_unapproved(os.path.join(codex_dir(), "hooks.json"), config_path)
+    except ValueError:
+        unapproved = []
+    return {"plugins": plugins, "hooks": hooks, "mcp": mcp, "skills": skills, "instructions": instructions,
+            "configs": [{"path": config_path, "_text": config_text}] if config_text is not None else [],
+            "unapproved": unapproved}
 
 
 def _finding(check, severity, harness, subject, detail, source, action, evidence=()):
@@ -586,6 +595,37 @@ def check_instructions(project, claude, codex):
                                  f"total, or set project_doc_max_bytes = {total} (or more) in "
                                  f"{os.path.join(codex_dir(), 'config.toml')}.",
                                  [i["path"] for i in codex["instructions"]]))
+    return findings
+
+
+_MARKED_BLOCK_RE = re.compile(r"^[ \t]*#[ \t]*>>>[ \t]*(.+?)[ \t]*>>>[ \t]*$", re.MULTILINE)
+
+
+def check_codex_config(codex):
+    """Blocks other tools keep between marker comments in Codex's config.toml (listed, nothing to fix) and Smart Tool
+    hooks written in hooks.json that config.toml holds no approval for (`[hooks.state]` trusted_hash), which Codex then
+    does not run."""
+    findings = []
+    for config in codex["configs"]:
+        for name in dict.fromkeys(_MARKED_BLOCK_RE.findall(config["_text"])):
+            findings.append(_finding("codex_config_foreign_block", "info", "codex", name,
+                                     f"{config['path']} holds a block another tool keeps between `# >>> {name} >>>` "
+                                     "markers. Smart Tool edits only its own tables there and leaves the block as it is.",
+                                     DOCS["codex_hooks"],
+                                     f"Nothing to do. If the markers or the block disappear, the tool that manages "
+                                     f"'{name}' rewrote {config['path']}; restore it from the newest "
+                                     f"`{config['path']}.smart-tool-backup-*` copy or run that tool's own repair.",
+                                     [config["path"]]))
+    for event in codex["unapproved"]:
+        path = os.path.join(codex_dir(), "config.toml")
+        findings.append(_finding("codex_hook_unapproved", "warn", "codex", event,
+                                 f"Smart Tool's {event} hook is written in hooks.json, but {path} holds no matching "
+                                 "approval ([hooks.state] trusted_hash): Codex does not run the hook. The approval is "
+                                 "lost when something rewrites config.toml or when the hook changes.",
+                                 DOCS["codex_hooks"],
+                                 "Open /hooks in Codex and approve the Smart Tool entry, or turn the Smart Tool hook off "
+                                 "and on again in the setup screen, which records the approval.",
+                                 [path]))
     return findings
 
 
@@ -810,6 +850,7 @@ def run(project, probe=True, save=True, probe_max_age=0, trigger="manual"):
         findings += check_mcp(harness, data["mcp"], results)
     findings += check_agents(claude)
     findings += check_instructions(project, claude, codex)
+    findings += check_codex_config(codex)
     unverified = list(snapshot.unverified)
     if not probe:
         unverified.append("MCP servers and HTTP hook endpoints were not contacted (probe off)")

@@ -13,6 +13,7 @@ import urllib.request
 import venv
 from pathlib import Path
 
+import atomic_io
 import client_hooks
 import paths
 import version
@@ -199,7 +200,7 @@ def remove_other_installs(target):
             text = _repointed(original, folder, target)
             if text != original:
                 trust = client_hooks.repoint_trust(str(path), original, text) if path == codex else {}
-                client_hooks.backup_file(str(path))
+                atomic_io.backup_file(str(path))
                 path.write_text(text, encoding="utf-8")
                 client_hooks.record_codex_trust(trust, str(path.with_name("config.toml")))
                 print(f"Hooks in {path} now point to {target}.")

@@ -17,6 +17,8 @@ from collections import Counter, defaultdict
 
 import affected_tests
 import doc_scope
+import index_views
+import project_identity
 
 MAX_COMMITS = 3000
 MAX_ROWS = 25
@@ -31,6 +33,8 @@ SIMPLE_TERMS = 12
 ADR_CANDIDATES = 25
 ADR_DRAFTS = 5
 _FIELD, _RECORD = "\x1f", "\x1e"
+HISTORIES_KEPT = 8
+_histories = {}
 _MANIFEST = re.compile(r"(^|/)(package\.json|requirements[\w.-]*\.txt|go\.mod|pom\.xml|pyproject\.toml|build\.gradle(\.kts)?)$")
 _DECISION = re.compile(r"\b(decid\w*|replac\w*|switch\w*|migrat\w*|adopt\w*|drop\w*|instead of|introduc\w*|because)\b", re.I)
 _HTTP_VERB = re.compile(r"^do_[A-Z]+$")
@@ -44,9 +48,33 @@ _STOP = frozenset("""get set add is has are was the and for not with from into t
 def history(root):
     """Commits of the project's git history, newest first, with the project-relative files each touched.
 
+    One `git log` of up to MAX_COMMITS commits is the costliest step of a documentation run, and a run reads the history
+    more than once (prose writing generates the scope before and after), so the answer is reused while the Git view's
+    stamp (HEAD, index, reflog, packed-refs, branch ref) has not moved; checking it is a stat, no process.
+
     Returns: (commits, note): commits is a list of {hash, time, subject, body, files}; note is None, or the reason no
-    history could be read (not a git repository, git missing), which the page shows in place of the table.
+    history could be read (not a git repository, git missing), which the page shows in place of the table. The
+    returned lists are shared with later calls and must not be changed.
     """
+    try:
+        view = index_views.describe(root, fresh=True)
+    except (RuntimeError, ValueError, OSError):
+        view = None
+    if not view or not view.get("git"):
+        return _read_history(root)
+    key = project_identity.canonical_root(root)
+    saved = _histories.get(key)
+    if saved and saved[0] == view["stamp"]:
+        return saved[1]
+    result = _read_history(root)
+    if not index_views.stamp_changed(view):
+        if len(_histories) >= HISTORIES_KEPT:
+            _histories.clear()
+        _histories[key] = (view["stamp"], result)
+    return result
+
+
+def _read_history(root):
     try:
         raw = affected_tests._git(root, "-c", "core.quotepath=false", "log", "--no-merges", f"-n{MAX_COMMITS}", "--relative",
                                   "--name-status", "-M", f"--pretty=format:{_RECORD}%h{_FIELD}%ct{_FIELD}%s{_FIELD}%b{_FIELD}", "--", ".")

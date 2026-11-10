@@ -1,7 +1,19 @@
 # Changelog
 
+## 0.9.69 - beta
+
+- `smart_search` answers leaner by default: `detail=compact` cuts each excerpt to whole lines within 240 characters (was 500)
+  and leaves out the usual values of `ranking` (`rerank`), `location_kind` (`source_line`) and an empty `symbols`; path:lines,
+  score and name:line symbols stay, and the ranked places are the same. `detail=full` returns the previous answer. Measured on
+  8 fixed queries with `tests/search_size_probe.py`: see `docs/research/data/search-size-before.json` and `-after.json`.
+  Test: `tests/test_search_detail.py`.
+
 ## 0.9.68 - beta
 
+- A routed search is answered, not denied, when the host sends no `tool_use_id` or the query cannot be read from the
+  command: the Smart Tool answer goes into the call's context (Codex shell: the command prints it) and, without an
+  answer in time or without a query, the context names the exact `smart_search` call. `deny` stays only for edits the
+  docs and comment rules require redone.
 - Another tool's marked block in Codex's `config.toml` survives Smart Tool's writes byte for byte. The in-place edit shipped in
   0.9.67 is now covered for the hook approval record too (`tests/test_codex_audit_hook.py`), the `set_codex_disabled`
   docstring describes the one-line insert, and `docs/research/2026-11-08-codex-config-marker-who-rewrites.md` lists every

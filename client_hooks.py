@@ -7,6 +7,8 @@ import sys
 import time
 import tomllib
 
+import atomic_io
+import codex_config
 import daemon_launcher
 import endpoint_sync
 
@@ -282,24 +284,10 @@ def install(client_info, token, confirm):
             "after_install": spec.get("after_install")}
 
 
-def backup_file(path):
-    """Copies path to a timestamped `.smart-tool-backup-` file beside it and returns that path, None when path does not
-    exist. A second backup in the same second gets a numbered name, so it never overwrites the copy of an earlier step."""
-    if not os.path.exists(path):
-        return None
-    stamp = f"{path}.smart-tool-backup-{time.strftime('%Y%m%d-%H%M%S')}"
-    backup, number = stamp, 1
-    while os.path.exists(backup):
-        number += 1
-        backup = f"{stamp}-{number}"
-    shutil.copy2(path, backup)
-    return backup
-
-
 def _write_checked(path, data, verify, what):
     """Writes data as JSON to path through a temp file after a timestamped backup; when verify() fails on the written
     file, restores the backup (or removes the new file) and raises. Returns the backup path (None for a new file)."""
-    backup = backup_file(path)
+    backup = atomic_io.backup_file(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = path + ".smart-tool-tmp"
     with open(temporary, "w", encoding="utf-8") as stream:
@@ -393,13 +381,13 @@ def _codex_states(path=None):
     return states if isinstance(states, dict) else {}
 
 
-def _codex_trusted(event, groups, is_ours):
+def _codex_trusted(event, groups, is_ours, hooks_path=None, config_path=None):
     """Our handler under `event` is trusted in Codex's config.toml: the entry keyed by hooks.json path, event, group
     and handler index holds the hash of the definition as it is now (a missing or different hash means Codex does not
-    run it). An unreadable config.toml raises ValueError."""
-    states = _codex_states()
+    run it). The paths default to Codex's own. An unreadable config.toml raises ValueError."""
+    states = _codex_states(config_path)
     name = _codex_event(event)
-    path = CLIENTS["codex"]["files"][0]
+    path = hooks_path or CLIENTS["codex"]["files"][0]
     for group_index, group in enumerate(groups):
         if not _ours(group, is_ours):
             continue
@@ -511,7 +499,7 @@ def record_codex_trust(wanted, path=None):
     lines = text.splitlines(keepends=True)
     for key, value in wanted.items():
         lines = _with_trusted_hash(lines, key, value, newline)
-    backup = backup_file(path)
+    backup = atomic_io.backup_file(path, keep=codex_config.BACKUPS_KEPT)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = path + ".smart-tool-tmp"
     with open(temporary, "w", encoding="utf-8", newline="") as stream:
@@ -548,6 +536,27 @@ def audit_state(client="claude"):
     if _audit_entry() not in found:
         return "outdated"
     return "current" if client != "codex" or _codex_trusted("SessionStart", groups, _audit_hook) else AUDIT_WAITING
+
+
+def codex_unapproved(hooks_path, config_path):
+    """Events whose hook of ours is written in the Codex hooks.json at hooks_path while the config.toml at config_path
+    holds no matching approval (`[hooks.state]` trusted_hash), so Codex does not run it. Reads both files, writes
+    nothing; [] when hooks.json is missing or holds none of ours. An unreadable config.toml raises ValueError."""
+    try:
+        with open(hooks_path, encoding="utf-8") as stream:
+            data = json.load(stream)
+    except FileNotFoundError:
+        return []
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict):
+        return []
+    unapproved = []
+    for event, is_ours in [*((event, _our_hook) for event in _entries("codex")), ("SessionStart", _audit_hook)]:
+        groups = hooks.get(event)
+        if isinstance(groups, list) and any(_ours(group, is_ours) for group in groups) \
+                and not _codex_trusted(event, groups, is_ours, hooks_path, config_path):
+            unapproved.append(event)
+    return unapproved
 
 
 def audit_hook_installed(client):

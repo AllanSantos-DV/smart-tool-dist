@@ -1,12 +1,30 @@
 """Identidade única de raízes e contenção de caminhos, inclusive junctions Windows."""
 import hashlib
 import os
+import time
+
+RESOLVED_TTL_S = 3
+RESOLVED_MAX = 4096
+_resolved = {}
 
 
 def display_root(root):
+    """Absolute path of `root` with symlinks and junctions resolved. Resolving costs one filesystem call per path
+    component on Windows, and the daemon asks for the same few paths thousands of times in a row (per file of an
+    index pass, per project of every monitor tick), so an answer is reused for RESOLVED_TTL_S seconds: a junction
+    retargeted inside that window is seen after it."""
     if not isinstance(root, (str, os.PathLike)) or not str(root).strip():
         raise ValueError("Provide the project folder.")
-    return os.path.realpath(os.path.abspath(os.path.expanduser(os.fspath(root))))
+    absolute = os.path.abspath(os.path.expanduser(os.fspath(root)))
+    now = time.monotonic()
+    hit = _resolved.get(absolute)
+    if hit and now - hit[0] < RESOLVED_TTL_S:
+        return hit[1]
+    real = os.path.realpath(absolute)
+    if len(_resolved) >= RESOLVED_MAX:
+        _resolved.clear()
+    _resolved[absolute] = (now, real)
+    return real
 
 
 def canonical_root(root):

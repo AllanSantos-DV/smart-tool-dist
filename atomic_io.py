@@ -3,6 +3,8 @@
 do Smart Tool."""
 import glob
 import os
+import re
+import shutil
 import time
 import uuid
 
@@ -98,3 +100,40 @@ def write_text(final_path, text, encoding="utf-8"):
     """Atomic text write of a file other programs and people read and edit (project files): the same temp, fsync and
     replace as write_secret_text, with the permissions the user's umask gives a new file."""
     _write_and_replace(final_path, text, encoding=encoding, permissions=0o666)
+
+
+BACKUP_INFIX = ".smart-tool-backup-"
+_BACKUP_STAMP = re.compile(r"^(\d{8}-\d{6})(?:-(\d+))?$")
+
+
+def backup_file(path, keep=None):
+    """Copies path to a timestamped `.smart-tool-backup-` file beside it and returns that path, None when path does not
+    exist. A second backup in the same second gets a numbered name, so it never overwrites the copy of an earlier step.
+    With keep, only that many of the newest copies of path stay; other files with a similar name are left alone."""
+    if not os.path.exists(path):
+        return None
+    moment = time.strftime("%Y%m%d-%H%M%S")
+    number = max((order[1] for _, order in _backups(path, moment)), default=0) + 1
+    backup = f"{path}{BACKUP_INFIX}{moment}" + (f"-{number}" if number > 1 else "")
+    shutil.copy2(path, backup)
+    if keep is not None:
+        _prune_backups(path, keep)
+    return backup
+
+
+def _backups(path, stamp=None):
+    """(path, number) of the `.smart-tool-backup-` copies of path, only those of one stamp when given; the copy named
+    with the bare stamp is number 1."""
+    copies = []
+    for candidate in glob.glob(glob.escape(path + BACKUP_INFIX) + "*"):
+        found = _BACKUP_STAMP.match(candidate[len(path + BACKUP_INFIX):])
+        if found and stamp in (None, found.group(1)):
+            copies.append((candidate, (found.group(1), int(found.group(2) or 1))))
+    return copies
+
+
+def _prune_backups(path, keep):
+    """Deletes all but the `keep` newest `.smart-tool-backup-` copies of path (newest = latest stamp, then number)."""
+    copies = sorted(_backups(path), key=lambda copy: copy[1])
+    for candidate, _ in copies[:max(len(copies) - keep, 0)]:
+        os.remove(candidate)

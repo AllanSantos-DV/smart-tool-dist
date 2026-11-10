@@ -450,6 +450,8 @@ TOOLS = [
                                         "test": {"type": "integer", "minimum": 1, "maximum": 20},
                                         "doc": {"type": "integer", "minimum": 1, "maximum": 20}}}],
                           "description": "Results per block: one number for all blocks or {code, test, doc}; each 1-20, total at most 20. Defaults to the project's search_limits, else 5"},
+                "detail": {"type": "string", "enum": ["compact", "full"], "default": "compact",
+                           "description": "compact: 240-character excerpts, and ranking (when rerank) and location_kind (when source_line) left out of each result; full: 500-character excerpts with every field"},
                 "mode": {"type": "string", "enum": ["search", "dossier"], "default": "search",
                          "description": "dossier answers only with ids and a short excerpt, by keyword from disk and without an index, from docs/research, the backlog, CLAUDE.md and AGENTS.md; it takes query_identifiers or doc_query, timeout_ms and max_hits and ignores the other fields"},
                 "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 800,
@@ -1321,6 +1323,7 @@ def _perform_smart_search_isolated(arguments, job_id):
     elif symbol_note or (symbol_index or {}).get("note"):
         warnings.append(symbol_note or symbol_index["note"])
     query_terms = _symbol_terms(" ".join(queries[group] for group in groups if group != "doc"))
+    detail = arguments.get("detail", "compact")
     _update_job(job_id, phase="searching")
     found = {group: indexer.search(root, vectors.get(queries[group]), top_k=max(limits[group] * 4, candidate_pool),
                                    query=queries[group], model_id=search_model, overlay=overlay,
@@ -1348,10 +1351,9 @@ def _perform_smart_search_isolated(arguments, job_id):
             pinned = [(c[0], "overlay", c[1:]) for c in candidates if tuple(c[1:4]) in exact][:2]
             pinned_keys = {tuple(item[2][:3]) for item in pinned}
             ordered = pinned + [item for item in ordered if tuple(item[2][:3]) not in pinned_keys]
-        rows =[{"path": path, "lines": f"{start}-{end}", "score": round(score, 6), "snippet": text[:500],
-                 "ranking": ranking, "location_kind": document_text.location_kind(path),
-                 **({"symbols": _chunk_symbols(symbol_index, path, start, end, text, query_terms)}
-                    if symbol_index and group != "doc" else {})}
+        rows = [_result_row(detail, path, start, end, score, ranking, text,
+                            _chunk_symbols(symbol_index, path, start, end, text, query_terms)
+                            if symbol_index and group != "doc" else None)
                 for score, ranking, (path, start, end, text) in ordered[:top_k]]
         return rows, problem
 
@@ -1508,6 +1510,25 @@ def _submit_project_job_locked(kind, arguments):
 
 SEARCH_LIMIT_TOTAL = 20
 SEARCH_LIMIT_DEFAULT = 5
+SEARCH_DETAILS = ("compact", "full")
+SNIPPET_CHARS = {"compact": 240, "full": 500}
+
+
+def _result_row(detail, path, start, end, score, ranking, text, symbols):
+    """One smart_search result. `full` carries every field; `compact` shortens the excerpt to whole lines and leaves out
+    what is the usual value (ranking `rerank`, location_kind `source_line`) and an empty symbol list."""
+    location_kind = document_text.location_kind(path)
+    snippet = text[:SNIPPET_CHARS[detail]]
+    if detail == "compact" and len(text) > len(snippet) and "\n" in snippet.lstrip("\r\n"):
+        snippet = snippet[:snippet.rindex("\n")].rstrip("\r")
+    row = {"path": path, "lines": f"{start}-{end}", "score": round(score, 6), "snippet": snippet}
+    if detail == "full" or ranking != "rerank":
+        row["ranking"] = ranking
+    if detail == "full" or location_kind != "source_line":
+        row["location_kind"] = location_kind
+    if symbols is not None and (detail == "full" or symbols):
+        row["symbols"] = symbols
+    return row
 
 
 def _limit_value(raw, field_name):
@@ -1588,7 +1609,7 @@ def _optional_text(arguments, name):
 
 
 _SMART_SEARCH_FIELDS = {"project_root", "query_identifiers", "query_comments", "doc_query",
-                        "single_language_reason", "group", "top_k"}
+                        "single_language_reason", "group", "top_k", "detail"}
 _DOSSIER_FIELDS = {"project_root", "query_identifiers", "query_comments", "doc_query", "mode", "timeout_ms", "max_hits"}
 
 
@@ -1792,8 +1813,11 @@ def _smart_search_arguments(arguments):
             "To search in a single language, explain why in single_language_reason.")
     project = project_store.get(project_identity.project_id(project_root)) or {}
     limits = _search_limits(arguments.get("top_k"), groups, project.get("search_limits"))
+    detail = arguments.get("detail", "compact")
+    if detail not in SEARCH_DETAILS:
+        raise ValueError("detail must be compact or full.")
     query = " ".join(part for part in (identifiers, comments) if part) or doc_query
-    arguments = {"project_root": project_root, "query": query, "top_k": limits, "group": group,
+    arguments = {"project_root": project_root, "query": query, "top_k": limits, "group": group, "detail": detail,
                  "doc_query": doc_query or comments or identifiers,
                  **({"single_language_reason": reason} if reason else {})}
     session, client = _session_client()
@@ -1944,7 +1968,7 @@ def _scout_search(root, query, question, max_files):
     path runs at once, outside the per-folder queue, as for a redirected search."""
     limits = {"code": min(SEARCH_LIMIT_TOTAL - 6, max_files * 2), "test": 3, "doc": 3}
     search = {"project_root": root, "query": query, "doc_query": question, "group": "all", "top_k": limits,
-              "_structured": True}
+              "detail": "full", "_structured": True}
     if _cold_index_building(root):
         return _perform_smart_search(search, "")
     job_id, future = _submit_project_job("smart_search", search)

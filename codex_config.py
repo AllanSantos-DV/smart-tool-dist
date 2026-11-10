@@ -11,6 +11,7 @@ import tomllib
 import atomic_io
 
 _BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+BACKUPS_KEPT = 10
 
 
 def _header_path(line):
@@ -83,8 +84,9 @@ def _others(text, name):
 
 
 def _write(path, before, after, name, fields):
-    """Writes after (the edited text) when it parses, holds exactly `fields` for the server and changed nothing else.
-    Raises ValueError otherwise, leaving the file alone."""
+    """Writes after (the edited text) when it parses, holds exactly `fields` for the server and changed nothing else,
+    after a numbered backup beside the file (the newest BACKUPS_KEPT stay). Raises ValueError otherwise, leaving the
+    file alone."""
     try:
         parsed = tomllib.loads(after)
         unchanged = _others(after, name) == _others(before, name)
@@ -95,6 +97,7 @@ def _write(path, before, after, name, fields):
         raise ValueError(f"Editing [mcp_servers.{name}] in {path} would change more than that table "
                          f"(a layout this editor does not handle); edit the file by hand.")
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    atomic_io.backup_file(path, keep=BACKUPS_KEPT)
     atomic_io.write_text(path, after)
 
 

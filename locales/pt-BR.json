@@ -954,6 +954,10 @@
   "In {0}, remove `|| true`, `exit 0` and `2>/dev/null` from the command of this {1} hook so its failures show.",
   "Register MCP server '{0}' for this agent, or delete this {1} hook from {2}.",
   ", or list the duplicated tools in disabled_tools of one of them.",
-  "Start the service that listens at {0}, or delete this {1} hook from {2}."
+  "Start the service that listens at {0}, or delete this {1} hook from {2}.",
+  "Smart Tool's {0} hook is written in hooks.json, but {1} holds no matching approval ([hooks.state] trusted_hash): Codex does not run the hook. The approval is lost when something rewrites config.toml or when the hook changes.",
+  "Open /hooks in Codex and approve the Smart Tool entry, or turn the Smart Tool hook off and on again in the setup screen, which records the approval.",
+  "{0} holds a block another tool keeps between `# >>> {1} >>>` markers. Smart Tool edits only its own tables there and leaves the block as it is.",
+  "Nothing to do. If the markers or the block disappear, the tool that manages '{0}' rewrote {1}; restore it from the newest `{2}.smart-tool-backup-*` copy or run that tool's own repair."
  ]
 }

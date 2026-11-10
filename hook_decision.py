@@ -7,10 +7,12 @@ Uma busca nativa que a regra redireciona, e WebFetch/WebSearch, não são negada
 texto volta como saída da própria chamada (`tool_redirect`). INVARIANTE: a saída do PreToolUse é `{}`, `updatedInput`
 sem `permissionDecision` (as regras de permissão do usuário julgam a chamada reescrita), `allow` só junto do comando
 que o próprio hook escreveu para imprimir a resposta no Codex (`tool_redirect.is_codex_command`), ou `deny` quando a
-chamada não dá para montar. Nenhuma decisão aqui é sobre periculosidade, só sobre custo de contexto. Diagnóstico vai em
-`systemMessage`, que não altera permissão.
+edição que a regra de documentação ou de comentário exige refazer (`_edit_review`); uma busca sem `tool_use_id` ou sem
+consulta legível nunca é negada: é respondida no contexto (`_answer_in_place`). Diagnóstico vai em `systemMessage`, que
+não altera permissão.
 """
 import os
+import uuid
 
 import affected_tests
 import code_graph
@@ -372,7 +374,50 @@ def decide(payload, client, web_route, jobs):
         return _redirect(payload, client, plan, jobs)
     if not agent_has_smart_tool(payload.get("agent_type") if payload.get("agent_id") else None, payload.get("cwd")):
         return {}
-    return deny(plan["message"])
+    return _answer_in_place(payload, client, plan, jobs)
+
+
+def _start_job(payload, client, plan, jobs, key):
+    """Starts the Smart Tool call of a redirected one under key (web calls carry the requester of the hook)."""
+    who = requester.CURRENT.set(requester.from_hook(client, payload)) if payload["tool_name"] in WEB_TOOLS else None
+    try:
+        jobs.start(key, plan["kind"], plan["arguments"])
+    finally:
+        if who is not None:
+            requester.CURRENT.reset(who)
+
+
+def _codex_print(payload, client, jobs, key, text):
+    """Codex shell call rewritten to print the answer; `allow` is what Codex needs to apply the rewrite."""
+    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    jobs.forget(key)
+    _log_served(client, payload)
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                   "permissionDecisionReason": "Smart Tool answered this search",
+                                   "updatedInput": {**tool_input, "command": tool_redirect.codex_command(text)}}}
+
+
+def _answer_in_place(payload, client, plan, jobs):
+    """A redirected call that cannot be swapped by `tool_use_id` (no id, or no query to run) is still not denied: the
+    Smart Tool answer goes into the context of the call, which runs as written, and a codex shell search prints it.
+    Without an answer in time, or without a query, the context names the exact Smart Tool call to make."""
+    if not agent_has_smart_tool(payload.get("agent_type") if payload.get("agent_id") else None, payload.get("cwd")):
+        return {}
+    if not plan["kind"]:
+        return advise(plan["message"])
+    key = f"noid-{uuid.uuid4().hex}"
+    _start_job(payload, client, plan, jobs, key)
+    text = _answer(jobs, key, PRE_WAIT_S, payload["tool_name"])
+    if text is None:
+        jobs.forget(key)
+        return advise(plan["message"])
+    if client == "codex" and payload["tool_name"] in tool_redirect.NO_OP:
+        return _codex_print(payload, client, jobs, key, text)
+    jobs.forget(key)
+    _log_served(client, payload)
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                   "additionalContext": f"Smart Tool answered this {payload['tool_name']} call with "
+                                                        f"smart_search (the call was not blocked):\n{text}"}}
 
 
 def _redirect(payload, client, plan, jobs):
@@ -382,12 +427,7 @@ def _redirect(payload, client, plan, jobs):
     else runs as the agent wrote it and, in Claude Code, `after` swaps its output for the answer."""
     key, tool_name = payload["tool_use_id"], payload["tool_name"]
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
-    who = requester.CURRENT.set(requester.from_hook(client, payload)) if tool_name in WEB_TOOLS else None
-    try:
-        jobs.start(key, plan["kind"], plan["arguments"])
-    finally:
-        if who is not None:
-            requester.CURRENT.reset(who)
+    _start_job(payload, client, plan, jobs, key)
     if tool_name not in tool_redirect.NO_OP:
         return {}
     text = _answer(jobs, key, PRE_WAIT_S, tool_name)
@@ -396,11 +436,7 @@ def _redirect(payload, client, plan, jobs):
     if client != "codex":
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                        "updatedInput": {**tool_input, "command": tool_redirect.NO_OP[tool_name]}}}
-    jobs.forget(key)
-    _log_served(client, payload)
-    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
-                                   "permissionDecisionReason": "Smart Tool answered this search",
-                                   "updatedInput": {**tool_input, "command": tool_redirect.codex_command(text)}}}
+    return _codex_print(payload, client, jobs, key, text)
 
 
 def _answer(jobs, key, timeout, tool_name):
