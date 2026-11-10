@@ -96,6 +96,8 @@ def _resolve(root, key):
     view = {'root': key, 'git': False, 'view_id': 'workspace', 'label': 'Folder without Git',
             'branch': None, 'commit': None}
     if _git_marker(root):
+        if not os.path.isdir(root):
+            raise FileNotFoundError(f'The project folder no longer exists: {root}. Relocate or remove the project.')
         if not shutil.which('git'):
             raise RuntimeError('This folder contains Git, but the git executable is not available.')
         paths = _run(root, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--absolute-git-dir', '--git-common-dir').splitlines()

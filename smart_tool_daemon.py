@@ -369,7 +369,7 @@ SERVER_INSTRUCTIONS = (
 TOOLS = [
     {
         "name": "project_manage",
-        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project; status shows storage, scope and jobs. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers, the documentation entries it leaves out of date and the tests to run with their command; it publishes nothing. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. Jobs via smart_search_result.",
+        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project (a project whose folder is gone shows as unavailable with the reason); status shows storage, scope and jobs, and with a path inside a registered project answers for the deepest one that holds it (resolved_from). graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers, the documentation entries it leaves out of date and the tests to run with their command; it publishes nothing. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. Jobs via smart_search_result.",
         "inputSchema": {
             "type": "object", "properties": {
                 "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "layers", "affected_tests", "pr_impact", "setup_audit", "redirect_proposals", "redirect_decide"]},
@@ -1223,6 +1223,24 @@ def _perform_smart_search(arguments, job_id):
     return contextvars.copy_context().run(_perform_smart_search_isolated, arguments, job_id)
 
 
+def _nested_projects_note(root):
+    """Names the registered projects inside `root`: each keeps its own index, so a search of `root` does not cover
+    their files. Returns None when there are none."""
+    inner = project_store.nested_projects(root)
+    if not inner:
+        return None
+    base = project_identity.display_root(root)
+    parts = []
+    for rel in inner[:8]:
+        path = os.path.join(base, *rel.split("/"))
+        files = indexer.info(path).get("files")
+        parts.append(f"{rel} ({files} files): project_root=\"{path}\"" if files is not None else
+                     f"{rel} (not indexed yet): project_root=\"{path}\"")
+    more = f" and {len(inner) - 8} more" if len(inner) > 8 else ""
+    return (f"{len(inner)} registered project(s) inside this folder keep their own index and are not in these "
+            f"results; search them with smart_search on their folder: {'; '.join(parts)}{more}.")
+
+
 def _perform_smart_search_isolated(arguments, job_id):
     _update_job(job_id, phase="auth")
     problem = _gateway_problem()
@@ -1367,12 +1385,15 @@ def _perform_smart_search_isolated(arguments, job_id):
     _job_checkpoint(job_id)
     if not any(blocks.values()):
         notes.append(EMPTY_RESULT_NOTICE)
+    nested = _nested_projects_note(root)
+    if nested:
+        notes.append(nested)
     warning = " ".join(warnings)
     if warning:
         _update_job(job_id, warning=warning)
     if arguments.get("_structured"):
         return {"source": source if source == "cold" or vectors else "lexical index", "blocks": blocks,
-                "warnings": warnings}
+                "warnings": warnings + ([nested] if nested else [])}
     return _grouped_yaml(index_profile.public(profile), blocks, " ".join(warnings + notes))
 
 
@@ -2119,13 +2140,23 @@ def _with_project_id(arguments):
         return arguments
     wanted = project_identity.canonical_root(root)
     match = next((p for p in project_store.all_projects() if project_identity.canonical_root(p["root"]) == wanted), None)
-    if not match:
+    if match:
+        return {**arguments, "project_id": match["id"]}
+    inner = project_store.containing(root) if arguments.get("action") == "status" else None
+    if not inner:
         raise ValueError(f"No registered project at {root}; register it first (action=register).")
-    return {**arguments, "project_id": match["id"]}
+    return {**arguments, "project_id": inner["id"], "resolved_from": root}
 
 
 def _project_summary(project):
-    data = _project_payload(project)
+    """One line of `list`. A project whose payload cannot be read (its folder was deleted, Git refuses it) is listed as
+    unavailable with the reason, so one broken entry does not hide the others."""
+    try:
+        data = _project_payload(project)
+    except Exception as exc:
+        return {"project_id": project["id"], "name": project.get("name"), "root": project["root"],
+                "status": "unavailable", "enabled": project.get("enabled"), "paused": project.get("paused"),
+                "last_error": _project_error(exc)[:200]}
     index = data.get("index") or {}
     jobs = data.get("jobs") or []
     return {"project_id": data["id"], "name": data.get("name"), "root": data["root"], "status": data.get("status"),
@@ -2325,6 +2356,9 @@ def _project_action_locked(arguments):
     if not project:
         raise ValueError("Project not registered.")
     if action == "status":
+        if arguments.get("resolved_from"):
+            return {"project": _project_payload(project), "resolved_from": arguments["resolved_from"],
+                    "detail": "project_root is inside this registered project (the deepest one that holds it)."}
         return {"project": _project_payload(project)}
     if action == "search_limits":
         if not isinstance(arguments.get("top_k"), dict):

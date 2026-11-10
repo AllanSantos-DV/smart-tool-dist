@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.70 - beta
+
+- `project_manage list` no longer fails as a whole when a registered folder was deleted inside a Git repository (a removed
+  worktree): that project shows as `unavailable` with "The project folder no longer exists", and `status` on it says so.
+- A search of a folder that holds other registered projects names each one (files indexed, `project_root` to search it),
+  because each keeps its own index and its files are not in the outer results. `project_manage status` with a path inside a
+  registered project answers for the deepest project that holds it and returns `resolved_from`.
+  Tests: `tests/test_nested_projects.py`, `tests/test_agent_efficiency.py`.
+
 ## 0.9.69 - beta
 
 - `smart_search` answers leaner by default: `detail=compact` cuts each excerpt to whole lines within 240 characters (was 500)
