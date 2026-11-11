@@ -200,6 +200,8 @@ EDIT_INDEX_DELAY_S = 8
 # p75 10.7 s).
 SMART_SEARCH_RESULT_WAIT_S = 15
 SMART_SEARCH_MAX_PENDING = 8
+BACKGROUND_MAX_PENDING = 8
+INTERACTIVE_PRIORITY = 1
 SMART_SEARCH_EXECUTOR = project_scheduler.ProjectScheduler(workers=3)
 _PROJECT_LOCKS = {}
 _PROJECT_LOCKS_LOCK = threading.Lock()
@@ -1264,7 +1266,8 @@ def _perform_smart_search_isolated(arguments, job_id):
         warnings.append(LOCAL_EMBEDDER_DOWN_WARNING if local_embedder.configured() and config.local_models_mode(cfg) != "off"
                         else LEXICAL_WARNING)
         try:
-            _prepare_project_index(arguments, job_id, cfg, token, model=model)
+            if not arguments.get("_existing_index_only"):
+                _prepare_project_index(arguments, job_id, cfg, token, model=model)
         except ProjectJobCancelled:
             raise
         except Exception as exc:
@@ -1302,7 +1305,7 @@ def _perform_smart_search_isolated(arguments, job_id):
                 overlay, notice = _lag_overlay(root, lag)
                 source = "index+disk" if overlay else source
                 warnings += [text for text in (notice, _refresh_in_background(root, lag)) if text]
-            else:
+            elif not arguments.get("_existing_index_only"):
                 try:
                     _prepare_project_index(arguments, job_id, cfg, token, query_vector=next(iter(vectors.values())),
                                            model=model)
@@ -1505,8 +1508,12 @@ def _submit_project_job_locked(kind, arguments):
                          and value.get("status") == "pending" and value.get("request_key") == request_key), None)
         if existing:
             return existing, None
-        if sum(value.get("kind") in _PROJECT_KINDS and value.get("status") == "pending" for value in _jobs.values()) >= SMART_SEARCH_MAX_PENDING:
-            raise RuntimeError("Too many project operations in progress; wait for one to finish.")
+        interactive = kind == "smart_search"
+        pending = sum(value.get("status") == "pending" and (value.get("kind") == "smart_search") == interactive
+                      for value in _jobs.values() if value.get("kind") in _PROJECT_KINDS)
+        if pending >= (SMART_SEARCH_MAX_PENDING if interactive else BACKGROUND_MAX_PENDING):
+            raise RuntimeError("Too many " + ("searches" if interactive else "index updates") +
+                               " in progress; wait for one to finish.")
         payload = {"kind": kind, "project_id": project["id"], "status": "pending", "phase": "queued",
                    "created_at": time.time(), "request_key": request_key, "arguments": arguments,
                    "processed_files": None, "total_files": None, "result": None, "error": None}
@@ -1515,7 +1522,8 @@ def _submit_project_job_locked(kind, arguments):
     project_store.update(project["id"], status="queued", last_job_id=job_id,
                          enabled=kind != "project_preview" or project.get("enabled", False))
     try:
-        future = SMART_SEARCH_EXECUTOR.submit(root, _run_project_job, job_id, arguments, kind)
+        future = SMART_SEARCH_EXECUTOR.submit(root, _run_project_job, job_id, arguments, kind,
+                                              priority=INTERACTIVE_PRIORITY if interactive else 0)
         with _JOBS_LOCK:
             if not future.done():
                 _JOB_FUTURES[job_id] = future
@@ -4112,6 +4120,15 @@ def _cold_index_building(root):
                    and job.get("project_id") == project_id for job in _jobs.values())
 
 
+def _index_update_running(root):
+    """Whether an index update of the folder is queued or running. A search job of that folder would wait behind it in the
+    per-folder queue, longer than a hook may wait."""
+    project_id = project_identity.project_id(root)
+    with _JOBS_LOCK:
+        return any(job.get("kind") == "project_index" and job.get("status") == "pending"
+                   and job.get("project_id") == project_id for job in _jobs.values())
+
+
 def _redirected_search(arguments):
     """smart_search text for a redirected native search, waiting up to SMART_SEARCH_SYNC_WAIT_S; raises when the search
     is rejected, fails or is still running then. The hook's single_language_reason only passes the language check, it is
@@ -4121,6 +4138,8 @@ def _redirected_search(arguments):
     checked.pop("single_language_reason", None)
     if _cold_index_building(checked["project_root"]):
         return f"{tool_redirect.search_notice(True)}\n{_perform_smart_search(checked, '')}"
+    if _index_update_running(checked["project_root"]):
+        return f"{tool_redirect.search_notice(True)}\n{_perform_smart_search({**checked, '_existing_index_only': True}, '')}"
     job_id, _future = _submit_project_job("smart_search", checked)
     deadline = time.monotonic() + SMART_SEARCH_SYNC_WAIT_S
     payload = _smart_search_job_payload(job_id)

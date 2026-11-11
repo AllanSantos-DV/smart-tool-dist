@@ -17,7 +17,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.70 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.71 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -83,7 +83,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.70 install
+npx @allansantos-dev/smart-tool@0.9.71 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -381,11 +381,20 @@ fails to load is listed in the setup screen with its error and does not affect t
 
 ## Uninstall
 
-Turn off "Start automatically" in the setup screen, quit from the tray, remove the hook entries from
-`~/.claude/settings.json` / `~/.codex/hooks.json` (the setup screen shows them), run `claude mcp remove smart-tool -s
-user` / `codex mcp remove smart-tool`, then delete `%LOCALAPPDATA%\Programs\SmartTool` and `~/.smart-tool`. Turning off "Start automatically" also removes the
-two per-user registry keys of the notification buttons (`HKCU\Software\Classes\smart-tool-action` and
-`HKCU\Software\Classes\AppUserModelId\SmartTool.Notifications`); they come back the next time a notification is shown.
+```powershell
+npx @allansantos-dev/smart-tool@0.9.71 uninstall [--target DIR] [--keep-data]
+```
+
+It asks nothing and opens no window. It stops the tray and the daemon, removes the logon task, the hook entries of Smart
+Tool in `~/.claude/settings.json` and `~/.codex/hooks.json` (other hooks stay), the `smart-tool` MCP entry and the
+`playwright` entry Smart Tool registered (one you registered yourself stays) in Claude Code and Codex, the program
+folder (`%LOCALAPPDATA%\Programs\SmartTool`), the old copies beside it, and `~/.smart-tool` (settings, indexes, saved
+keys; `--keep-data` keeps it). Your projects are never touched. The Camoufox browser cache in
+`%LOCALAPPDATA%\camoufox` is left in place: other tools use it too. The exit code is 0 when everything is gone (or was
+never there) and 1 when a step failed, with each failure named on stderr; running it again retries. Turning off "Start
+automatically" in the setup screen also removes the two per-user registry keys of the notification buttons
+(`HKCU\Software\Classes\smart-tool-action` and `HKCU\Software\Classes\AppUserModelId\SmartTool.Notifications`); the
+uninstall removes them too, and they come back the next time a notification is shown.
 
 ## License
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.71 - beta
+
+- `npx @allansantos-dev/smart-tool@0.9.71 uninstall [--target DIR] [--keep-data]` (`python uninstall.py`): silent uninstall that
+  removes what the install and the agent-side setup added: tray and daemon, logon task, Smart Tool's hook entries
+  (`client_hooks.remove`, `audit_remove`), the `smart-tool` MCP entry (`endpoint_sync.unregister`) and the `playwright`
+  entry Smart Tool registered (`browser_control.unregister`), the program folder and `~/.smart-tool`. Projects are never
+  touched; the exit code is 1 when a step fails. Tests: `tests/test_uninstall.py`.
+- `install.py` and `uninstall.py` refuse to run (`paths.refuse_overridden_folders`) when USERPROFILE or LOCALAPPDATA differ from the
+  folders Windows reports, because the logon task, the process table and the registry they act on are shared with the real
+  installation. The release gate runs the tests that read `.github` from the repository, not from the installed copy.
+
+- A redirected search (the hook that answers the agent's Grep/Read) no longer waits behind an index update of the same
+  project: it answers from the last ready index plus the files read from disk, so a reindex never makes the hook fail.
+  Searches and index updates are counted apart (a queue of one never rejects the other; the message names which is
+  full), and a search waiting for a folder runs before the index updates queued for it. Tests:
+  `tests/test_interactive_priority.py`, `tests/test_warm_search.py`.
+- `setup_audit` reads the MCP servers a Claude Code plugin declares in `.claude-plugin/plugin.json` (inline object or a path
+  to a JSON file), not only its `.mcp.json`: 23 `hook_unknown_server` errors reported for a plugin whose hooks call its own
+  server were false findings. Tests: `tests/test_setup_audit.py`.
+
 ## 0.9.70 - beta
 
 - `project_manage list` no longer fails as a whole when a registered folder was deleted inside a Git repository (a removed

@@ -274,9 +274,7 @@ def collect_claude(project, snapshot):
             plugins.append({"id": plugin_id, "path": root})
             hook_file = os.path.join(root, "hooks", "hooks.json")
             hooks += _hooks_from(snapshot.json(hook_file), f"plugin:{name}", hook_file, root)
-            plugin_mcp = snapshot.json(os.path.join(root, ".mcp.json")) or {}
-            mcp += _mcp_entries(plugin_mcp.get("mcpServers", plugin_mcp), f"plugin:{name}",
-                                os.path.join(root, ".mcp.json"), f"plugin:{name}:", {"CLAUDE_PLUGIN_ROOT": root})
+            mcp += _claude_plugin_mcp(snapshot, root, name)
             skills += [{**s, "name": f"{name}:{s['name']}"} for s in
                        _skills(snapshot, os.path.join(root, "skills"), f"plugin:{name}")]
     instructions = []
@@ -288,6 +286,24 @@ def collect_claude(project, snapshot):
             instructions.append({"path": path, "kind": kind, "bytes": len(text.encode("utf-8")), "_text": text})
     return {"settings": settings, "plugins": plugins, "hooks": hooks, "mcp": mcp, "skills": skills, "agents": agents,
             "instructions": instructions, "unapproved_mcp": unapproved}
+
+
+def _claude_plugin_mcp(snapshot, root, name):
+    """MCP server entries of a Claude Code plugin: its `.mcp.json`, plus the servers its manifest declares in
+    `.claude-plugin/plugin.json` (`mcpServers` as an inline object or as a path to a JSON file)."""
+    manifest_path = os.path.join(root, ".claude-plugin", "plugin.json")
+    declared = (snapshot.json(manifest_path) or {}).get("mcpServers")
+    sources = [(os.path.join(root, ".mcp.json"), None)]
+    if isinstance(declared, dict):
+        sources.append((manifest_path, declared))
+    elif isinstance(declared, str):
+        sources.append((os.path.join(root, declared), None))
+    entries = []
+    for path, inline in sources:
+        found = inline if inline is not None else (snapshot.json(path) or {})
+        entries += _mcp_entries(found.get("mcpServers", found), f"plugin:{name}", path, f"plugin:{name}:",
+                                {"CLAUDE_PLUGIN_ROOT": root})
+    return entries
 
 
 def _codex_plugin_root(market, name):

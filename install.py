@@ -33,7 +33,7 @@ DEPENDENCY_STAMP = ".dependencies.sha256"
 REGISTRY = Path(paths.DATA_DIR) / "daemon.json"
 BLOCKED = {"__pycache__", ".token-guard", ".git", ".pytest_cache", ".data", ".artifacts", ".claude", ".vscode",
            ".impeccable", "tests", "sessions", "results", "dist", "node_modules", ".node-runtime", ".venv",
-           ".scratch", ".memory", "docs", "reports", "site", "design", "release", "npm", ".github", "AGENTS.md", "CLAUDE.md", "DESIGN.md", "PRODUCT.md", "install.py", ".gitignore", ".gitattributes", MANIFEST}
+           ".scratch", ".memory", "docs", "reports", "site", "design", "release", "npm", ".github", "AGENTS.md", "CLAUDE.md", "DESIGN.md", "PRODUCT.md", "install.py", "uninstall.py", ".gitignore", ".gitattributes", MANIFEST}
 PACKAGE_ONLY = {"bin", "package.json", ".npmignore"}
 REQUIRED_TOOLS = {"smart_search", "smart_search_result", "web_search", "project_manage"}
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -408,6 +408,7 @@ def main():
     if args.expect_version and args.expect_version != version.VERSION:
         raise SystemExit(f"This package is Smart Tool {version.VERSION}, not the {args.expect_version} requested; "
                          "nothing was changed.")
+    paths.refuse_overridden_folders("install")
     target = args.target.resolve()
     if target == SOURCE:
         raise SystemExit("The target cannot be the source folder itself.")

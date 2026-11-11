@@ -323,15 +323,6 @@ def register_command(client, command):
     raise ValueError(f"Client without MCP registration: {client!r}")
 
 
-def remove_command(client):
-    """Official CLI command that removes the server registered by register_command."""
-    if client == "claude":
-        return ["claude", "mcp", "remove", SERVER, "--scope", "user"]
-    if client == "codex":
-        return ["codex", "mcp", "remove", SERVER]
-    raise ValueError(f"Client without MCP registration: {client!r}")
-
-
 def status():
     """Last outcome per client: {"claude": {"state": "registered"|"unavailable"|"kept"|"undenied", "reason", "at"}}."""
     try:
@@ -374,7 +365,22 @@ def _remove(client):
     if client == "codex":
         codex_config.remove_server(_codex_config(), SERVER)
     else:
-        endpoint_sync.run_cli(remove_command(client))
+        endpoint_sync.run_cli(endpoint_sync.remove_command(client, SERVER))
+
+
+def unregister(client):
+    """Takes the `playwright` MCP server Smart Tool registered (and, in Claude Code, its DENIED_TOOLS rules) out of the
+    client; a server the user registered is kept. Raises RuntimeError when it is still registered afterwards. Returns
+    a sentence saying what was done."""
+    if status().get(client, {}).get("state") not in ("registered", "undenied"):
+        return f"{client}: no {SERVER} server of Smart Tool's"
+    if registered().get(client):
+        _remove(client)
+        if registered().get(client):
+            raise RuntimeError(f"The {SERVER} server of {client} is still registered after removing it.")
+    if client == "claude":
+        set_claude_deny(False)
+    return f"{client}: {SERVER} server removed"
 
 
 def ensure(client, log=None):
@@ -411,7 +417,7 @@ def ensure(client, log=None):
             try:
                 _remove(client)
             except (OSError, RuntimeError, ValueError) as removal:
-                return _record(client, "undenied", f"remove it with `{' '.join(remove_command(client))}`: {problem} "
+                return _record(client, "undenied", f"remove it with `{' '.join(endpoint_sync.remove_command(client, SERVER))}`: {problem} "
                                f"and removing it failed ({removal})"[:300], log)
             return _record(client, "unavailable", f"{problem}, so the server was removed"[:300], log)
     except (OSError, RuntimeError, ValueError) as exc:

@@ -284,6 +284,40 @@ def install(client_info, token, confirm):
             "after_install": spec.get("after_install")}
 
 
+def remove(client):
+    """Takes every redirect hook entry of ours (PreToolUse, and the PostToolUse of Claude Code) out of the client's hooks
+    file after a backup; other hooks stay, in Codex at the approval of their new index. Returns {client, changed, file,
+    backup}."""
+    path = os.path.realpath(CLIENTS[client]["files"][0])
+    try:
+        with open(path, encoding="utf-8") as stream:
+            data = json.load(stream)
+    except FileNotFoundError:
+        return {"client": client, "changed": False, "file": path, "backup": None}
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict):
+        raise ValueError(f"{path} does not have the expected format (object with 'hooks'); nothing was changed.")
+    moved = {}
+    spec = CLIENTS[client]
+    for event in (spec["event"], *(["PostToolUse"] if spec.get("post_matcher") else [])):
+        groups = hooks.get(event)
+        if not isinstance(groups, list) or not any(_ours(group) for group in groups):
+            continue
+        kept = _without_ours(groups)
+        moved[event] = (list(groups), kept)
+        if kept:
+            hooks[event] = kept
+        else:
+            del hooks[event]
+    if not moved:
+        return {"client": client, "changed": False, "file": path, "backup": None}
+    backup = _write_checked(path, data, lambda: inspect(client, trust=False)["state"] == "missing", "The removal")
+    if client == "codex":
+        for event, (before, kept) in moved.items():
+            record_codex_trust(_codex_trust(event, before, kept))
+    return {"client": client, "changed": True, "file": path, "backup": backup}
+
+
 def _write_checked(path, data, verify, what):
     """Writes data as JSON to path through a temp file after a timestamped backup; when verify() fails on the written
     file, restores the backup (or removes the new file) and raises. Returns the backup path (None for a new file)."""

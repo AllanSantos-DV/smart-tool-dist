@@ -130,12 +130,12 @@ def register_command(client, base):
     raise ValueError(f"Client without MCP registration: {client!r}")
 
 
-def remove_command(client):
-    """Official CLI command that removes the smart-tool MCP server a client holds."""
+def remove_command(client, server=SERVER):
+    """Official CLI command that removes an MCP server a client holds (default: the smart-tool one)."""
     if client == "claude":
-        return ["claude", "mcp", "remove", SERVER, "--scope", "user"]
+        return ["claude", "mcp", "remove", server, "--scope", "user"]
     if client == "codex":
-        return ["codex", "mcp", "remove", SERVER]
+        return ["codex", "mcp", "remove", server]
     raise ValueError(f"Client without MCP registration: {client!r}")
 
 
@@ -162,6 +162,24 @@ def register(client, base):
     if registrations().get(client) != url:
         raise RuntimeError(f"'{' '.join(command)}' finished, but the registration did not appear in the client's configuration.")
     return " ".join(command)
+
+
+def unregister(client):
+    """Removes the client's smart-tool MCP entry the way `register` made it (Claude Code through its CLI, Codex by
+    editing its table) and checks it is gone. Nothing runs when the client holds no entry. Returns what was done."""
+    if not registrations().get(client):
+        return f"nothing to remove: {client} holds no {SERVER} entry"
+    if client == "codex":
+        path = os.path.join(codex_dir(), "config.toml")
+        codex_config.remove_server(path, SERVER)
+        done = f"edited {path}: removed [mcp_servers.{SERVER}]"
+    else:
+        command = remove_command(client)
+        run_cli(command)
+        done = " ".join(command)
+    if registrations().get(client):
+        raise RuntimeError(f"{done} finished, but the {SERVER} entry is still in the client's configuration.")
+    return done
 
 
 def cli_folders():

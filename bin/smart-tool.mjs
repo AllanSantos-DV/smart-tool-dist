@@ -20,7 +20,12 @@ const USAGE = `Usage: npx @allansantos-dev/smart-tool@<version> install [--targe
 
 Installs or updates Smart Tool for this Windows user. To update, run it again with the version to install in place of
 <version>: a pinned version keeps npx from reusing an older package from its cache. For a version published minutes
-ago, add --prefer-online before the package name so npm asks the registry instead of its cached version list.`;
+ago, add --prefer-online before the package name so npm asks the registry instead of its cached version list.
+
+Usage: npx @allansantos-dev/smart-tool@<version> uninstall [--target DIR] [--keep-data]
+
+Removes Smart Tool silently (no prompts): the program folder, autostart, the agent hooks, the MCP registrations and
+~/.smart-tool (kept with --keep-data). Your projects are never touched. Exit code 0 when everything is gone, 1 when a step failed.`;
 
 function fail(message) {
   throw new Failure(message);
@@ -84,7 +89,7 @@ async function main() {
     console.log(JSON.parse(readFileSync(join(PACKAGE_DIR, "package.json"), "utf8")).version);
     return;
   }
-  if (command !== "install") {
+  if (command !== "install" && command !== "uninstall") {
     console.log(USAGE);
     process.exitCode = command === undefined || command === "--help" || command === "-h" ? 0 : 1;
     return;
@@ -96,7 +101,8 @@ async function main() {
     return;
   }
   const python = ensurePython();
-  const installer = spawnSync(python, [join(PACKAGE_DIR, "install.py"), "--skip-tests", ...rest], {
+  const script = command === "install" ? ["install.py", "--skip-tests"] : ["uninstall.py"];
+  const installer = spawnSync(python, [join(PACKAGE_DIR, script[0]), ...script.slice(1), ...rest], {
     stdio: "inherit",
     cwd: PACKAGE_DIR,
     env: { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" },
