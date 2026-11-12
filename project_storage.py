@@ -19,6 +19,8 @@ import project_identity
 import project_store
 
 _PLANS={}
+# A view of a branch nobody has indexed for this long is rebuilt from the cached vectors on demand.
+STALE_VIEW_S=30*86400
 
 
 def _assets(root):
@@ -114,6 +116,21 @@ def preview(project,storage_ids,clear_cache=True):
     _PLANS[token]={'project_id':project['id'],'expires':time.time()+900,'paths':removed,'signatures':signature,
                    'keys':keys,'storage_ids':storage_ids,'clear_cache':clear_cache,'result':result}
     return result
+
+
+def stale_view_ids(project,now=None):
+    """Storage ids of the views of `project` that are not protected and were last updated over STALE_VIEW_S ago."""
+    now=time.time() if now is None else now
+    return [v['storage_id'] for v in inventory(project)['views']
+            if not v['protected'] and v.get('updated_at') and now-v['updated_at']>STALE_VIEW_S]
+
+
+def auto_cleanup(project,now=None):
+    """Removes the stale views of `project` through the same preview and commit as the manual cleanup, so what goes is
+    exactly what the preview lists and every protection of the commit applies. None when no view is stale."""
+    ids=stale_view_ids(project,now)
+    if not ids:return None
+    return commit(project,preview(project,ids,True)['plan_id'])
 
 
 def commit(project,plan_id):

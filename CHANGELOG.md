@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.73 - beta
+
+- Once a day (first pass 10 minutes after the daemon starts) the daemon removes, in each registered project without a
+  running job, the index views that are not pinned and were not updated for 30 days (`project_storage.auto_cleanup`). It
+  goes through the manual cleanup's own preview and commit, so every protection of `cleanup_commit` applies; a refused
+  project is kept and logged. A removed view is rebuilt from the cached vectors when its branch is indexed again. Tests:
+  `tests/test_storage_auto_cleanup.py`.
+- The local embedder and the gateway models listings go through the shared model protections (circuit, in-flight cap,
+  `Retry-After`, the model health table), like the gateway calls. Tests: `tests/test_local_embedder.py`,
+  `tests/test_model_health.py`.
+- The usage meter counts calls per purpose by hour (`usage_hourly`), so the 24 h window of the setup screen covers the
+  last 24 hours instead of following the UTC day.
+- Product page: larger body text, 44 px touch targets, a labelled tool group, a favicon file, and the product video
+  rebuilt with the default voice and a window frame without an address bar. `release/pages.py` no longer publishes hidden
+  folders of `site/` (tool state such as `.token-guard`). The release notes section lists the three latest versions it
+  claims (it listed twelve), and `release/pages.check_site` refuses to publish otherwise. Tests:
+  `tests/test_site_quality.py`, `tests/test_pages.py`.
+
 ## 0.9.72 - beta
 
 - A Smart Tool hook entry that is absent from the client's config is no longer reported `missing` when the Skill Manager holds

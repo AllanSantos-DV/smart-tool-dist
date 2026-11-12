@@ -44,6 +44,7 @@ import integration_metrics
 import node_locator
 import config
 import disk_cleanup
+import project_storage
 import freshness
 import model_client
 import index_scope
@@ -2379,12 +2380,10 @@ def _project_action_locked(arguments):
     if action=='usage':
         return usage_meter.summary(key,arguments.get('days',30),arguments.get('view_id'))
     if action=='storage':
-        import project_storage
         return project_storage.inventory(project)
     active = _active_project_jobs(key)
     if action in ('pin_view','cleanup_preview','cleanup_commit'):
         if active:raise ValueError('Wait for this project\'s jobs to finish before changing storage.')
-        import project_storage
         if action=='pin_view':return project_storage.pin(project,arguments.get('storage_id'),arguments.get('pinned'))
         if action=='cleanup_preview':return project_storage.preview(project,arguments.get('storage_ids'),arguments.get('clear_cache',True))
         if arguments.get('confirm') is not True:raise ValueError('Confirm the cleanup preview before applying it.')
@@ -4769,6 +4768,39 @@ def _heal_browser_control():
         _log(f"browser control not refreshed: {type(exc).__name__}: {exc}")
 
 
+STORAGE_CLEANUP_FIRST_S = 600
+STORAGE_CLEANUP_EVERY_S = 24 * 3600
+
+
+def _storage_cleanup_pass():
+    """Removes the stale views of every registered project that has no job running; returns how many views went. A
+    project whose cleanup is refused (the branch changed, an index is open elsewhere) is kept and logged."""
+    removed = 0
+    for project in project_store.all_projects():
+        if _active_project_jobs(project["id"]):
+            continue
+        try:
+            result = project_storage.auto_cleanup(project)
+        except (ValueError, RuntimeError, OSError) as exc:
+            _log(f"storage cleanup: project {project['id']} kept: {exc}")
+            continue
+        if result:
+            removed += result["removed_views"]
+            _log(f"storage cleanup: {project['root']}: removed {result['removed_views']} view(s), "
+                 f"{result['removed_index_bytes']} bytes")
+    return removed
+
+
+def _storage_cleanup_loop():
+    time.sleep(STORAGE_CLEANUP_FIRST_S)
+    while True:
+        try:
+            _storage_cleanup_pass()
+        except Exception as exc:
+            _log(f"storage cleanup failed: {type(exc).__name__}: {exc}")
+        time.sleep(STORAGE_CLEANUP_EVERY_S)
+
+
 def main():
     global _PROJECT_MONITOR
     # O bind vem antes de qualquer I/O de rede: enquanto a porta não abre, o
@@ -4799,6 +4831,7 @@ def main():
         project_store.import_known_legacy(indexer.INDEX_DIR)
         _PROJECT_MONITOR = project_monitor.ProjectMonitor(_enqueue_monitored_project)
         _PROJECT_MONITOR.start()
+        threading.Thread(target=_storage_cleanup_loop, daemon=True).start()
         _log(f"project monitor started; {recovered} interrupted job(s) recovered")
     except Exception as exc:
         _log(f"project monitor unavailable: {_project_error(exc)}")

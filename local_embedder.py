@@ -9,10 +9,13 @@ import json
 import os
 import threading
 import time
+import urllib.error
 import urllib.parse
 
 import config
 import indexer
+import model_breaker
+import model_health
 
 PREFIX = "local:"
 PROPERTIES = os.path.join(os.path.expanduser("~"), ".mcp-memory", "embedding.properties")
@@ -60,7 +63,7 @@ def _request(conn, method, path, body=None):
     response = conn.getresponse()
     data = response.read()
     if response.status >= 400:
-        raise ConnectionError(f"local embedder answered HTTP {response.status}")
+        raise urllib.error.HTTPError(f"{conn.host}:{conn.port}{path}", response.status, response.reason, response.headers, None)
     return json.loads(data)
 
 
@@ -123,6 +126,13 @@ def _left(deadline):
     return min(REQUEST_TIMEOUT_S, left)
 
 
+def _retry_delay(failure, attempt):
+    """Seconds to wait after a failed attempt: the `Retry-After` of the answer (whole seconds, at most the pause of the
+    circuit) when the sidecar sent one, else the attempt number."""
+    value = str(getattr(failure, "headers", None) and failure.headers.get("Retry-After") or "")
+    return min(int(value), model_breaker.PAUSE_S) if value.isdigit() else attempt
+
+
 def embed(model, texts, deadline=None, cancel_check=None, on_retry=None):
     base = url()
     if not base:
@@ -144,21 +154,28 @@ def embed(model, texts, deadline=None, cancel_check=None, on_retry=None):
             for attempt in range(1, MAX_ATTEMPTS + 1):
                 if cancel_check:
                     cancel_check()
+                model_breaker.guard(model)
                 conn.timeout = _left(deadline)
                 try:
-                    got = _request(conn, "POST", "/embed", {"inputs": part})
-                    break
+                    with model_breaker.slot(model):
+                        got = _request(conn, "POST", "/embed", {"inputs": part})
                 except (OSError, http.client.HTTPException) as exc:
+                    model_breaker.note(model, exc)
+                    model_health.record("/v1/embeddings", {"model": model}, exc)
                     conn.close()
                     conn = _connection(base, _left(deadline))
                     if attempt == MAX_ATTEMPTS:
                         raise RuntimeError(f"Local embedder failed after {MAX_ATTEMPTS} attempts: {exc}") from None
                     if on_retry:
                         on_retry(attempt + 1, len(part))
-                    delay = attempt
+                    delay = _retry_delay(exc, attempt)
                     if deadline is not None and time.monotonic() + delay >= deadline:
                         raise TimeoutError("Not enough time left to retry the local embedder.") from None
                     time.sleep(delay)
+                else:
+                    model_breaker.note(model)
+                    model_health.record("/v1/embeddings", {"model": model})
+                    break
             if not isinstance(got, list) or len(got) != len(part):
                 raise indexer.IndexVectorError("Local embedder returned a vector count different from the input.")
             for vector in got:

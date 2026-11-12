@@ -35,6 +35,7 @@ def phase(name):
 
 def _tables(db):
     db.execute('CREATE TABLE IF NOT EXISTS usage_daily(day TEXT,project_id TEXT,view_id TEXT,view_label TEXT,purpose TEXT,model TEXT,attempts INTEGER,successes INTEGER,errors INTEGER,input_items INTEGER,input_characters INTEGER,prompt_tokens INTEGER,output_tokens INTEGER,token_reports INTEGER,reported_usd REAL,price_reports INTEGER,elapsed_s REAL,PRIMARY KEY(day,project_id,view_id,purpose,model))')
+    db.execute('CREATE TABLE IF NOT EXISTS usage_hourly(hour INTEGER,purpose TEXT,attempts INTEGER,errors INTEGER,PRIMARY KEY(hour,purpose))')
     db.execute('CREATE TABLE IF NOT EXISTS usage_index_jobs(job_id TEXT PRIMARY KEY,project_id TEXT,view_id TEXT,view_label TEXT,at REAL,kind TEXT,embedded_chunks INTEGER,reused_chunks INTEGER,unchanged_files INTEGER,embedded_characters INTEGER)')
     db.execute('CREATE TABLE IF NOT EXISTS usage_imports(project_id TEXT PRIMARY KEY)')
 
@@ -80,6 +81,9 @@ def _record(path,body,response=None,headers=None,error=None,elapsed=0):
             fields=['attempts','successes','errors','input_items','input_characters','prompt_tokens','output_tokens','token_reports','reported_usd','price_reports','elapsed_s']
             update=','.join(f'{name}={name}+excluded.{name}' for name in fields)
             db.execute('INSERT INTO usage_daily VALUES('+','.join('?' for _ in values)+') ON CONFLICT(day,project_id,view_id,purpose,model) DO UPDATE SET '+update,values)
+            hour=int(time.time()//3600)
+            db.execute('INSERT INTO usage_hourly VALUES(?,?,1,?) ON CONFLICT(hour,purpose) DO UPDATE SET attempts=attempts+1,errors=errors+excluded.errors',(hour,current['purpose'],int(error is not None)))
+            db.execute('DELETE FROM usage_hourly WHERE hour<?',(hour-366*24,))
             cutoff=(datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=366)).date().isoformat()
             db.execute('DELETE FROM usage_daily WHERE day<?',(cutoff,))
     except Exception:
@@ -103,14 +107,13 @@ def _record_job(job_id,payload):
 
 
 def calls_by_purpose(since,purposes):
-    """Attempts and errors of every project per purpose in `purposes`, from the UTC day of the epoch time `since` on
-    (the table keeps days, not hours). Purposes with no call are left out."""
-    day=datetime.datetime.fromtimestamp(since,datetime.timezone.utc).date().isoformat()
+    """Attempts and errors of every project per purpose in `purposes`, from the hour of the epoch time `since` on.
+    Purposes with no call are left out."""
     marks=','.join('?' for _ in purposes)
     with project_store._LOCK,project_store._db() as db:
         _tables(db)
-        rows=db.execute('SELECT purpose,SUM(attempts),SUM(errors) FROM usage_daily WHERE day>=? AND purpose IN ('+marks+') GROUP BY purpose',
-                        (day,*purposes)).fetchall()
+        rows=db.execute('SELECT purpose,SUM(attempts),SUM(errors) FROM usage_hourly WHERE hour>=? AND purpose IN ('+marks+') GROUP BY purpose',
+                        (int(since//3600),*purposes)).fetchall()
     found={purpose:{'purpose':purpose,'attempts':attempts,'errors':errors} for purpose,attempts,errors in rows}
     return [found[purpose] for purpose in purposes if purpose in found]
 

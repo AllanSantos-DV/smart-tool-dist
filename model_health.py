@@ -28,7 +28,7 @@ ERROR_CHARS = 300
 SAMPLE_CHARS = 160
 GROUP_ROWS = 20
 PURPOSES = ("index_embedding", "query_embedding", "rerank", "embedding_probe", "scope")
-_PATHS = ("/v1/chat/completions", "/v1/embeddings", "/v1/rerank")
+_PATHS = ("/v1/chat/completions", "/v1/embeddings", "/v1/rerank", "/v1/models", "/v1/model/info")
 _PURPOSE_ROLE = {"scope": "scope_model", "scout": "scout_model", "docs": "docs_model", "rerank": "rerank_model",
                  "index_embedding": "embedding_model", "query_embedding": "embedding_model"}
 _TOOL = contextvars.ContextVar("model_health_tool", default=None)
@@ -112,7 +112,7 @@ def record(path, body, failure=None):
     if path not in _PATHS:
         return
     try:
-        model = str((body or {}).get("model", "")) if isinstance(body, dict) else ""
+        model = (str(body.get("model", "")) if isinstance(body, dict) else "") or path
         role = role_of(model, purpose=usage_meter.purpose())
         now = time.time()
         text = error_text(failure) if failure is not None else None
