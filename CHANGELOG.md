@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.72 - beta
+
+- A Smart Tool hook entry that is absent from the client's config is no longer reported `missing` when the Skill Manager holds
+  an item of Smart Tool back: `client_hooks.inspect` asks `skill-engine query --owner smart-tool --json` (through the `cli.json`
+  pointer in `SKILL_ENGINE_HOME` or `~/.skill-engine`) and answers `waiting_approval` for a quarantined or held item and
+  `update_held` for an approved copy whose new version waits; the settings page shows "Waiting for approval" and "Update held",
+  and the notice to the agent says there is nothing to install. Without the Manager, or with items active or absent, the
+  state stays `missing`; a failed query shows as the hook being unreadable. Tests: `tests/test_hook_manager_state.py`.
+
 ## 0.9.71 - beta
 
 - `npx @allansantos-dev/smart-tool@0.9.71 uninstall [--target DIR] [--keep-data]` (`python uninstall.py`): silent uninstall that

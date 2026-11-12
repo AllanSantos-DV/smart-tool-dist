@@ -945,6 +945,10 @@ function agentState(item) {
     text: "Could not read " + item.file + ": " + item.hook_error };
   if (item.hook_state === "outdated") return { tone: "warn", label: "Hook outdated", action: "Update hook", hook: true,
     text: "The redirect hook was written by an older Smart Tool. " + item.hook_changes.join(" ") };
+  if (item.hook_state === "waiting_approval") return { tone: "warn", label: "Waiting for approval", action: "Open",
+    text: "The Skill Manager holds a Smart Tool item until you approve it. " + item.hook_changes.join(" ") };
+  if (item.hook_state === "update_held") return { tone: "warn", label: "Update held", action: "Open",
+    text: "A new Smart Tool version waits for approval in the Skill Manager. " + item.hook_changes.join(" ") };
   if (item.hook_state === "missing") return { tone: "warn", label: "No hook", action: "Install hook", hook: true,
     text: "Connected, but its folder searches and web lookups are not redirected to Smart Tool." };
   return { tone: "ok", label: "Connected", action: "Open", text: "Connection and redirect hook are up to date." };

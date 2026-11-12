@@ -3,6 +3,7 @@ import json
 import os
 import secrets
 import shutil
+import subprocess
 import sys
 import time
 import tomllib
@@ -23,6 +24,9 @@ AUDIT_TIMEOUT_S = 10
 AUDIT_CLIENTS = ("claude", "codex")
 AUDIT_ON = "current"
 AUDIT_WAITING = "waiting_approval"
+OWNER = "smart-tool"
+MANAGER_TIMEOUT_S = 5
+MANAGER_HELD = ("quarantined", "held")
 HTTP_PATH = "/hooks/pretool"
 POST_PATH = "/hooks/posttool"
 # A redirected shell search waits for its answer in the PreToolUse (smart_tool_daemon.HOOK_SHELL_BUDGET_S).
@@ -89,10 +93,47 @@ def _target(handler):
     return handler.get("url") or handler.get("command") or ""
 
 
-def inspect(client, trust=True):
+def manager_items(owner=OWNER):
+    """Items the Skill Manager holds for `owner` (`skill-engine query --owner <owner> --json`), found through the
+    cli.json pointer in its home (SKILL_ENGINE_HOME or ~/.skill-engine). [] when the Manager is not installed;
+    an unreadable pointer or a failed query raises."""
+    pointer = os.path.join(os.environ.get("SKILL_ENGINE_HOME") or os.path.join(HOME, ".skill-engine"), "cli.json")
+    try:
+        with open(pointer, encoding="utf-8") as stream:
+            cli = json.load(stream)
+    except FileNotFoundError:
+        return []
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    result = subprocess.run([cli["node"], cli["cli"], "query", "--owner", owner, "--json"], capture_output=True,
+                            stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
+                            timeout=MANAGER_TIMEOUT_S, creationflags=flags)
+    if result.returncode != 0:
+        raise OSError(f"skill-engine query exited {result.returncode}: {result.stderr.strip()[:200]}")
+    return json.loads(result.stdout).get("items") or []
+
+
+def _missing_state():
+    """`missing`, unless the Skill Manager holds something of ours back: `waiting_approval` for a quarantined or held
+    item, `update_held` for an approved copy whose new version waits."""
+    items = manager_items()
+    waiting = [item for item in items if item.get("state") in MANAGER_HELD]
+    if waiting:
+        return {"state": "waiting_approval", "changes": [f"{item.get('id')}: {item.get('reason') or item['state']}. "
+                                                         f"Approve with `{item.get('approve') or 'skill-engine dashboard'}`."
+                                                         for item in waiting]}
+    pending = [item for item in items if item.get("pendingUpdate")]
+    if pending:
+        return {"state": "update_held", "changes": [f"{item.get('id')}: a new version waits for approval "
+                                                    f"(`{item.get('approve') or 'skill-engine dashboard'}`)." for item in pending]}
+    return {"state": "missing", "changes": []}
+
+
+def inspect(client, trust=True, manager=True):
     """Our hook in the client's config: `current`, `missing`, or `outdated` (an older entry of ours) with `changes`,
     plain sentences saying what an update rewrites (tools the old matcher leaves out, an old address or timeout).
-    In Codex a current entry that config.toml does not trust is outdated too, unless trust=False."""
+    In Codex a current entry that config.toml does not trust is outdated too, unless trust=False. Where the entry is
+    absent and the Skill Manager holds an item of ours, `waiting_approval` or `update_held` (manager=False skips that
+    query)."""
     spec = CLIENTS[client]
     for path in spec["files"]:
         try:
@@ -113,7 +154,7 @@ def inspect(client, trust=True):
             if client == "codex" and trust and not changes and not _codex_trusted(event, groups, _our_hook):
                 changes.append(f"Codex has not approved its {event} entry; an update records the approval.")
         return {"state": "outdated" if changes else "current", "changes": changes}
-    return {"state": "missing", "changes": []}
+    return _missing_state() if manager else {"state": "missing", "changes": []}
 
 
 def _entry_changes(event, matcher, expected, groups):
@@ -153,7 +194,7 @@ def status(client_info):
     spec = CLIENTS[client]
     try:
         found, error = inspect(client), None
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         found, error = {"state": None, "changes": []}, f"{type(exc).__name__}: {exc}"[:200]
     return {"client": client, "name": client_info.get("name"),
             "installed": None if found["state"] is None else found["state"] == "current", "state": found["state"],
@@ -172,6 +213,10 @@ def notice(state):
         return None
     action = spec.get("blocked") or ("If the user asks, use project_manage action=install_hook_preview, show the "
                                      "change and confirm with action=install_hook (makes a backup).")
+    if state.get("state") in ("waiting_approval", "update_held"):
+        label = "waiting for approval" if state["state"] == "waiting_approval" else "update held"
+        return (f"Smart Tool hook {label} in the Skill Manager ({spec['label']}): {' '.join(state['changes'])} "
+                "Nothing to install.")
     if state.get("state") == "outdated":
         return (f"Smart Tool hook outdated in {spec['label']} ({spec['files'][0]}): {' '.join(state['changes'])} "
                 f"{action} Docs: {spec['docs']}")
@@ -311,7 +356,7 @@ def remove(client):
             del hooks[event]
     if not moved:
         return {"client": client, "changed": False, "file": path, "backup": None}
-    backup = _write_checked(path, data, lambda: inspect(client, trust=False)["state"] == "missing", "The removal")
+    backup = _write_checked(path, data, lambda: inspect(client, trust=False, manager=False)["state"] == "missing", "The removal")
     if client == "codex":
         for event, (before, kept) in moved.items():
             record_codex_trust(_codex_trust(event, before, kept))
