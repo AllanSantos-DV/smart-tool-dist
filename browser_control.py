@@ -11,11 +11,11 @@ The registered command is lazy_mcp_proxy.py around the real server: every sessio
 a Node process kept idle in each session that never opens a browser cost about 97 MB of commit each. The proxy answers
 the handshake from the cache the probe writes (HANDSHAKE_PATH) and starts the real server on the first tool call.
 
-Pages the agent opens are untrusted input. The server never exposes tools a page registers (WebMCP); every request
-the browser makes carries AGENT_HEADER, which the daemon refuses, so a page cannot steer the agent into Smart Tool's
-own setup page and its token (redirects included); `browser_run_code_unsafe` (arbitrary JavaScript in the server
-process, outside any client sandbox) is denied in the client: Playwright MCP itself is not a security boundary and
-its documentation points to client-level permissions.
+Pages the agent opens are untrusted input. The server never exposes tools a page registers (WebMCP); the User-Agent of
+every request the browser makes ends with AGENT_UA_MARK, which the daemon refuses, so a page cannot steer the agent
+into Smart Tool's own setup page and its token (redirects included); `browser_run_code_unsafe` (arbitrary JavaScript
+in the server process, outside any client sandbox) is denied in the client: Playwright MCP itself is not a security
+boundary and its documentation points to client-level permissions.
 """
 import json
 import os
@@ -43,26 +43,29 @@ OUTPUT_DIR = os.path.join(paths.DATA_DIR, "playwright-mcp")
 CONFIG_PATH = os.path.join(paths.DATA_DIR, "playwright-mcp.json")
 HANDSHAKE_PATH = os.path.join(paths.DATA_DIR, "playwright-mcp-handshake.json")
 PROXY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lazy_mcp_proxy.py")
-AGENT_HEADER = "X-Smart-Tool-Agent-Browser"
+AGENT_UA_MARK = "SmartToolAgentBrowser"
 OUTPUT_MAX_BYTES = 100 * 1024 * 1024
 PROBE_TIMEOUT_S = 60
 DENIED_TOOLS = ("browser_run_code_unsafe",)
 _CODEX_TABLE_RE = re.compile(rf"^\[mcp_servers\.{SERVER}\][ \t]*\r?\n", re.M)
 _CHROMIUM_PROBE = ("from playwright.sync_api import sync_playwright\n"
-                   "with sync_playwright() as p: print(p.chromium.executable_path)")
+                   "with sync_playwright() as p:\n"
+                   " print(p.chromium.executable_path)\n"
+                   " b = p.chromium.launch(headless=True); print(b.new_page().evaluate('navigator.userAgent')); b.close()")
 
 
-def chromium_executable():
-    """The Chromium that `playwright install chromium` put in place for the browser venv; RuntimeError when absent."""
+def chromium():
+    """The Chromium that `playwright install chromium` put in place for the browser venv and the User-Agent it sends
+    headless, as (path, user_agent); RuntimeError when absent or when it does not start."""
     if not install_runtime.BROWSER_PYTHON.is_file():
         raise RuntimeError(f"Browser runtime missing ({install_runtime.BROWSER_PYTHON}).")
     done = subprocess.run([str(install_runtime.BROWSER_PYTHON), "-c", _CHROMIUM_PROBE], capture_output=True,
                           text=True, encoding="utf-8", errors="replace", timeout=60,
                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    path = (done.stdout.strip().splitlines() or [""])[-1]
-    if done.returncode or not os.path.isfile(path):
-        raise RuntimeError(f"Chromium not found: {(done.stderr or done.stdout).strip()[-300:] or path}")
-    return path
+    lines = done.stdout.strip().splitlines()
+    if done.returncode or len(lines) < 2 or not os.path.isfile(lines[-2]):
+        raise RuntimeError(f"Chromium not found or not starting: {(done.stderr or done.stdout).strip()[-300:]}")
+    return lines[-2], lines[-1]
 
 
 def server_command():
@@ -72,9 +75,9 @@ def server_command():
         raise RuntimeError("Supported Node.js not found for Playwright MCP.")
     if not CLI.is_file():
         raise RuntimeError(f"Playwright MCP is not installed ({CLI}); reinstall Smart Tool.")
-    return [node, str(CLI), "--isolated", "--headless", "--no-webmcp", "--caps=", "--config", write_config(),
-            "--executable-path", chromium_executable(), "--output-dir", OUTPUT_DIR,
-            "--output-max-size", str(OUTPUT_MAX_BYTES)]
+    executable, user_agent = chromium()
+    return [node, str(CLI), "--isolated", "--headless", "--no-webmcp", "--caps=", "--config", write_config(user_agent),
+            "--executable-path", executable, "--output-dir", OUTPUT_DIR, "--output-max-size", str(OUTPUT_MAX_BYTES)]
 
 
 def lazy_command(command):
@@ -86,11 +89,18 @@ def lazy_command(command):
     return [python, PROXY, "--handshake", HANDSHAKE_PATH, "--", *command]
 
 
-def write_config():
-    """Writes the Playwright MCP config file that adds AGENT_HEADER to every request of the browser (navigations,
-    redirects, subresources; measured: no CORS preflight is added) and returns its path."""
+def is_agent_browser(headers):
+    """True when the request headers come from the agent's browser: its User-Agent carries AGENT_UA_MARK."""
+    return AGENT_UA_MARK in (headers.get("User-Agent") or "").split()
+
+
+def write_config(user_agent):
+    """Writes the Playwright MCP config file that sends user_agent followed by AGENT_UA_MARK on every request of the
+    browser and returns its path. The browser sets User-Agent itself, on navigations, redirects and subresources, and
+    a CORS request does not count it as an author header, so no preflight is added; a header in extraHTTPHeaders
+    forced one on every cross-origin fetch and font."""
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    config = {"browser": {"contextOptions": {"extraHTTPHeaders": {AGENT_HEADER: "1"}}}}
+    config = {"browser": {"contextOptions": {"userAgent": f"{user_agent} {AGENT_UA_MARK}"}}}
     atomic_io.write_secret_text(CONFIG_PATH, json.dumps(config, indent=1))
     return CONFIG_PATH
 

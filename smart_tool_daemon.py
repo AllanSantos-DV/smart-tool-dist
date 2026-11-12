@@ -4409,9 +4409,9 @@ class MCPHandler(BaseHTTPRequestHandler):
         return origin is None or _loopback_host(origin, require_port=True)
 
     def _reject_foreign_origin(self):
-        """The agent's browser (Playwright MCP marks every request with AGENT_HEADER) never reaches the daemon: a page
+        """The agent's browser (Playwright MCP marks the User-Agent of every request) never reaches the daemon: a page
         it opens could otherwise steer the agent into /setup, whose token unlocks every setting."""
-        if self.headers.get(browser_control.AGENT_HEADER):
+        if browser_control.is_agent_browser(self.headers):
             self._write_json(403, {"error": "Smart Tool's pages are not available to the agent's browser"})
             return True
         if self._origin_allowed():

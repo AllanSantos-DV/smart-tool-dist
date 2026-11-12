@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.74 - beta
+
+- The agent's browser (the Playwright MCP server Smart Tool registers) is marked by its User-Agent, which ends with
+  `SmartToolAgentBrowser`, instead of the `X-Smart-Tool-Agent-Browser` header. Any header added to every request made
+  each cross-origin `fetch` and every web font from another origin send a CORS preflight, and servers that do not allow
+  that header refused it: the product page showed 8 console errors in the agent's browser and lost its fonts. The browser
+  sets the User-Agent itself, so it reaches navigations, redirects and subresources without a preflight, and the daemon
+  still refuses the agent's browser on every path, `/setup` included. `--blocked-origins` was not used: Playwright MCP
+  documents that it does not apply to redirects. Test: `tests/test_browser_control.py` (a redirecting page that fetches
+  from another origin answered like a font CDN).
+
 ## 0.9.73 - beta
 
 - Once a day (first pass 10 minutes after the daemon starts) the daemon removes, in each registered project without a
