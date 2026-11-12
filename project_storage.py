@@ -36,7 +36,20 @@ def _stamp(path):
     stat=os.stat(path);return [stat.st_size,stat.st_mtime_ns,stat.st_ino]
 
 
-def inventory(project):
+def _is_stale(row,now):
+    return not row['protected'] and bool(row.get('updated_at')) and now-row['updated_at']>STALE_VIEW_S
+
+
+def _view_files(storage_id,assets):
+    """Paths of a view's database and its `.previous` and `.building-*` generations."""
+    stem=storage_id[:-8]
+    return [path for name,path in assets.items() if name==storage_id or re.fullmatch(re.escape(stem)+r'(?:\.previous|\.building-[a-f0-9]+)\.sqlite3',name)]
+
+
+def inventory(project,now=None):
+    """Disk use of the project's indexes and vector cache, one row per stored view; `stale` marks the unprotected
+    views the daily cleanup removes."""
+    now=time.time() if now is None else now
     root=project['root'];views=index_inventory.views(root);assets=_assets(root)
     active=indexer.existing_db_path(root)
     for view in views:view['current']=bool(active and os.path.normcase(view['path'])==os.path.normcase(active))
@@ -46,12 +59,13 @@ def inventory(project):
     for view in views:
         row={**view,'storage_id':Path(view['path']).name,'pinned':view['view_id'] in pins}
         row['protected_reason']='Active view' if view['current'] else 'Pinned view' if row['pinned'] else 'Last available view; the active branch has no index' if view['path']==fallback else ''
-        row['protected']=bool(row['protected_reason']);rows.append(row)
+        row['protected']=bool(row['protected_reason']);row['stale']=_is_stale(row,now);rows.append(row)
     total=sum(os.path.getsize(path) for path in assets.values())
     cache_path=Path(indexer.INDEX_DIR)/(project_identity.project_id(root)+'.vectors.sqlite3')
     return {'views':rows,'total_bytes':total,'cache_bytes':cache_path.stat().st_size if cache_path.exists() else 0,
             'auxiliary_bytes':max(0,total-sum(v['bytes'] for v in rows)-(cache_path.stat().st_size if cache_path.exists() else 0)),
-            'cleanup':'manual','source_files_untouched':True}
+            'stale_bytes':sum(os.path.getsize(path) for v in rows if v['stale'] for path in _view_files(v['storage_id'],assets)),'stale_after_days':STALE_VIEW_S//86400,
+            'source_files_untouched':True}
 
 
 def pin(project,storage_id,pinned):
@@ -98,7 +112,7 @@ def preview(project,storage_ids,clear_cache=True):
         if row['protected']:raise ValueError(row['label']+': '+row['protected_reason']+'.')
         selected.append(row)
         stem=storage_id[:-8]
-        removed.extend(path for name,path in assets.items() if name==storage_id or re.fullmatch(re.escape(stem)+r'(?:\.previous|\.building-[a-f0-9]+)\.sqlite3',name))
+        removed.extend(_view_files(storage_id,assets))
         if '.v-' in stem:
             scope=Path(index_scope.SCOPE_DIR)/(stem+'.scope.json')
             if scope.is_file():removed.append(str(scope))
@@ -121,8 +135,7 @@ def preview(project,storage_ids,clear_cache=True):
 def stale_view_ids(project,now=None):
     """Storage ids of the views of `project` that are not protected and were last updated over STALE_VIEW_S ago."""
     now=time.time() if now is None else now
-    return [v['storage_id'] for v in inventory(project)['views']
-            if not v['protected'] and v.get('updated_at') and now-v['updated_at']>STALE_VIEW_S]
+    return [v['storage_id'] for v in inventory(project,now)['views'] if v['stale']]
 
 
 def auto_cleanup(project,now=None):

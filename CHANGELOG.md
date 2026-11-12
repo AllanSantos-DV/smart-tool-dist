@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.75 - beta
+
+- The disk space card of each project marks the stale views itself: a view that is not pinned or active and was not
+  updated for 30 days shows "Stale" in its Protection column, and a "Stale views" total gives their size and count. The
+  inventory (`project_manage action=storage`) carries `stale` per view plus `stale_bytes` and `stale_after_days`, using the
+  same test as the daily cleanup (`project_storage.stale_view_ids`). The card's note now says the daily cleanup removes
+  stale views instead of "Cleanup is manual". No notification is sent for it. Tests: `tests/test_storage_auto_cleanup.py`.
+
 ## 0.9.74 - beta
 
 - The agent's browser (the Playwright MCP server Smart Tool registers) is marked by its User-Agent, which ends with
