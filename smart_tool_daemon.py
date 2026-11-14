@@ -60,6 +60,7 @@ import scout
 import embedding_cache
 import model_defaults
 import model_health
+import project_admission
 import project_identity
 import project_store
 import project_scheduler
@@ -372,10 +373,10 @@ SERVER_INSTRUCTIONS = (
 TOOLS = [
     {
         "name": "project_manage",
-        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project (a project whose folder is gone shows as unavailable with the reason); status shows storage, scope and jobs, and with a path inside a registered project answers for the deepest one that holds it (resolved_from). graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers, the documentation entries it leaves out of date and the tests to run with their command; it publishes nothing. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; each view carries stale (not updated for 30 days, the test of the daily cleanup that removes them) and stale_bytes sums them; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. Jobs via smart_search_result.",
+        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project (a project whose folder is gone shows as unavailable with the reason); status shows storage, scope and jobs, and with a path inside a registered project answers for the deepest one that holds it (resolved_from). graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers, the documentation entries it leaves out of date and the tests to run with their command; it publishes nothing. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; each view carries stale (not updated for 30 days, the test of the daily cleanup that removes them) and stale_bytes sums them; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. junk (no project_root) lists the registered projects that were never projects: a personal, system, application-data or build folder, a subfolder of a repository or of another project, a folder of projects; with confirm=true it unregisters them and deletes only their index files, and the manifest says what went. A project is the folder where the session started, so smart_search and register refuse a folder that is not a project and index a new one only from the session that started in it. Jobs via smart_search_result.",
         "inputSchema": {
             "type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "layers", "affected_tests", "pr_impact", "setup_audit", "redirect_proposals", "redirect_decide"]},
+                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "layers", "affected_tests", "pr_impact", "setup_audit", "redirect_proposals", "redirect_decide", "junk"]},
                 "ids": {"type": "array", "items": {"type": "string"}, "description": "redirect_decide: proposal ids from redirect_proposals (accepted ids for remove)"},
                 "decision": {"type": "string", "enum": ["accept", "instruct", "reject", "remove"], "description": "redirect_decide: accept redirects matching calls to smart_search; instruct lets them run with a tip naming smart_search; reject discards; remove deletes an accepted pattern"},
                 "finding_id": {"type": "string"},
@@ -1497,8 +1498,14 @@ def _submit_project_job(kind, arguments):
         return _submit_project_job_locked(kind, arguments)
 
 
+def _admitted_root(path):
+    """The project root a call on `path` may use (see project_admission.admit), for the session this thread serves."""
+    session = _MCP_SESSION.get()
+    return project_admission.admit(path, requester.origin(session) if session else None)
+
+
 def _submit_project_job_locked(kind, arguments):
-    root = project_identity.display_root(arguments["project_root"])
+    root = _admitted_root(arguments["project_root"])
     arguments = {**arguments, "project_root": root}
     arguments['_requested_view'] = index_views.public(index_views.describe(root, fresh=True))
     project = project_store.register(root)
@@ -2176,11 +2183,34 @@ def _project_summary(project):
             "last_error": (data.get("last_error") or None) and str(data["last_error"])[:200]}
 
 
+def _audited_roots():
+    """The registered project folders the setup audit visits: every one that is not junk."""
+    junk = {entry["id"] for entry in disk_cleanup.junk_projects()}
+    return [p["root"] for p in project_store.all_projects() if p.get("root") and p["id"] not in junk]
+
+
+def _junk_action(arguments):
+    """`junk` lists the registered projects that were never projects (a personal or system folder, a subfolder of
+    a repository or of another project, a folder of projects); with confirm=true it unregisters them and deletes their
+    index files, never the project's own files, and returns the path of the manifest. A project with a running job is
+    kept and listed."""
+    entries = disk_cleanup.junk_projects()
+    if arguments.get("confirm") is not True:
+        return {"junk": entries, "detail": "Nothing was removed. Pass confirm=true to unregister these and delete "
+                "their index files (the folders themselves are never touched); a manifest lists the result."}
+    busy = [entry for entry in entries if _active_project_jobs(entry["id"])]
+    report = disk_cleanup.remove_junk([entry for entry in entries if entry not in busy], _log)
+    report["kept"] += [{**entry, "error": "A job of this project is still running."} for entry in busy]
+    return report
+
+
 def _project_action(arguments):
     if not isinstance(arguments, dict):
         raise ValueError("Pass the action in a JSON object.")
     if arguments.get("action") in ("redirect_proposals", "redirect_decide"):
         return _redirect_action(arguments)
+    if arguments.get("action") == "junk":
+        return _junk_action(arguments)
     if arguments.get("action") == "setup_audit":
         root = arguments.get("project_root")
         if not isinstance(root, str) or not os.path.isdir(root):
@@ -2356,7 +2386,7 @@ def _project_action_locked(arguments):
         root = arguments.get("project_root")
         if not isinstance(root, str) or not os.path.isabs(root):
             raise ValueError("Pass the folder's absolute path.")
-        project = project_store.register(root)
+        project = project_store.register(_admitted_root(root))
         return {"project": _project_payload(project)}
     key = arguments.get("project_id")
     if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{16}", key):
@@ -2476,6 +2506,9 @@ def _project_action_locked(arguments):
         if not isinstance(root, str) or not os.path.isabs(root) or not os.path.isdir(root):
             raise ValueError("Pass the new absolute path of an existing folder.")
         root = project_identity.display_root(root)
+        reason = project_admission.refusal(root)
+        if reason:
+            raise ValueError(f"Not moving the project to {root}: it is {reason}.")
         new_key = project_identity.project_id(root)
         if new_key == key:
             return {"project": _project_payload(project)}
@@ -4208,7 +4241,9 @@ def _session_audit_hook(handler):
     say. The setup audit of a project reaches the agent on its first Smart Tool call there (`_project_notice`), so it
     is told once per session and project."""
     try:
-        handler._read_body(HOOK_MAX_BODY_BYTES)
+        started = json.loads(handler._read_body(HOOK_MAX_BODY_BYTES) or b"{}")
+        if isinstance(started, dict):
+            requester.note_origin(started.get("session_id"), started.get("cwd"))
     except ValueError as exc:
         _log(f"SessionStart hook body refused: {exc}")
     updates = " ".join(notice for _key, notice in _update_notices())
@@ -4284,6 +4319,8 @@ def _dispatch_tool_call(params, session_id=None):
     who = None
     if name in requester.WEB_TOOLS:
         who = requester.CURRENT.set(requester.claim(session_id, _session_client()[1].get("name"), name, arguments))
+    elif name in requester.PROJECT_TOOLS:
+        requester.claim(session_id, _session_client()[1].get("name"), name, arguments)
     try:
         with model_health.tool_call(name) as failures:
             try:
@@ -4835,7 +4872,7 @@ def main():
         _log(f"project monitor started; {recovered} interrupted job(s) recovered")
     except Exception as exc:
         _log(f"project monitor unavailable: {_project_error(exc)}")
-    audit = setup_audit.Scheduler(lambda: [p["root"] for p in project_store.all_projects() if p.get("root")], _log)
+    audit = setup_audit.Scheduler(_audited_roots, _log)
     audit.start()
     try:
         server.serve_forever()

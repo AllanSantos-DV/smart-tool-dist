@@ -1,17 +1,22 @@
 """Removes what Smart Tool left on disk that no registered project needs.
 
-Runs once when the daemon starts, before the project monitor: the registry of projects (a folder of projects is
-never one of them), write temporaries orphaned by a crash, generations under construction that stopped advancing,
+Runs once when the daemon starts, before the project monitor: the registry of projects (a folder that is not a
+project, see project_admission.junk_reason, is never one of them, and each removal is listed in a manifest), write temporaries orphaned by a crash, generations under construction that stopped advancing,
 the `.previous` copies older versions kept of a replaced generation, index files of projects no longer registered,
 and saved code-graph analyses of index views that no longer exist. Source files are never touched."""
+import json
 import os
 import re
 import time
 
 import atomic_io
 import indexer
+import paths
+import project_admission
 import project_identity
 import project_store
+
+MANIFEST_DIR = os.path.join(paths.DATA_DIR, "junk-manifests")
 
 # A generation under construction resumes where it stopped; one untouched this long belongs to a model or scope that
 # is no longer used, and a new one reuses the cached vectors anyway.
@@ -53,33 +58,61 @@ def remove_project_files(root, report=None):
     return report
 
 
+def junk_projects(errors=None):
+    """The registered projects that were never projects, as [{id, root, name, reason}], read-only: nothing is
+    removed. A project whose folder cannot be listed is left out and, when `errors` is a list, reported in it."""
+    found = []
+    for project in project_store.all_projects():
+        try:
+            reason = project_admission.junk_reason(project)
+        except OSError as exc:
+            if errors is not None:
+                errors.append(f"{project['root']}: {exc}")
+            continue
+        if reason:
+            found.append({"id": project["id"], "root": project["root"], "name": project.get("name"), "reason": reason})
+    return found
+
+
+def remove_junk(entries, log=None):
+    """Unregisters the given junk projects and deletes their index files (never the project's own files), then writes
+    a manifest of what was removed and what was kept; returns {removed, kept, files, bytes, manifest}. A project whose
+    index another process holds open is kept and listed with the reason."""
+    log = log or (lambda message: None)
+    report = {"removed": [], "kept": [], "files": 0, "bytes": 0, "manifest": None}
+    for entry in entries:
+        files = {"files": [], "bytes": 0}
+        try:
+            remove_project_files(entry["root"], files)
+        except (RuntimeError, OSError) as exc:
+            report["kept"].append({**entry, "error": str(exc)})
+            log(f"disk cleanup: {entry['root']} kept: {exc}")
+            continue
+        project_store.forget(entry["id"])
+        report["removed"].append({**entry, "index_files": files["files"], "bytes": files["bytes"]})
+        report["files"] += len(files["files"])
+        report["bytes"] += files["bytes"]
+        log(f"disk cleanup: unregistered {entry['root']}: {entry['reason']}")
+    if report["removed"] or report["kept"]:
+        os.makedirs(MANIFEST_DIR, exist_ok=True)
+        report["manifest"] = os.path.join(MANIFEST_DIR, time.strftime("junk-%Y%m%d-%H%M%S.json"))
+        atomic_io.write_text(report["manifest"], json.dumps(
+            {"removed": report["removed"], "kept": report["kept"], "source_files_touched": False}, indent=1))
+    return report
+
+
 def sweep(extra_roots, log=None):
-    """Removes the waste described in the module docstring and returns {containers, files, bytes, errors}.
+    """Removes the waste described in the module docstring and returns {junk, files, bytes, errors}.
 
     extra_roots are folders that own a vector cache without being projects (the web_fetch cache). A file that
     cannot be removed, or a registered folder that cannot be listed, is reported in errors and logged, and the sweep
     goes on with the rest: the daemon starts its project monitor right after, so the sweep must not stop it."""
     log = log or (lambda message: None)
-    report = {"containers": [], "files": [], "bytes": 0, "errors": []}
-    for project in project_store.all_projects():
-        if not os.path.isdir(project["root"]):
-            continue
-        try:
-            refused = project_store.container_error(project["root"])
-        except OSError as exc:
-            report["errors"].append(f"{project['root']}: {exc}")
-            log(f"disk cleanup: {project['root']} not checked as a folder of projects: {exc}")
-            continue
-        if refused:
-            try:
-                remove_project_files(project["root"], report)
-            except RuntimeError as exc:
-                report["errors"].append(str(exc))
-                log(f"disk cleanup: {project['root']} kept: {exc}")
-                continue
-            project_store.forget(project["id"])
-            report["containers"].append(project["root"])
-            log(f"disk cleanup: unregistered {refused}")
+    report = {"junk": [], "files": [], "bytes": 0, "errors": []}
+    removal = remove_junk(junk_projects(report["errors"]), log)
+    report["bytes"] += removal["bytes"]
+    report["junk"] = [{"root": e["root"], "reason": e["reason"]} for e in removal["removed"]]
+    report["errors"] += [f"{e['root']}: {e['error']}" for e in removal["kept"]]
     owners = [p["root"] for p in project_store.all_projects()] + list(extra_roots)
     keep = {key for root in owners for key in (project_identity.project_id(root), *project_identity.legacy_ids(root))}
     now = time.time()

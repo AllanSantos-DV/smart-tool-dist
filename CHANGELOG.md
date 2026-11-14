@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.76 - beta
+
+- A project is only the folder where the agent session started. A new project is refused, with the reason and nothing
+  indexed, when its folder is a drive root, a personal folder (home, Desktop, Documents, Downloads and the OneDrive
+  copies), a system folder, application data, a hidden tool folder in the home folder, a build or dependency folder
+  (`bin`, `obj`, `node_modules`, `.git`) or a Java home. A subfolder of a registered project or of a Git repository is never a project of its own: it
+  resolves to the project or the repository, and a subfolder of the session's own folder resolves to that folder. Moving
+  a project (`relocate`) to a refused folder is refused too, and the setup audit skips the junk projects. The daemon learns the session's folder from the hook
+  `cwd` (first one wins) and, when it is known, indexes only that project from the session. A folder the agent merely
+  navigated to never becomes a project, and a raw search of such a folder runs natively instead of being redirected.
+  Registered projects always pass. Copilot has no hook route, so only the folder rules apply there.
+- `project_manage action=junk` lists the registered projects that were never projects (a refused folder, a folder of
+  projects, a subfolder of a repository or of another project); with `confirm=true` it unregisters them and deletes their
+  index files, never the project's own files, and writes a manifest (`junk-manifests/junk-<time>.json`). The daily
+  cleanup applies the same test at daemon start. Research: `docs/research/2026-11-13-projeto-de-origem-da-sessao.md`.
+  Tests: `tests/test_project_admission.py`.
+
 ## 0.9.75 - beta
 
 - The disk space card of each project marks the stale views itself: a view that is not pinned or active and was not

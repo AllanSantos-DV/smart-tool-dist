@@ -323,6 +323,7 @@ def relocate(project_id, root):
 def import_known_legacy(index_dir):
     """Somente raízes documentadas nos registros antigos; não adivinha diretórios."""
     import indexer
+    import project_admission
     candidates = set()
     for name in ("daemon.log", "daemon.log.1"):
         try:
@@ -335,7 +336,7 @@ def import_known_legacy(index_dir):
             pass
     for root in candidates:
         key = project_identity.project_id(root)
-        if get(key) or not indexer.existing_db_path(root):
+        if get(key) or not indexer.existing_db_path(root) or project_admission.refusal(root):
             continue
         register(root, watch=False)
         update(key, enabled=True, status="migration_required", legacy_discovered=True)

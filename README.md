@@ -17,7 +17,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.75 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.76 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -83,7 +83,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.75 install
+npx @allansantos-dev/smart-tool@0.9.76 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -298,6 +298,14 @@ Redirects) and Maintenance (Setup audit, Startup).
    by package: a file that imports a package depends on every file of it, so a changed package selects the tests of every
    package that imports it (`go test ./pkg ...`); the Rust documentation and duplicate hooks stay silent.
 
+   **Which folder is a project**: only the folder where the agent session started (or the Git repository that holds
+   it). A drive root, a personal folder (home, Desktop, Documents), a system folder, application data, a hidden tool
+   folder in the home folder, `bin`, `obj`, `node_modules` and a Java home are refused with the reason and nothing is
+   indexed; a subfolder of a project or of a Git repository resolves to it; when the client sends its session folder, a folder the agent only navigated to is never registered (Copilot sends none, so only the folder rules apply).
+   `project_manage action=junk` lists the registered projects that break these rules; with `confirm=true` it
+   unregisters them and deletes their index files (never the project's own files) and writes a manifest in
+   `junk-manifests`. The daemon applies the same test at start.
+
    `project_manage` with `action=setup_audit` and a `project_root` (or `python setup_audit.py --project <folder>`)
    reports what Claude Code and Codex actually load for that folder (settings layers, enabled plugins of both,
    hooks, MCP servers, skills, CLAUDE.md and AGENTS.md) and where they collide: several hooks deciding on the same tool in
@@ -382,7 +390,7 @@ fails to load is listed in the setup screen with its error and does not affect t
 ## Uninstall
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.75 uninstall [--target DIR] [--keep-data]
+npx @allansantos-dev/smart-tool@0.9.76 uninstall [--target DIR] [--keep-data]
 ```
 
 It asks nothing and opens no window. It stops the tray and the daemon, removes the logon task, the hook entries of Smart

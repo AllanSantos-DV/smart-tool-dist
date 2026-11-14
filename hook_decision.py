@@ -27,6 +27,7 @@ import edit_preview
 import index_profile
 import index_scope
 import endpoint_sync
+import project_admission
 import project_store
 import redirect_rule
 import requester
@@ -130,6 +131,16 @@ def _search_root(target, cwd):
         return max(roots, key=len)
     session = os.path.abspath(cwd) if cwd else None
     return session if session and key.startswith(os.path.normcase(session).rstrip(os.sep) + os.sep) else target
+
+
+def _indexable(target, cwd, session_id):
+    """Whether the folder a search reads may be a Smart Tool project for this session; when not, the native tool runs
+    untouched instead of starting an index of a folder that is not the session's project."""
+    try:
+        project_admission.admit(_search_root(target, cwd), requester.session_origin(session_id))
+    except (ValueError, OSError):
+        return False
+    return True
 
 
 def _tool_name(client, tool):
@@ -348,6 +359,8 @@ def decide(payload, client, web_route, jobs):
     query cannot be built, or a client that sends no tool_use_id, is denied with the exact call to make, and never in a
     subagent whose tool list has no Smart Tool MCP tool: it has nothing to switch to."""
     cfg = config.load_config()
+    if isinstance(payload, dict):
+        requester.note_origin(payload.get("session_id"), payload.get("cwd"))
     if isinstance(payload, dict) and payload.get("tool_name") in EDIT_TOOLS:
         doc_mode, duplicate_mode, dependency_mode, comment_mode = (
             config.doc_mode(cfg), config.duplicate_mode(cfg), config.dependency_mode(cfg), config.comment_mode(cfg))
@@ -505,6 +518,8 @@ def _route(payload, client, web_route, cfg):
             pass
         return {"systemMessage": f"Smart Tool unavailable, routing skipped: {type(exc).__name__}"}
     if tool_name in tool_redirect.NO_OP and tool_input.get("run_in_background"):
+        return {}
+    if decision in ("instruct", "redirect") and not _indexable(target, cwd, payload.get("session_id")):
         return {}
     if decision == "instruct":
         if not agent_has_smart_tool(payload.get("agent_type") if payload.get("agent_id") else None, cwd):

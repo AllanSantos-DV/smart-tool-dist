@@ -14,6 +14,7 @@ import threading
 import time
 
 WEB_TOOLS = ("web_search", "web_fetch")
+PROJECT_TOOLS = ("smart_search", "smart_scout", "project_manage")
 NOTE_TTL_S = 60
 MAX_NOTES = 256
 MAX_BOUND = 256
@@ -22,16 +23,43 @@ CURRENT = contextvars.ContextVar("requester", default=None)
 _LOCK = threading.Lock()
 _NOTES = collections.OrderedDict()
 _BOUND = collections.OrderedDict()
+_ORIGIN = collections.OrderedDict()
 
 
 def _key(tool, arguments):
     return tool + "\0" + json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
 
 
+def note_origin(session_id, cwd):
+    """Remembers the first folder a client session was seen in: the SessionStart hook's `cwd`, else the first tool
+    call's. Later folders (the agent moving about) never replace it."""
+    if not isinstance(session_id, str) or not isinstance(cwd, str) or not session_id or not cwd:
+        return
+    with _LOCK:
+        _ORIGIN.setdefault(session_id, cwd)
+        while len(_ORIGIN) > MAX_BOUND:
+            _ORIGIN.popitem(last=False)
+
+
+def session_origin(session_id):
+    """The folder the client session started in, or None when no hook of that session was seen (a client without
+    hooks, or a session whose first tool call has not reached the hook yet)."""
+    with _LOCK:
+        return _ORIGIN.get(session_id)
+
+
+def origin(mcp_session):
+    """session_origin of the client session an MCP session was bound to by claim(), or None."""
+    with _LOCK:
+        bound = _BOUND.get(mcp_session)
+        return _ORIGIN.get(bound[0]) if bound else None
+
+
 def note_hook(tool, arguments, session_id, cwd):
     """Remembers who the PreToolUse hook saw about to call `tool` with `arguments` (the MCP tool name without the
     server prefix); claim() takes it back within NOTE_TTL_S."""
-    if tool not in WEB_TOOLS or not isinstance(arguments, dict):
+    note_origin(session_id, cwd)
+    if tool not in WEB_TOOLS + PROJECT_TOOLS or not isinstance(arguments, dict):
         return
     entry = (time.monotonic(), session_id if isinstance(session_id, str) else None, cwd if isinstance(cwd, str) else None)
     with _LOCK:
