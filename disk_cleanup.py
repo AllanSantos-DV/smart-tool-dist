@@ -1,12 +1,16 @@
 """Removes what Smart Tool left on disk that no registered project needs.
 
 Runs once when the daemon starts, before the project monitor: the registry of projects (a folder that is not a
-project, see project_admission.junk_reason, is never one of them, and each removal is listed in a manifest), write temporaries orphaned by a crash, generations under construction that stopped advancing,
-the `.previous` copies older versions kept of a replaced generation, index files of projects no longer registered,
-and saved code-graph analyses of index views that no longer exist. Source files are never touched."""
+project or no longer exists, see project_admission.junk_reason, is never one of them, and each removal is listed in a
+manifest with what re-registering the project needs), write temporaries orphaned by a crash, generations under
+construction that stopped advancing, the `.previous` copies older versions kept of a replaced generation, index files
+of projects no longer registered, and saved code-graph analyses of index views that no longer exist. Source files are
+never touched."""
+import datetime
 import json
 import os
 import re
+import sqlite3
 import time
 
 import atomic_io
@@ -26,6 +30,10 @@ _STATE_FILE = re.compile(r"([0-9a-f]{16})(?:\.v-[0-9a-f]{16})?(?:\.previous|\.bu
 _BUILDING = re.compile(r"[0-9a-f]{16}(?:\.v-[0-9a-f]{16})?\.building-[0-9a-f]+\.sqlite3")
 _PREVIOUS = re.compile(r"[0-9a-f]{16}(?:\.v-[0-9a-f]{16})?\.previous\.sqlite3")
 _TEMPORARY = re.compile(r".+" + re.escape(atomic_io.TMP_SUFFIX) + r"[0-9a-f]{32}")
+_VIEW_INDEX = re.compile(r"([0-9a-f]{16})(?:\.v-[0-9a-f]{16})?\.sqlite3")
+_SCOPE_FILE = re.compile(r"([0-9a-f]{16})(?:\.v-[0-9a-f]{16})?\.scope\.json")
+REGISTRATION_KEYS = ("watch", "paused", "enabled", "update_mode", "created_at", "last_indexed")
+SCOPE_KEYS = ("include", "exclude", "user_exclude", "manual")
 
 
 def _remove(path, report):
@@ -36,11 +44,15 @@ def _remove(path, report):
     report["bytes"] += size
 
 
+def _project_keys(root):
+    return {project_identity.project_id(root), *project_identity.legacy_ids(root)}
+
+
 def remove_project_files(root, report=None):
     """Deletes every index, vector cache, scope and saved graph of the project at root (all Git views, the current and
     legacy ids); returns the report {files, bytes}. Raises RuntimeError when another process holds one open."""
     report = report if report is not None else {"files": [], "bytes": 0}
-    keys = {project_identity.project_id(root), *project_identity.legacy_ids(root)}
+    keys = _project_keys(root)
     for name in sorted(os.listdir(indexer.INDEX_DIR)):
         match = _STATE_FILE.fullmatch(name)
         if not match or match.group(1) not in keys:
@@ -74,12 +86,50 @@ def junk_projects(errors=None):
     return found
 
 
+def recovery_record(entry):
+    """What it takes to register the junk project again, read before its index files go: the junk entry with its
+    registration settings, the files and chunks its indexes hold (summed over Git views, `views` counts them) and the
+    scope of each view. An index that cannot be read is listed in `count_errors`, never counted as empty."""
+    project = project_store.get(entry["id"]) or {}
+    keys = _project_keys(entry["root"])
+    record = {**entry, "settings": {key: project[key] for key in REGISTRATION_KEYS if key in project},
+              "indexed_files": 0, "chunks": 0, "views": 0, "scopes": {}, "count_errors": []}
+    for name in sorted(os.listdir(indexer.INDEX_DIR)):
+        path = os.path.join(indexer.INDEX_DIR, name)
+        if (match := _VIEW_INDEX.fullmatch(name)) and match.group(1) in keys:
+            try:
+                conn = indexer._readonly(path)
+                try:
+                    record["indexed_files"] += conn.execute("SELECT count(*) FROM manifest").fetchone()[0]
+                    record["chunks"] += conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
+                    record["views"] += 1
+                finally:
+                    conn.close()
+            except (OSError, sqlite3.Error) as exc:
+                record["count_errors"].append(f"{name}: {exc}")
+        elif (match := _SCOPE_FILE.fullmatch(name)) and match.group(1) in keys:
+            try:
+                with open(path, encoding="utf-8") as stream:
+                    scope = json.load(stream)
+                record["scopes"][name] = {key: scope[key] for key in SCOPE_KEYS if key in scope}
+            except (OSError, ValueError) as exc:
+                record["count_errors"].append(f"{name}: {exc}")
+    return record
+
+
 def remove_junk(entries, log=None):
     """Unregisters the given junk projects and deletes their index files (never the project's own files), then writes
-    a manifest of what was removed and what was kept; returns {removed, kept, files, bytes, manifest}. A project whose
-    index another process holds open is kept and listed with the reason."""
+    a manifest of what was removed (the `recovery_record` of each, with the index files, bytes freed and the time) and
+    what was kept; returns {removed, kept, files, bytes, manifest}. The manifest is first written with every project
+    as `pending`, before anything is deleted, so a crash half way still leaves what is needed to recover. A project
+    whose index another process holds open is kept and listed with the reason."""
     log = log or (lambda message: None)
     report = {"removed": [], "kept": [], "files": 0, "bytes": 0, "manifest": None}
+    records = {entry["id"]: recovery_record(entry) for entry in entries}
+    if records:
+        os.makedirs(MANIFEST_DIR, exist_ok=True)
+        report["manifest"] = os.path.join(MANIFEST_DIR, time.strftime("junk-%Y%m%d-%H%M%S.json"))
+        _write_manifest(report["manifest"], {"pending": list(records.values()), "removed": [], "kept": []})
     for entry in entries:
         files = {"files": [], "bytes": 0}
         try:
@@ -89,16 +139,18 @@ def remove_junk(entries, log=None):
             log(f"disk cleanup: {entry['root']} kept: {exc}")
             continue
         project_store.forget(entry["id"])
-        report["removed"].append({**entry, "index_files": files["files"], "bytes": files["bytes"]})
+        report["removed"].append({**records[entry["id"]], "index_files": files["files"], "bytes": files["bytes"],
+                                  "removed_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds")})
         report["files"] += len(files["files"])
         report["bytes"] += files["bytes"]
         log(f"disk cleanup: unregistered {entry['root']}: {entry['reason']}")
-    if report["removed"] or report["kept"]:
-        os.makedirs(MANIFEST_DIR, exist_ok=True)
-        report["manifest"] = os.path.join(MANIFEST_DIR, time.strftime("junk-%Y%m%d-%H%M%S.json"))
-        atomic_io.write_text(report["manifest"], json.dumps(
-            {"removed": report["removed"], "kept": report["kept"], "source_files_touched": False}, indent=1))
+    if report["manifest"]:
+        _write_manifest(report["manifest"], {"removed": report["removed"], "kept": report["kept"]})
     return report
+
+
+def _write_manifest(path, body):
+    atomic_io.write_text(path, json.dumps({**body, "source_files_touched": False}, indent=1))
 
 
 def sweep(extra_roots, log=None):

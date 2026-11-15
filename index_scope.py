@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import paths
+import re
 import time
 
 import atomic_io
@@ -125,6 +126,151 @@ def always_excluded(name):
     folded = name.casefold()
     return any(fnmatch.fnmatch(folded, pattern.casefold()) for pattern in _ALWAYS_EXCLUDE)
 
+
+def venv_name(name):
+    """Whether a folder name marks a Python virtual environment: it holds `venv` (venv, venv-ov, gate-venv, .devenv)."""
+    return "venv" in name.casefold()
+
+
+def is_venv_folder(path):
+    """Whether the folder at path is a Python virtual environment, by its name (`venv_name`) or because it holds
+    `pyvenv.cfg`, which every virtual environment writes whatever its folder is called."""
+    return venv_name(os.path.basename(path)) or os.path.isfile(os.path.join(path, "pyvenv.cfg"))
+
+
+def _is_exempt(rel_path, bases):
+    """Whether rel_path is an include base or a folder above one: the scope names it, so no exclusion rule judges it."""
+    folded = rel_path.casefold()
+    return any(base.casefold() == folded or base.casefold().startswith(folded + "/") for base in bases if base)
+
+
+def _inside_venv(root, parts, is_dir, bases):
+    """Whether a folder on the way to the path (its last part counts only when it is a folder) is a virtual
+    environment, leaving out the folders `_is_exempt` spares."""
+    for depth in range(1, (len(parts) if is_dir else len(parts) - 1) + 1):
+        if not _is_exempt("/".join(parts[:depth]), bases) and is_venv_folder(os.path.join(root, *parts[:depth])):
+            return True
+    return False
+
+
+def _gitignore_source(pattern):
+    """Regular expression source of one `.gitignore` pattern, already stripped of `!` and the closing `/`, matched
+    against a path relative to the folder of the file: `*` and `?` stay inside a name, `**` crosses folders, `[...]`
+    is a class, `\\x` is a literal, and a pattern with a `/` is anchored to that folder."""
+    anchored = "/" in pattern
+    pattern = pattern.lstrip("/")
+    out, index = [], 0
+    while index < len(pattern):
+        char = pattern[index]
+        if pattern.startswith("**/", index):
+            out.append("(?:.*/)?")
+            index += 3
+            continue
+        if pattern.startswith("**", index):
+            out.append(".*")
+            index += 2
+            continue
+        close = pattern.find("]", index + 2) if char == "[" else -1
+        if char == "*":
+            out.append("[^/]*")
+        elif char == "?":
+            out.append("[^/]")
+        elif close != -1:
+            body = pattern[index + 1:close]
+            out.append("[" + ("^" + body[1:] if body.startswith("!") else body).replace("\\", "\\\\") + "]")
+            index = close
+        elif char == "\\" and index + 1 < len(pattern):
+            index += 1
+            out.append(re.escape(pattern[index]))
+        else:
+            out.append(re.escape(char))
+        index += 1
+    return ("" if anchored else "(?:.*/)?") + "".join(out)
+
+
+def _gitignore_runs(text):
+    """The rules of one `.gitignore` as runs of consecutive rules with the same polarity, in file order:
+    `[(negated, regex_for_any_entry, regex_for_files_or_None)]`. A pattern that is not a valid glob matches nothing,
+    as in Git."""
+    flags = re.IGNORECASE if os.name == "nt" else 0
+    runs = []
+    for raw in text.splitlines():
+        line = raw if raw.endswith("\\ ") else raw.rstrip(" \t")
+        if not line or line.startswith("#"):
+            continue
+        negated = line.startswith("!")
+        line = line[1:] if negated else line
+        dir_only = line.endswith("/")
+        line = line.rstrip("/")
+        if not line:
+            continue
+        source = _gitignore_source(line)
+        try:
+            re.compile(source, flags)
+        except re.error:
+            continue
+        if not runs or runs[-1][0] != negated:
+            runs.append((negated, [], []))
+        runs[-1][1].append(source)
+        if not dir_only:
+            runs[-1][2].append(source)
+
+    def combine(sources):
+        return re.compile("(?:" + "|".join(f"(?:{source})" for source in sources) + r")\Z", flags) if sources else None
+
+    return [(negated, combine(anywhere), combine(files)) for negated, anywhere, files in runs]
+
+
+class GitIgnore:
+    """What the `.gitignore` files inside a project folder ignore: the file of each folder applies to that folder and
+    below, a deeper file overrides a shallower one, and within a file the last matching rule wins. Read from the
+    project folder only (not Git's global excludes, `.git/info/exclude` or the files of a repository above the
+    project), a file is read when first needed and again after `TTL_S`, so one instance can serve a burst of file
+    events without going stale."""
+
+    TTL_S = 5
+
+    def __init__(self, root):
+        self.root = root
+        self._folders = {}
+
+    def _runs(self, folder):
+        now = time.monotonic()
+        hit = self._folders.get(folder)
+        if hit and now - hit[0] < self.TTL_S:
+            return hit[1]
+        try:
+            with open(os.path.join(self.root, folder, ".gitignore"), encoding="utf-8-sig", errors="replace") as stream:
+                text = stream.read()
+        except (FileNotFoundError, NotADirectoryError):
+            text = ""
+        runs = _gitignore_runs(text)
+        self._folders[folder] = (now, runs)
+        return runs
+
+    def matches(self, rel_path, is_dir):
+        """Whether the rules ignore this entry by themselves, which is the question during a walk that never enters an
+        ignored folder. `rel_path` uses `/`."""
+        parts = rel_path.split("/")
+        verdict = False
+        for depth in range(len(parts)):
+            target = "/".join(parts[depth:])
+            for negated, anywhere, files in self._runs("/".join(parts[:depth])):
+                pattern = anywhere if is_dir else files
+                if pattern and pattern.match(target):
+                    verdict = not negated
+        return verdict
+
+    def ignored(self, rel_path, is_dir, bases=()):
+        """Whether the entry or any folder above it is ignored, for a path met out of a walk (a file event). The
+        include `bases` and the folders above them are spared: the scope names them."""
+        parts = rel_path.split("/")
+        for depth in range(1, len(parts) + 1):
+            sub = "/".join(parts[:depth])
+            if not _is_exempt(sub, bases) and self.matches(sub, depth < len(parts) or is_dir):
+                return True
+        return False
+
 # Versão do contrato de decisão de escopo. Mudar o que é perguntado ao decisor exige
 # incrementar: sem isso, um repositório com escopo já cacheado nunca é reavaliado, porque
 # `needs_rescan` só olha diretório de topo novo.
@@ -194,6 +340,7 @@ def _top_level_dirs(root):
         and not always_excluded(name)
         and name not in skipped
         and os.path.isdir(os.path.join(root, name))
+        and not is_venv_folder(os.path.join(root, name))
         and _within_root(root, os.path.join(root, name))
     )
 
@@ -259,6 +406,7 @@ def _structure(root, max_dirs=1500, keep=None):
     found = []
     for current, dirs, _files in os.walk(root):
         dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not always_excluded(d)
+                         and not is_venv_folder(os.path.join(current, d))
                          and _within_root(root, os.path.join(current, d))
                          and (keep is None or keep(os.path.relpath(os.path.join(current, d), root).replace(os.sep, "/"))))
         for name in dirs:
@@ -324,6 +472,7 @@ def _inspect_directory(root, rel_path, max_files=4000, sample_size=15, top_ext=1
     for dirpath, _dirnames, filenames in os.walk(base_full):
         _dirnames[:] = [name for name in _dirnames if not name.startswith(".")
                        and not always_excluded(name)
+                       and not is_venv_folder(os.path.join(dirpath, name))
                        and _within_root(root, os.path.join(dirpath, name))]
         depth = os.path.relpath(dirpath, base_full).count(os.sep) + (0 if dirpath == base_full else 1)
         max_depth = max(max_depth, depth)
@@ -387,8 +536,10 @@ def _build_scope_prompt(root, ambiguous_dirs, root_files, doc_context):
         "documentation.\n\n"
         "`include` lists folder paths relative to the root, without wildcards; a folder you leave out of `include` is "
         "not indexed, and an empty `include` indexes only the loose root files. "
-        "Include sources useful for search even if they are gitignored (e.g. docs/, README, "
-        "ADRs). Java, Angular, HTML/CSS, plain text and Markdown are supported sources. "
+        "Whatever .gitignore ignores, and every folder named like *venv* or holding pyvenv.cfg (a Python virtual "
+        "environment), is not indexed, unless `include` names that folder or file: name the gitignored ones that are "
+        "useful for search (e.g. docs/, ADRs, CLAUDE.md). "
+        "Java, Angular, HTML/CSS, plain text and Markdown are supported sources. "
         "DOCX, PPTX, XLSX and PDF documents are supported through bounded local text extraction; do not exclude "
         "useful Office or PDF documentation merely because its container is binary. "
         "Exclude directories that inspection shows are generated artifacts or "
@@ -555,15 +706,19 @@ def scope_filter(scope, root=None):
                                set(mechanical_excludes(root) if root else ()) | _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
     whole = "" in bases
     nested = _nested_matcher(root)
+    ignore = GitIgnore(root) if root else None
 
     def keep(rel_path):
         rel_path = rel_path.replace("\\", "/")
         parts = rel_path.split("/")
         if matcher(rel_path) or is_hidden(rel_path) or nested(rel_path):
             return False
-        if whole or len(parts) == 1:
+        if not (whole or len(parts) == 1 or any(rel_path == base or rel_path.startswith(base + "/") for base in bases)):
+            return False
+        if not root:
             return True
-        return any(rel_path == base or rel_path.startswith(base + "/") for base in bases)
+        is_dir = os.path.isdir(os.path.join(root, *parts))
+        return not (_inside_venv(root, parts, is_dir, bases) or ignore.ignored(rel_path, is_dir, bases))
 
     return keep
 
@@ -581,6 +736,7 @@ def resolve_included_files(root, scope, cancel_check=None):
     excluded = _exclude_matcher(set(scope.get("exclude") or []) | set(scope.get("user_exclude") or []) |
                                 set(mechanical_excludes(root)) | _ALWAYS_EXCLUDE | _ALWAYS_EXCLUDE_FILES)
     nested = _nested_matcher(root)
+    ignore = GitIgnore(root)
 
     def matcher(rel_path):
         return excluded(rel_path) or nested(rel_path)
@@ -589,7 +745,7 @@ def resolve_included_files(root, scope, cancel_check=None):
     def walk_error(error):
         raise OSError(f"Could not list {error.filename} ({error.strerror}); try again when it is accessible.") from error
     if "" not in include:
-        files.extend(_root_level_files(root, matcher))
+        files.extend(_root_level_files(root, lambda rel: matcher(rel) or ignore.matches(rel, False)))
     for base in include:
         base_full = os.path.join(root, base) if base else root
         # `include` vem de tool call de um LLM cujo prompt embute documentação do
@@ -613,12 +769,15 @@ def resolve_included_files(root, scope, cancel_check=None):
                 d for d in dirnames
                 if not d.startswith(".")
                 and not matcher(f"{rel_dir}/{d}" if rel_dir else d)
+                and not is_venv_folder(os.path.join(dirpath, d))
+                and not ignore.matches(f"{rel_dir}/{d}" if rel_dir else d, True)
                 # `os.walk` não desce em symlink de diretório, mas `os.path.islink()` é
                 # False para junction do Windows (`mklink /J`, sem admin) — e desce nela.
                 and _within_root(root, os.path.join(dirpath, d))
             ]
             for name in filenames:
                 rel_path = f"{rel_dir}/{name}" if rel_dir else name
-                if not name.startswith(".") and not matcher(rel_path) and _within_root(root, os.path.join(root, rel_path)):
+                if (not name.startswith(".") and not matcher(rel_path) and not ignore.matches(rel_path, False)
+                        and _within_root(root, os.path.join(root, rel_path))):
                     files.append(rel_path)
     return sorted(set(files))

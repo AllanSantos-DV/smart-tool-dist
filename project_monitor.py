@@ -35,6 +35,7 @@ def relevant_path(path):
     parts = path.replace("\\", "/").strip("/").split("/")
     return bool(parts and all(part not in ("", ".", "..") and not part.startswith(".")
                               and not index_scope.always_excluded(part) for part in parts)
+                and not any(index_scope.venv_name(part) for part in parts[:-1])
                 and not index_scope.is_transient(parts[-1]))
 
 

@@ -3,14 +3,17 @@
 A project is the folder where the agent session started (or the repository that holds it), never a folder an agent
 merely navigated to: personal folders, drive roots, application data, system folders, build output and a Java home
 are refused, a subfolder resolves to the registered project or the repository that holds it, and a session whose
-origin is known only indexes its own project. Registered folders that break these rules are junk (`junk_reason`)."""
+origin is known only indexes its own project. Registered folders that break these rules, and registered folders that no
+longer exist, are junk (`junk_reason`)."""
 import os
 import tempfile
 
 import project_identity
 import project_store
+import redirect_rule
 
 PERSONAL_NAMES = ("Desktop", "Documents", "Downloads", "Pictures", "Videos", "Music")
+GONE_REASON = "its folder no longer exists"
 TOOL_FOLDERS = frozenset(("bin", "obj", "node_modules", ".git", "site-packages", "__pycache__"))
 POSIX_SYSTEM = ("/usr", "/bin", "/sbin", "/etc", "/var", "/opt", "/lib", "/proc", "/sys", "/dev", "/boot")
 
@@ -100,6 +103,17 @@ def refusal(root):
     return None
 
 
+def temporary_refusal(root):
+    """Why a new project cannot live in root, or None: a copy made in the system's temporary folder for a measurement
+    or a build is gone soon and would leave its index behind. Folders of `SMART_TOOL_SCRATCH` stay allowed, and a
+    registered project is not asked (see `admit`)."""
+    norm = _norm(project_identity.display_root(root))
+    if _inside(norm, _norm(project_identity.display_root(redirect_rule.system_temp()))) and not any(
+            _inside(norm, base) for base in _env_folders("SMART_TOOL_SCRATCH")):
+        return "inside the system temporary folder"
+    return None
+
+
 def repository_root(path):
     """The nearest folder at or above path that holds `.git` and could be a project, or None. A repository the rules
     refuse (a dotfiles repository in the home folder) is not a project to resolve to."""
@@ -134,7 +148,7 @@ def admit(path, origin=None):
     root, registered = resolve(path)
     if registered:
         return root
-    reason = refusal(root)
+    reason = refusal(root) or temporary_refusal(root)
     if reason:
         raise ValueError(f"Not indexing {root}: it is {reason}. A project is the folder where the session started; "
                          "pass that folder as project_root.")
@@ -151,10 +165,29 @@ def admit(path, origin=None):
     return root
 
 
+def folder_gone(root):
+    """Whether root is confirmed missing, not merely unreachable. Both must hold: looking at root fails with "does not
+    exist", and the drive or network share root it sits on (`D:\\`, `\\\\server\\share\\`, `/`) is present, so the
+    missing part is below a mounted volume. A drive that is not mounted, a share that is offline and any other error
+    (access denied, device not ready) are not "gone": the folder may come back."""
+    try:
+        os.stat(root)
+        return False
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    except OSError:
+        return False
+    drive = os.path.splitdrive(os.path.abspath(root))[0]
+    return os.path.isdir(drive + os.sep)
+
+
 def junk_reason(project):
-    """Why a registered project was never a project, or None: its folder is refused by `refusal`, it holds two or
-    more projects, or it is a subfolder of a repository or of another registered project."""
+    """Why a registered project was never a project, or None: its folder no longer exists (`folder_gone`), its folder
+    is refused by `refusal`, it holds two or more projects, or it is a subfolder of a repository or of another
+    registered project. A project whose folder exists is judged by the last three rules only."""
     root = project["root"]
+    if folder_gone(root):
+        return GONE_REASON
     if not os.path.isdir(root):
         return None
     reason = refusal(root)

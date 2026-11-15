@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.78 - beta
+
+- A registered project whose folder no longer exists is junk: `project_manage action=junk` lists it and the junk
+  path (confirm, and the cleanup at daemon start) removes its index files, never any source file. The manifest
+  (`junk-manifests/junk-<time>.json`) is written before deleting and records the project, its registration settings,
+  counts, scope per view and the bytes freed. A folder is gone only when its volume root exists, so a project on a
+  drive or share that is not connected is kept. Tests: `tests/test_project_admission.py`.
+- The index scope skips Python virtual environments (a folder holding `pyvenv.cfg` or with `venv` in its name) at any
+  depth and honors the `.gitignore` files inside the project; a folder named in the scope is still indexed. A new
+  project under the system temporary folder is refused with the reason. Tests: `tests/test_scope_rules.py`.
+
 ## 0.9.77 - beta
 
 - The Claude Code hooks Smart Tool writes name their owner and the file that holds their port: the two HTTP hook URLs
