@@ -242,6 +242,15 @@ def _command(client):
     return f"{_shell_safe(sys.executable)} {_shell_safe(HOOK_SCRIPT)} --client {client} {HOOK_ORIGIN}"
 
 
+def _port_file():
+    """The daemon's announcement file as `~/<path>`, the form the hook audit reads to know the URL port is managed."""
+    relative = os.path.relpath(daemon_launcher.REGISTRY_PATH, os.path.expanduser("~")).replace("\\", "/")
+    if relative.startswith(".."):
+        raise ValueError(f"The daemon announcement ({daemon_launcher.REGISTRY_PATH}) is outside the home folder; "
+                         "the hook cannot name it as its port file.")
+    return f"~/{relative}"
+
+
 def _handler(client, route=HTTP_PATH, timeout=HTTP_TIMEOUT_S):
     """Claude Code posts the payload straight to the warm daemon (`type: "http"`, no process per tool call); other
     clients run the thin command that forwards to the PreToolUse route."""
@@ -249,7 +258,8 @@ def _handler(client, route=HTTP_PATH, timeout=HTTP_TIMEOUT_S):
         registry = daemon_launcher.read_registry()
         if not registry or not registry.get("url"):
             raise ValueError("Smart Tool daemon has no registered URL; start the daemon before installing the hook.")
-        return {"type": "http", "url": f"{registry['url']}{route}?client={client}", "timeout": timeout}
+        query = f"client={client}&hook-origin={OWNER}&port-file={_port_file()}"
+        return {"type": "http", "url": f"{registry['url']}{route}?{query}", "timeout": timeout}
     return {"type": "command", "command": _command(client), "timeout": timeout}
 
 

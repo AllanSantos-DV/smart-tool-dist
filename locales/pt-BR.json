@@ -860,6 +860,7 @@
   "Its {0} entry does not cover {1}.": "A entrada {0} dele não cobre {1}.",
   "It calls {0} instead of {1}.": "Ele chama {0} em vez de {1}.",
   "Its tool list is ordered or written differently from the current one.": "A lista de ferramentas dele está em outra ordem ou escrita de outro jeito que a atual.",
+  "The daemon announcement ({0}) is outside the home folder; the hook cannot name it as its port file.": "O anúncio do daemon ({0}) está fora da pasta do usuário; o hook não consegue nomeá-lo como seu arquivo de porta.",
   "Path contains a space and has no 8.3 short name ({0}); the hook was not installed.": "O caminho tem um espaço e não tem nome curto 8.3 ({0}); o hook não foi instalado.",
   "{0} does not have the expected format (object with 'hooks'); nothing was changed.": "{0} não tem o formato esperado (objeto com 'hooks'); nada foi alterado.",
   "{0} does not appear in {1} after writing; the file was restored.": "{0} não aparece em {1} depois de gravar; o arquivo foi restaurado.",

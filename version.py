@@ -1,7 +1,7 @@
 """Single source of the Smart Tool version and of the User-Agent sent to public APIs."""
 import re
 
-VERSION = "0.9.76"
+VERSION = "0.9.77"
 _CONTACT_RE = re.compile(r"^(?:[^\s@()<>;]+@[^\s@()<>;]+\.[^\s@()<>;]+|https?://[^\s()<>;]+)$")
 
 

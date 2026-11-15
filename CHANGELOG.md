@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.77 - beta
+
+- The Claude Code hooks Smart Tool writes name their owner and the file that holds their port: the two HTTP hook URLs
+  carry `hook-origin=smart-tool` and `port-file=~/.smart-tool/data/daemon.json` (the daemon's own announcement), so the
+  hook audit sees the owner and a managed port instead of a literal one, and the daemon's port move rewrites the URLs
+  with the parameters kept. An older entry shows as outdated and the update rewrites it. Tests:
+  `tests/test_endpoint_sync.py`.
+
 ## 0.9.76 - beta
 
 - A project is only the folder where the agent session started. A new project is refused, with the reason and nothing
