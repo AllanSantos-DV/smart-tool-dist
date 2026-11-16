@@ -143,7 +143,9 @@ def impact(root, symbol, view_id=None, depth=3, limit=30):
         "diagnostics": diagnostics,
         "view": (data.get("selected") or {}).get("label"),
         "note": NOTE + (f" {len(found)} definitions share this name; each entry says which one ('of'); pass "
-                        "path::name to keep one." if label else ""),
+                        "path::name to keep one." if label else "")
+                + (f" {code_graph.left_out_sentence(data)} Callers and tests beyond the cut are not listed." if data["truncated"] else ""),
+        **({"left_out": data["left_out"]} if data["truncated"] else {}),
     }
 
 

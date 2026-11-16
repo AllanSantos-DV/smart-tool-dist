@@ -352,7 +352,7 @@ def _default_alias(spec):
 
 def analyze(sources, limits=None):
     """Imports, symbols (functions, methods, types) and resolved calls of the Go files in sources (path -> text).
-    limits caps symbols and edges ({'symbols': n, 'edges': n}); anything left out sets 'truncated'."""
+    limits caps symbols and edges ({'symbols': n, 'edges': n}); 'left_out' counts the symbols and calls dropped at the caps."""
     limits = limits or {}
     max_symbols, max_edges = limits.get("symbols", float("inf")), limits.get("edges", float("inf"))
     go_files = {path: text for path, text in sources.items() if path.endswith(".go")}
@@ -428,7 +428,7 @@ def _symbols_and_calls(files, max_symbols, max_edges):
         target = imports_of[path].get(alias)
         return (target, name) if target else None
 
-    index, results, symbols, calls, unresolved, truncated = {}, {}, [], [], [], False
+    index, results, symbols, calls, unresolved, left_out = {}, {}, [], [], [], {"symbols": 0, "edges": 0}
     for path, info in files.items():
         tables = index.setdefault(key_of(path), {"funcs": {}, "methods": {}, "types": {}, "fields": {},
                                                  "embedded": {}})
@@ -449,7 +449,7 @@ def _symbols_and_calls(files, max_symbols, max_edges):
                 symbol_id = f"{symbol_id}@{decl['start']}"
             seen.add(symbol_id)
             if len(symbols) >= max_symbols:
-                truncated = True
+                left_out["symbols"] += 1
                 continue
             symbol = {"id": symbol_id, "path": path, "name": name, "kind": decl["kind"], "language": "go",
                       "start_line": decl["start"], "end_line": decl["end"]}
@@ -484,7 +484,7 @@ def _symbols_and_calls(files, max_symbols, max_edges):
                             calls.append({"source": decl["symbol"]["id"], "target": call["target"]["id"],
                                           "line": call["line"], "kind": "reference", "resolution": "static"})
                         else:
-                            truncated = True
+                            left_out["edges"] += 1
                         continue
                     if call["target"] is None:
                         if len(unresolved) < 1000:
@@ -494,8 +494,8 @@ def _symbols_and_calls(files, max_symbols, max_edges):
                         calls.append({"source": decl["symbol"]["id"], "target": call["target"]["id"],
                                       "line": call["line"], "kind": "call", "resolution": "static"})
                     else:
-                        truncated = True
-    return {"symbols": symbols, "calls": calls, "unresolved": unresolved, "truncated": truncated}
+                        left_out["edges"] += 1
+    return {"symbols": symbols, "calls": calls, "unresolved": unresolved, "left_out": left_out}
 
 
 def _body_calls(path, tokens, decl, index, imported, own, results, resolve_type, member):

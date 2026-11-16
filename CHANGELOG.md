@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.79 - beta
+
+- A graph cut by its limits says what it left out: `left_out` with the files, symbols and call or import relations
+  dropped, and a sentence in the note, in the graph answers (`project_manage action=graph`), `layers`, `docs generate`,
+  `duplicates`, the affected tests and the PR impact. Files skipped by the 24 MB analysis text limit count with the
+  files over the file limit. The graph cache is rebuilt once. The limits stay as they are: doubling them took the
+  build of a 6,133-file project from 23 s to 57 s and its memory from 0.7 GB to 1.4 GB
+  (`docs/research/2026-11-15-tetos-do-grafo-medidos.md`). The gateway rerank gain over the hybrid order was measured on
+  the gold set (first place 35 to 39 of 43, MRR@5 0.868 to 0.919, 1.4 s median per search), so rerank stays optional
+  (`docs/research/2026-11-15-ganho-do-rerank-medido.md`). Tests: `tests/test_code_graph_limits.py`,
+  `tests/test_affected_tests.py`, `tests/test_pr_impact.py`.
+
 ## 0.9.78 - beta
 
 - A registered project whose folder no longer exists is junk: `project_manage action=junk` lists it and the junk

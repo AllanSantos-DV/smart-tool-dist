@@ -413,6 +413,10 @@ def affected(root, base="HEAD", limit=30, view_id=None):
         "view": (data.get("selected") or {}).get("label"),
         "note": NOTE,
     }
+    if data.get("truncated"):
+        result["truncated"] = True
+        result["left_out"] = data["left_out"]
+        result["note"] += " " + code_graph.left_out_sentence(data) + " Tests beyond the cut are not listed."
     if len(ordered) > limit:
         result["omitted"] = {"tests": len(ordered) - limit}
     if not changes:

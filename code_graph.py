@@ -23,7 +23,7 @@ import web_document_graph
 import code_graph_go
 import document_text
 
-VERSION = 5
+VERSION = 6
 SOURCE_EXTENSIONS = ('.py','.go','.mod','.java','.js','.jsx','.ts','.tsx','.mjs','.cjs','.mts','.cts','.json','.html','.htm','.css','.scss','.sass','.less','.md','.markdown')
 MAX_OVERLAY_BYTES = 5 * 1024 * 1024
 MAX_FILES = 3000
@@ -71,9 +71,10 @@ def _snapshot(path):
         columns = {row[1] for row in conn.execute('PRAGMA table_info(manifest)')}
         size = 'm.size' if 'size' in columns else 'NULL'
         mtime = 'm.mtime_ns' if 'mtime_ns' in columns else 'NULL'
-        records = conn.execute(f'SELECT m.path,m.hash,{size},{mtime},count(c.id),max(c.end_line) FROM manifest m LEFT JOIN chunks c ON c.path=m.path GROUP BY m.path ORDER BY m.path LIMIT ?', (MAX_FILES+1,)).fetchall()
-        files, sources, diagnostics, used = [], {}, [], 0
-        for original, digest, byte_size, stamp, chunks, line_count in records[:MAX_FILES]:
+        records = conn.execute(f'SELECT m.path,m.hash,{size},{mtime},count(c.id),max(c.end_line) FROM manifest m LEFT JOIN chunks c ON c.path=m.path GROUP BY m.path ORDER BY m.path LIMIT ?', (MAX_FILES,)).fetchall()
+        total = conn.execute('SELECT count(*) FROM manifest').fetchone()[0]
+        files, sources, diagnostics, used, over_text = [], {}, [], 0, 0
+        for original, digest, byte_size, stamp, chunks, line_count in records:
             file_path = original.replace('\\','/')
             record = {'id':file_path,'path':file_path,'hash':digest,'size':byte_size,'mtime_ns':stamp,
                       'chunks':chunks,'lines':line_count or 0,'group':posixpath.dirname(file_path) or '(root)',
@@ -87,10 +88,11 @@ def _snapshot(path):
                 diagnostics.append({'path':file_path,'reason':error})
             elif used+len(text) > MAX_TEXT:
                 diagnostics.append({'path':file_path,'reason':'Content limit for this analysis reached.'})
+                over_text += 1
             else:
                 used += len(text)
                 sources[file_path] = text
-        return files, sources, diagnostics, len(records)>MAX_FILES
+        return files, sources, diagnostics, max(total-MAX_FILES, 0) + over_text
     finally:
         conn.close()
 
@@ -247,7 +249,8 @@ def _python_graph(sources):
         visit_scope(tree)
         if used_module:symbols.append(module)
     return {'symbols':symbols,'dependencies':dependencies[:MAX_EDGES],'calls':calls,'unresolved':unresolved,
-            'diagnostics':diagnostics,'parsed':list(trees),'truncated':any(dropped.values()) or len(dependencies)>MAX_EDGES}
+            'diagnostics':diagnostics,'parsed':list(trees),
+            'left_out':{'symbols':dropped['symbols'],'edges':dropped['calls']+max(len(dependencies)-MAX_EDGES,0)}}
 
 
 NODE_HEAP_MB = (1024, 4096)
@@ -298,15 +301,22 @@ def _analyze(path):
     return _analyze_sources(*_snapshot(path))
 
 
-def _analyze_sources(files,sources,diagnostics,truncated):
+def _analyze_sources(files,sources,diagnostics,files_left_out):
+    """Analyzes the sources of one snapshot. `left_out` counts what the limits cut: files the snapshot never read
+    (files_left_out), symbols and call or import occurrences each analyzer dropped at its own cap, and what the merged
+    graph drops at the global caps (symbols past MAX_SYMBOLS, calls whose endpoint was dropped, relations past MAX_EDGES).
+    The counts are lower bounds: what lies inside left-out files, and the calls made inside functions an analyzer
+    dropped, are never seen and not counted."""
     merged={'symbols':[],'dependencies':[],'calls':[],'unresolved':[],'diagnostics':diagnostics,'parsed':[]}
+    left_out={'files':files_left_out,'symbols':0,'edges':0}
     retryable=False
     for output in (_python_graph(sources),_javascript_graph(sources,[f['path'] for f in files]),_java_graph(sources),code_graph_go.analyze(sources,ANALYZER_LIMITS),web_document_graph.analyze(sources,[f['path'] for f in files])):
         for key in merged:merged[key].extend(output.get(key,[]))
-        truncated |= output.get('truncated',False)
+        for kind,count in output.get('left_out',{}).items():left_out[kind]+=count
         retryable |= output.get('retryable',False)
-    truncated |= len(merged['symbols'])>MAX_SYMBOLS
-    by_id={sym['id']:sym for sym in merged['symbols'][:MAX_SYMBOLS]}
+    kept_symbols=merged['symbols'][:MAX_SYMBOLS]
+    left_out['symbols']+=len(merged['symbols'])-len(kept_symbols)
+    by_id={sym['id']:sym for sym in kept_symbols}
     # Relações repetidas preservam contagem e locais de chamada sem poluir o desenho.
     def collapse(rows,fields):
         result={}
@@ -316,14 +326,17 @@ def _analyze_sources(files,sources,diagnostics,truncated):
             result[key]['count']+=1
             if len(result[key]['lines'])<20:result[key]['lines'].append(row.get('line'))
         return list(result.values())
+    linked=[r for r in merged['calls'] if r['source'] in by_id and r['target'] in by_id]
+    left_out['edges']+=len(merged['calls'])-len(linked)
     deps=collapse(merged['dependencies'],('source','target','specifier','kind'))
-    calls=collapse([r for r in merged['calls'] if r['source'] in by_id and r['target'] in by_id],('source','target','kind'))
+    calls=collapse(linked,('source','target','kind'))
+    left_out['edges']+=sum(r['count'] for r in deps[MAX_EDGES:])+sum(r['count'] for r in calls[MAX_EDGES:])
     supported=set(merged['parsed'])
     for file in files:file['analysis']='parsed' if file['path'] in supported else 'not_analyzed'
-    return {'files':files,'symbols':merged['symbols'][:MAX_SYMBOLS],
+    return {'files':files,'symbols':kept_symbols,
             'dependencies':deps[:MAX_EDGES],'calls':calls[:MAX_EDGES],
             'unresolved':merged['unresolved'][:1000],'diagnostics':merged['diagnostics'],
-            'truncated':truncated or len(deps)>MAX_EDGES or len(calls)>MAX_EDGES,'retryable':retryable,
+            'truncated':any(left_out.values()),'left_out':left_out,'retryable':retryable,
             'counts':{'files':len(files),'parsed_files':len(supported),'symbols':len(merged['symbols']),
                       'resolved_imports':sum(bool(r['target']) for r in deps),
                       'external_imports':sum(r['resolution']=='external' for r in deps),
@@ -353,13 +366,21 @@ def _focus(data,file_path):
     return data
 
 
+def left_out_sentence(data):
+    """One sentence with how much the analysis limits cut from the graph, or None when nothing was left out."""
+    if not data.get('truncated'):
+        return None
+    left=data['left_out']
+    return (f"Graph cut by analysis limits: {left['files']:,} files, {left['symbols']:,} symbols and {left['edges']:,} call and import relations left out"
+            +' (lower bounds: what lies inside left-out files and functions is not counted).')
+
+
 def _by_file(data):
     by_file={}
     for symbol in data['symbols']:
         by_file.setdefault(symbol['path'],[]).append(symbol)
     parsed={f['path'] for f in data['files'] if f.get('analysis')=='parsed'}
-    note='Graph truncated by analysis limits; some files have no functions.' if data.get('truncated') else None
-    return {'symbols':by_file,'parsed':parsed,'note':note}
+    return {'symbols':by_file,'parsed':parsed,'note':left_out_sentence(data)}
 
 
 def _disk_path(view_path):
@@ -493,6 +514,7 @@ def build(root,view_id=None,storage_id=None,file_path=None,background=False):
                     file['status']='indexed' if (current.st_mtime_ns,current.st_size)==(file['mtime_ns'],file['size']) else 'pending'
                 except OSError:file['status']='missing'
         file.pop('mtime_ns',None)
+    if data['truncated']:data['note']=left_out_sentence(data)
     data.update(views=inventory['views'],selected=inventory['selected'],current_view=inventory['current_view'],
                 message=inventory['message'],read_only=True,source='indexed_snapshot',generated_at=time.time(),
                 limits={'files':MAX_FILES,'symbols':MAX_SYMBOLS,'edges':MAX_EDGES,'display_nodes_default':120},
@@ -601,7 +623,7 @@ def build_overlay(root,changes,view_id=None,shared=False):
     if not inventory['selected']:
         return {**inventory,'symbols':[],'dependencies':[],'calls':[],'diagnostics':[],'counts':{},'files':[]}
     path=inventory['selected']['path'];stat=os.stat(path)
-    files,sources,diagnostics,truncated=_snapshot(path)
+    files,sources,diagnostics,files_left_out=_snapshot(path)
     by_path={f['path']:f for f in files};overlaid=[]
     for rel,status in sorted(changes.items()):
         full=os.path.join(root,rel)
@@ -624,7 +646,7 @@ def build_overlay(root,changes,view_id=None,shared=False):
         if not _ANALYSIS_SLOTS.acquire(timeout=3):
             raise RuntimeError('Two map analyses are in progress. Wait for them to finish and retry.')
         try:
-            cached=_analyze_sources(list(by_path.values()),sources,diagnostics,truncated)
+            cached=_analyze_sources(list(by_path.values()),sources,diagnostics,files_left_out)
         finally:
             _ANALYSIS_SLOTS.release()
         if not cached['retryable']:

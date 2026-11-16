@@ -165,7 +165,7 @@ def summary(rule, graph, read):
     the declared order, 'up' goes against it) and the folders no layer covers.
 
     Parameters: rule (Rule); graph (dict) code graph with 'symbols' and 'calls'; read (callable path -> str or None).
-    Returns: dict with 'layers', 'calls_between', 'unassigned' and 'truncated'.
+    Returns: dict with 'layers', 'calls_between', 'unassigned', 'truncated' and 'left_out' (what the graph limits cut).
     """
     order = {layer["name"]: index for index, layer in enumerate(rule.layers)}
     paths = sorted({s["path"] for s in graph.get("symbols") or []})
@@ -185,7 +185,7 @@ def summary(rule, graph, read):
                               for (a, b), n in sorted(between.items(), key=lambda item: (order[item[0][0]],
                                                                                         order[item[0][1]]))],
             "unassigned": [{"folder": folder, "files": n} for folder, n in unassigned.most_common(MAX_UNASSIGNED)],
-            "unassigned_files": files[None], "truncated": bool(graph.get("truncated"))}
+            "unassigned_files": files[None], "truncated": bool(graph.get("truncated")), "left_out": graph["left_out"]}
 
 
 def report(root, layers=None, confirm=False, view_id=None):
@@ -229,7 +229,7 @@ def report(root, layers=None, confirm=False, view_id=None):
     proposed = suggest(sorted({s["path"] for s in symbols}), read)
     if not proposed:
         return {"saved": False, "rule_path": path, "layers": [], "calls_between": [], "unassigned": [],
-                "truncated": bool(graph.get("truncated")),
+                "truncated": bool(graph.get("truncated")), "left_out": graph["left_out"],
                 "guidance": "No folder or annotation follows a known layer convention; declare the layers yourself "
                             "(name, paths, annotations, highest first) and confirm them."}
     return {"saved": False, "rule_path": path, **summary(Rule(proposed), code, read),

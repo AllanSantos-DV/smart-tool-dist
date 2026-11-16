@@ -690,7 +690,7 @@ def generate(root, view_id=None, limit=30, model=None):
     summary["failed_checks"] = [c for c in validation["checks"] if c["status"] == "fail"]
     return {"validation": summary, "folder": folder, "written": len(files), "removed": [f"{DOCS_DIR}/{r}" for r in removed], **counts,
             "prose_pending_total": len(pending), "prose_pending": pending[:limit], "prose_dropped": dropped[:limit],
-            "truncated": bool(model.graph.get("truncated")),
+            "truncated": bool(model.graph.get("truncated")), "left_out": model.graph["left_out"],
             "extras": sorted(f"{DOCS_DIR}/{rel}" for rel in extras), "index_file": index_file if block is not None else None,
             "guidance": (f"Validation FAILED: {summary['claims_failed']} claim(s) do not hold; read {validation['report']} "
                          "and fix the generator or the code before trusting these pages. " if summary["verdict"] == "fail"

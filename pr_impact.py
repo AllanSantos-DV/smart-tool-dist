@@ -78,6 +78,8 @@ def report(root, base="HEAD", limit=30, view_id=None):
         lines.append("No test reaches the changed code through imports or static calls.")
     if changes["run_all"]:
         lines += ["", "Run the whole suite: " + "; ".join(changes["run_all_reasons"]) + "."]
+    if changes.get("truncated"):
+        lines += ["", changes["note"]]
     return {"base": base, "markdown": "\n".join(lines).rstrip("\n") + "\n", "touched": touched,
             "callers": {label: (reached[1] if reached else 0) for label, reached in callers.items()},
             "stale_anchors": stale, "stale_note": stale_note, "tests": changes["tests"],

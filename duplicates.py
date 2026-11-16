@@ -184,7 +184,7 @@ def _functions(root, include_tests):
     if inventory.get("message"):
         notes.append(inventory["message"])
     if graph.get("truncated"):
-        notes.append("Graph truncated by analysis limits; some functions were left out.")
+        notes.append(code_graph.left_out_sentence(graph))
     if graph.get("retryable"):
         notes.append("Partial analysis: " + "; ".join(d.get("reason", "") for d in graph.get("diagnostics", [])[:2]))
     return functions, notes, view
