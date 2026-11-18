@@ -8,6 +8,7 @@ longer exist, are junk (`junk_reason`)."""
 import os
 import tempfile
 
+import i18n
 import project_identity
 import project_store
 import redirect_rule
@@ -81,25 +82,25 @@ def refusal(root):
     norm = _norm(real)
     scratch = _scratch_roots()
     if os.path.dirname(real) == real:
-        return "a drive or filesystem root"
+        return i18n.N_("a drive or filesystem root")
     if norm in _personal_folders():
-        return "a personal folder, not a project"
+        return i18n.N_("a personal folder, not a project")
     if norm == scratch[0]:
-        return "the temporary folder"
+        return i18n.N_("the temporary folder")
     home = _norm(os.path.expanduser("~"))
     if _inside(norm, home) and norm != home and os.path.relpath(norm, home).split(os.sep)[0].startswith("."):
-        return "inside a tool's hidden folder in the home folder"
+        return i18n.N_("inside a tool's hidden folder in the home folder")
     if any(_inside(norm, base) for base in _system_roots()):
-        return "a system or application folder"
+        return i18n.N_("a system or application folder")
     if (any(_inside(norm, base) for base in _env_folders("APPDATA", "LOCALAPPDATA", "LOCALAPPDATA_LOW"))
             and not any(_inside(norm, base) for base in scratch)):
-        return "application data"
+        return i18n.N_("application data")
     folder = next((part for part in real.replace("\\", "/").split("/") if part.lower() in TOOL_FOLDERS), None)
     if folder:
-        return f"a build or dependency folder ({folder})"
+        return i18n.N_("a build or dependency folder ({folder})").format(folder=folder)
     java = _env_folders("JAVA_HOME")
     if any(_inside(norm, base) for base in java) or any(_is_java_home(path) for path in _ancestors(real)):
-        return "a Java home"
+        return i18n.N_("a Java home")
     return None
 
 
@@ -110,7 +111,7 @@ def temporary_refusal(root):
     norm = _norm(project_identity.display_root(root))
     if _inside(norm, _norm(project_identity.display_root(redirect_rule.system_temp()))) and not any(
             _inside(norm, base) for base in _env_folders("SMART_TOOL_SCRATCH")):
-        return "inside the system temporary folder"
+        return i18n.N_("inside the system temporary folder")
     return None
 
 
@@ -150,18 +151,19 @@ def admit(path, origin=None):
         return root
     reason = refusal(root) or temporary_refusal(root)
     if reason:
-        raise ValueError(f"Not indexing {root}: it is {reason}. A project is the folder where the session started; "
-                         "pass that folder as project_root.")
+        raise ValueError(i18n.t("Not indexing {root}: it is {reason}. A project is the folder where the session started; "
+                                "pass that folder as project_root.", root=root, reason=i18n.t(reason)))
     if origin:
         home, _held = resolve(origin)
         home_reason = refusal(home)
         if home_reason:
-            raise ValueError(f"Not indexing {root}: the session started in {home}, which is {home_reason}, not a "
-                             "project. Start the session inside the project folder.")
+            raise ValueError(i18n.t("Not indexing {root}: the session started in {home}, which is {home_reason}, not a "
+                                    "project. Start the session inside the project folder.",
+                                    root=root, home=home, home_reason=i18n.t(home_reason)))
         if _inside(_norm(root), _norm(home)):
             return home
-        raise ValueError(f"Not indexing {root}: the session started in the project {home}, and a new project is "
-                         "indexed only from the session that started in it.")
+        raise ValueError(i18n.t("Not indexing {root}: the session started in the project {home}, and a new project is "
+                                "indexed only from the session that started in it.", root=root, home=home))
     return root
 
 

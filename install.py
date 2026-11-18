@@ -15,6 +15,8 @@ from pathlib import Path
 
 import atomic_io
 import client_hooks
+import config
+import i18n
 import paths
 import version
 
@@ -36,7 +38,32 @@ BLOCKED = {"__pycache__", ".token-guard", ".git", ".pytest_cache", ".data", ".ar
            ".scratch", ".memory", "docs", "reports", "site", "design", "release", "npm", ".github", "AGENTS.md", "CLAUDE.md", "DESIGN.md", "PRODUCT.md", "install.py", "uninstall.py", ".gitignore", ".gitattributes", MANIFEST}
 PACKAGE_ONLY = {"bin", "package.json", ".npmignore"}
 REQUIRED_TOOLS = {"smart_search", "smart_search_result", "web_search", "project_manage"}
+LANGUAGE = "en"
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def installer_language(requested=None):
+    """The language of the installer's messages: requested (--language), else the one picked in the settings, else the
+    Windows display language. Settings that cannot be read, or that hold an unknown language, are reported on stderr
+    and the Windows language is used."""
+    if requested:
+        return requested
+    problem, chosen = config.corrupted_reason(), ""
+    if not problem:
+        try:
+            chosen = config.language()
+        except (ValueError, config.ConfigCorruptedError) as exc:
+            problem = str(exc)
+    fallback = i18n.system_language()
+    if problem:
+        print(i18n.t("Could not read the Smart Tool settings, so the Windows language is used instead: {problem}",
+                     lang=fallback, problem=problem), file=sys.stderr)
+    return chosen or fallback
+
+
+def t(text, **values):
+    """text (an English catalog key) in LANGUAGE, with its {placeholders} filled from values."""
+    return i18n.t(text, lang=LANGUAGE, **values)
+
+
 def ships(rel):
     parts = Path(rel).parts
     *folders, name = parts
@@ -98,7 +125,7 @@ def stop_processes(target):
         if not left:
             return
         if time.monotonic() > deadline:
-            raise RuntimeError(f"Could not close the running Smart Tool ({len(left)} process(es) still active).")
+            raise RuntimeError(t("Could not close the running Smart Tool ({count} process(es) still active).", count=len(left)))
         time.sleep(0.5)
 
 
@@ -123,7 +150,7 @@ def wait_port_free(target):
         stop_processes(target)
         time.sleep(0.5)
     if _daemon_up():
-        raise RuntimeError("Another Smart Tool daemon is still active on the registered port; close it before updating.")
+        raise RuntimeError(t("Another Smart Tool daemon is still active on the registered port; close it before updating."))
 
 
 def _daemon_up():
@@ -193,7 +220,7 @@ def remove_other_installs(target):
     removed = []
     codex = hook_files()[1]
     for folder in other_installs(target):
-        print(f"Older Smart Tool installation found at {folder}; removing it.")
+        print(t("Older Smart Tool installation found at {folder}; removing it.", folder=folder))
         stop_processes(folder)
         for path in hook_files():
             original = path.read_text(encoding="utf-8") if path.is_file() else ""
@@ -203,7 +230,7 @@ def remove_other_installs(target):
                 atomic_io.backup_file(str(path))
                 path.write_text(text, encoding="utf-8")
                 client_hooks.record_codex_trust(trust, str(path.with_name("config.toml")))
-                print(f"Hooks in {path} now point to {target}.")
+                print(t("Hooks in {path} now point to {target}.", path=path, target=target))
         startup = STARTUP_SCRIPT.read_text(encoding="utf-8", errors="replace") if STARTUP_SCRIPT.is_file() else ""
         if any(_same_folder(_script_folder(script), folder) for script in _script_paths(startup)):
             STARTUP_SCRIPT.unlink()
@@ -327,7 +354,7 @@ def prune_camoufox(target):
     browser = target / "web_adapters" / "browser"
     result = subprocess.run([str(browser / ".venv" / "Scripts" / "python.exe"), str(browser / "prune_camoufox.py")])
     if result.returncode:
-        print(f"Old Camoufox builds not pruned: prune_camoufox.py exited {result.returncode}.", file=sys.stderr)
+        print(t("Old Camoufox builds not pruned: prune_camoufox.py exited {code}.", code=result.returncode), file=sys.stderr)
 
 
 def install_dependencies(target, python):
@@ -335,7 +362,7 @@ def install_dependencies(target, python):
         venv.create(python.parent.parent, with_pip=True)
     subprocess.run([str(python), "-m", "pip", "install", "--disable-pip-version-check", "-q", "-r",
                     str(target / "requirements.txt")], check=True)
-    subprocess.run([str(python), str(target / "install_runtime.py")], check=True)
+    subprocess.run([str(python), str(target / "install_runtime.py"), "--language", LANGUAGE], check=True)
 
 
 def start(target, python, pythonw):
@@ -357,17 +384,20 @@ def verify(target, python):
               "print(json.dumps({'version':running,'tools':sorted(r['name'] for r in json.load(opener.open(req,timeout=10))['result']['tools'])}))")
     result = subprocess.run([str(python), "-c", script], cwd=target, capture_output=True, text=True, timeout=60)
     if result.returncode:
-        raise RuntimeError("Daemon did not respond: " + ((result.stderr or result.stdout).strip().splitlines() or ["no output"])[-1])
+        detail = ((result.stderr or result.stdout).strip().splitlines() or [t("no output")])[-1]
+        raise RuntimeError(t("Daemon did not respond: {detail}", detail=detail))
     served = json.loads(result.stdout.strip().splitlines()[-1])
     missing = REQUIRED_TOOLS - set(served["tools"])
     if missing:
-        raise RuntimeError("Missing MCP tools: " + ", ".join(sorted(missing)))
+        raise RuntimeError(t("Missing MCP tools: {tools}", tools=", ".join(sorted(missing))))
     if served["version"] != version.VERSION:
-        raise RuntimeError(f"The daemon runs version {served['version']}, not the {version.VERSION} being installed")
+        raise RuntimeError(t("The daemon runs version {running}, not the {expected} being installed",
+                             running=served["version"], expected=version.VERSION))
     pid = json.loads(REGISTRY.read_text(encoding="utf-8"))["pid"]
     command = powershell(f"(Get-CimInstance Win32_Process -Filter 'ProcessId = {int(pid)}').CommandLine").stdout
     if str(target / "smart_tool_daemon.py").lower() not in command.lower():
-        raise RuntimeError(f"The active daemon (pid {pid}) does not belong to this installation: {command.strip()[:200]}")
+        raise RuntimeError(t("The active daemon (pid {pid}) does not belong to this installation: {command}",
+                             pid=pid, command=command.strip()[:200]))
 
 
 def enable_browser_control(target, python):
@@ -382,11 +412,12 @@ def enable_browser_control(target, python):
     except (OSError, subprocess.TimeoutExpired, ValueError, IndexError) as exc:
         result, outcome = None, f"{type(exc).__name__}: {exc}"
     if not isinstance(outcome, dict):
-        detail = outcome or ((result.stderr or result.stdout).strip().splitlines() or ["no output"])[-1]
-        print(f"Browser control not set up: {detail}")
+        detail = outcome or ((result.stderr or result.stdout).strip().splitlines() or [t("no output")])[-1]
+        print(t("Browser control not set up: {detail}", detail=detail))
         return
     for client, state in outcome.items():
-        print(f"Browser control in {client}: {state['state']}" + (f" ({state['reason']})" if state.get("reason") else ""))
+        print(t("Browser control in {client}: {state}", client=client, state=state["state"])
+              + (f" ({state['reason']})" if state.get("reason") else ""))
 
 
 MIN_PYTHON = (3, 11)
@@ -404,18 +435,23 @@ def main():
                         help="install without running tests/run.py (npm package, whose tests ran in CI; emergency only otherwise)")
     parser.add_argument("--expect-version",
                         help="refuse to install unless this package is that version (the update screen passes the one it announced)")
+    parser.add_argument("--language", choices=config.LANGUAGES,
+                        help="language of the messages (default: the setting, else the Windows display language)")
     args = parser.parse_args()
+    global LANGUAGE
+    LANGUAGE = installer_language(args.language)
     if args.expect_version and args.expect_version != version.VERSION:
-        raise SystemExit(f"This package is Smart Tool {version.VERSION}, not the {args.expect_version} requested; "
-                         "nothing was changed.")
+        raise SystemExit(t("This package is Smart Tool {version}, not the {requested} requested; nothing was changed.",
+                           version=version.VERSION, requested=args.expect_version))
     paths.refuse_overridden_folders("install")
     target = args.target.resolve()
     if target == SOURCE:
-        raise SystemExit("The target cannot be the source folder itself.")
+        raise SystemExit(t("The target cannot be the source folder itself."))
     if args.skip_tests:
-        print("Tests skipped by --skip-tests.")
+        print(t("Tests skipped by --skip-tests."))
     elif not (SOURCE / "tests" / "run.py").is_file():
-        raise SystemExit(f"No test suite in {SOURCE}; a packaged install runs with --skip-tests (npx @allansantos-dev/smart-tool@{version.VERSION} install).")
+        raise SystemExit(t("No test suite in {source}; a packaged install runs with --skip-tests "
+                           "(npx @allansantos-dev/smart-tool@{version} install).", source=SOURCE, version=version.VERSION))
     else:
         interpreter = python_paths(target)[0] if python_paths(target)[0].is_file() else Path(sys.executable)
         tests = subprocess.run([str(interpreter), str(SOURCE / "tests" / "run.py")], capture_output=True, text=True,
@@ -424,11 +460,13 @@ def main():
         if tests.stderr.strip():
             print(tests.stderr.rstrip()[-3000:], file=sys.stderr)
         if tests.returncode:
-            raise SystemExit("Tests failed; installation aborted without touching the installed version.")
+            raise SystemExit(t("Tests failed; installation aborted without touching the installed version."))
     python, pythonw = python_paths(target)
     files = source_files()
     existed = (target / "smart_tool_daemon.py").is_file()
-    print(("Updating" if existed else "Installing") + f" Smart Tool at {target} ({len(files)} files from {SOURCE})")
+    where = {"target": target, "count": len(files), "source": SOURCE}
+    print(t("Updating Smart Tool at {target} ({count} files from {source})", **where) if existed
+          else t("Installing Smart Tool at {target} ({count} files from {source})", **where))
     target.mkdir(parents=True, exist_ok=True)
     remove_other_installs(target)
     mark_updating(True)
@@ -439,8 +477,8 @@ def main():
     if not args.no_start:
         enable_browser_control(target, python)
     for folder in prune_backups(target):
-        print(f"Removed the old copy {folder}.")
-    print("Smart Tool ready." if not args.no_start else "Files installed; daemon not restarted (--no-start).")
+        print(t("Removed the old copy {folder}.", folder=folder))
+    print(t("Smart Tool ready.") if not args.no_start else t("Files installed; daemon not restarted (--no-start)."))
 
 
 def prune_backups(target):
@@ -456,7 +494,7 @@ def prune_backups(target):
             shutil.rmtree(folder)
             removed.append(str(folder))
         except OSError as exc:
-            print(f"Could not remove the old copy {folder}: {exc}", file=sys.stderr)
+            print(t("Could not remove the old copy {folder}: {error}", folder=folder, error=exc), file=sys.stderr)
     return removed
 
 
@@ -474,19 +512,19 @@ def _update(args, target, files, existed, python, pythonw):
     try:
         copy_files(target, files, backup, changed, removed)
         clear_bytecode(target)
-        print(f"Files changed: {len(changed)}; removed as obsolete: {len(removed)}")
+        print(t("Files changed: {changed}; removed as obsolete: {removed}", changed=len(changed), removed=len(removed)))
         if run_deps:
             frozen = freeze(python)
             deps_touched = True
             install_dependencies(target, python)
         elif not args.skip_deps:
-            print("Dependencies unchanged since the last update; pip and install_runtime.py skipped.")
+            print(t("Dependencies unchanged since the last update; pip and install_runtime.py skipped."))
         if not args.no_start:
             mark_updating(False)
             start(target, python, pythonw)
             verify(target, python)
     except BaseException as exc:
-        print(f"Failed: {exc}. Restoring the previous version.", file=sys.stderr)
+        print(t("Failed: {error}. Restoring the previous version.", error=exc), file=sys.stderr)
         problems = []
         steps = [lambda: mark_updating(True), lambda: stop_processes(target),
                  lambda: restore(target, backup, changed, removed)]
@@ -500,7 +538,8 @@ def _update(args, target, files, existed, python, pythonw):
             except Exception as error:
                 problems.append(str(error))
         if problems:
-            print(f"Incomplete rollback; backup kept at {backup}: " + " | ".join(problems), file=sys.stderr)
+            print(t("Incomplete rollback; backup kept at {backup}: {problems}", backup=backup, problems=" | ".join(problems)),
+                  file=sys.stderr)
             raise SystemExit(1)
         shutil.rmtree(backup, ignore_errors=True)
         raise SystemExit(1)

@@ -14,6 +14,7 @@ import sqlite3
 import time
 
 import config
+import model_breaker
 import project_store
 import usage_meter
 
@@ -34,6 +35,7 @@ _PURPOSE_ROLE = {"scope": "scope_model", "scout": "scout_model", "docs": "docs_m
 _TOOL = contextvars.ContextVar("model_health_tool", default=None)
 _COLLECTED = contextvars.ContextVar("model_health_collected", default=None)
 _SCHEMA = set()
+_CIRCUIT_OPEN = model_breaker.CircuitOpen.__name__ + ":"
 _STATUS = re.compile(r"HTTP(?: Error)? (\d{3})")
 _TIMEOUT = re.compile(r"timed out|timeout|WinError 10060|Errno 110\b", re.I)
 _CONNECTION = re.compile(r"URLError|ConnectionError|ConnectionRefused|ConnectionReset|refused|reset|getaddrinfo|"
@@ -68,8 +70,11 @@ def _tables(db):
 
 
 def classify(error):
-    """Failure type of a stored error text: '429', '503', '5xx' (any other 5xx), 'auth' (401/403), 'timeout',
-    'connection' or 'other'. An HTTP status in the text wins over words in the response body."""
+    """Failure type of a stored error text: 'circuit_open' (refused while the model is paused), '429', '503', '5xx' (any
+    other 5xx), 'auth' (401/403), 'timeout', 'connection' or 'other'. An HTTP status in the text wins over words in the
+    response body, except that the pause text names the 429/503 that opened it."""
+    if (error or "").startswith(_CIRCUIT_OPEN):
+        return "circuit_open"
     status = _STATUS.search(error or "")
     if status:
         code = int(status.group(1))
@@ -107,8 +112,19 @@ def error_text(exc):
     return " ".join(text.split())[:ERROR_CHARS]
 
 
+def guard(path, model):
+    """`model_breaker.guard` that also logs the refusal, then re-raises it."""
+    try:
+        model_breaker.guard(model)
+    except model_breaker.CircuitOpen as refusal:
+        record(path, {"model": model}, refusal)
+        raise
+
+
 def record(path, body, failure=None):
-    """Counts one model call and, when it failed, logs it. Never raises: the log must not change the call's result."""
+    """Counts one model call and, when it failed, logs it. A `CircuitOpen` refusal sent nothing: it is logged in the
+    failure table only, so it is neither a call nor an error of the rate and never reaches the tool answer's warning
+    (the search already says the model is paused). Never raises: the log must not change the call's result."""
     if path not in _PATHS:
         return
     try:
@@ -116,17 +132,19 @@ def record(path, body, failure=None):
         role = role_of(model, purpose=usage_meter.purpose())
         now = time.time()
         text = error_text(failure) if failure is not None else None
+        refused = isinstance(failure, model_breaker.CircuitOpen)
         with project_store._LOCK, _db() as db:
             _tables(db)
-            db.execute("INSERT INTO model_calls VALUES(?,?,?,1,?) ON CONFLICT(hour,model,role) DO UPDATE SET "
-                       "calls=calls+1,errors=errors+excluded.errors", (int(now // 3600), model, role, int(text is not None)))
+            if not refused:
+                db.execute("INSERT INTO model_calls VALUES(?,?,?,1,?) ON CONFLICT(hour,model,role) DO UPDATE SET "
+                           "calls=calls+1,errors=errors+excluded.errors", (int(now // 3600), model, role, int(text is not None)))
             if text is not None:
                 db.execute("INSERT INTO model_failures VALUES(?,?,?,?,?,?)", (now, model, role, _TOOL.get() or "", path, text))
                 db.execute("DELETE FROM model_failures WHERE at<? OR rowid NOT IN "
                            "(SELECT rowid FROM model_failures ORDER BY at DESC LIMIT ?)", (now - KEEP_S, KEEP_FAILURES))
                 db.execute("DELETE FROM model_calls WHERE hour<?", (int((now - KEEP_S) // 3600),))
         collected = _COLLECTED.get()
-        if text is not None and collected is not None:
+        if text is not None and collected is not None and not refused:
             collected.append({"model": model, "role": role, "error": text})
     except Exception:
         pass

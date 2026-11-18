@@ -54,12 +54,12 @@ def install_command(target):
     the tray announced. `@latest` would let npx reuse an older package from its cache and install that instead;
     --prefer-online makes npm ask the registry for the package's version list, which in the first minutes after a
     publication its cache does not yet have (ETARGET); --expect-version makes the installer refuse a package that is
-    not that version."""
+    not that version. The installer is asked for English: STEPS and the log are read from its English lines."""
     npx = node_locator.which("npx.cmd")
     if not npx:
         raise RuntimeError(i18n.t("Node.js (npx) was not found; install Node.js and try again."))
     return ["cmd.exe", "/d", "/c", npx, "--yes", "--prefer-online", f"{update_check.PACKAGE}@{target}", "install",
-            "--expect-version", target], npx
+            "--language", "en", "--expect-version", target], npx
 
 
 def installed_version(folder=os.path.dirname(os.path.abspath(__file__))):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Hook PreToolUse de comando (Codex): cliente fino que repassa o payload ao daemon do Smart Tool (POST
-/hooks/pretool), onde a decisão roda já aquecida (`hook_decision.py`). O Claude Code chama a mesma rota direto, como
-hook `type: "http"`. Falha aberto: daemon fora do ar ou erro = saída neutra `{}`, nunca `allow`.
+"""Hook de comando (Codex): cliente fino que repassa o payload ao daemon do Smart Tool (POST /hooks/pretool, ou
+/hooks/posttool com `--post`), onde a decisão roda já aquecida (`hook_decision.py`). O Claude Code chama as mesmas rotas
+direto, como hook `type: "http"`. Falha aberto: daemon fora do ar ou erro = saída neutra `{}`, nunca `allow`.
 """
 import json
 import os
@@ -32,7 +32,8 @@ def main():
         print(json.dumps({"systemMessage": "Smart Tool: daemon subindo, roteamento pulado nesta chamada."},
                          ensure_ascii=False))
         return
-    request = urllib.request.Request(f"{base}/hooks/pretool?{urllib.parse.urlencode({'client': _client()})}",
+    route = "posttool" if "--post" in sys.argv[1:] else "pretool"
+    request = urllib.request.Request(f"{base}/hooks/{route}?{urllib.parse.urlencode({'client': _client()})}",
                                      data=raw, headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
         output = json.loads(response.read() or b"{}")

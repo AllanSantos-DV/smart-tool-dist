@@ -310,6 +310,18 @@ def handle_integration_get():
     except ValueError as exc:
         layer_mode, layer_error = "", str(exc)
     try:
+        link_mode, link_error = config.link_mode(), ""
+    except ValueError as exc:
+        link_mode, link_error = "", str(exc)
+    try:
+        pr_comment, pr_comment_error = config.pr_comment(), ""
+    except ValueError as exc:
+        pr_comment, pr_comment_error = "", str(exc)
+    try:
+        decision_mode, decision_error = config.decision_mode(), ""
+    except ValueError as exc:
+        decision_mode, decision_error = "", str(exc)
+    try:
         proposals_mode, proposals_error = config.pattern_proposals(), ""
     except ValueError as exc:
         proposals_mode, proposals_error = "", str(exc)
@@ -325,6 +337,10 @@ def handle_integration_get():
             "dependency_mode": dependency_mode, "dependency_mode_error": dependency_error,
             "dependency_modes": list(config.DEPENDENCY_MODES),
             "layer_mode": layer_mode, "layer_mode_error": layer_error, "layer_modes": list(config.LAYER_MODES),
+            "link_mode": link_mode, "link_mode_error": link_error, "link_modes": list(config.LINK_MODES),
+            "pr_comment": pr_comment, "pr_comment_error": pr_comment_error, "pr_comment_modes": list(config.PR_COMMENT_MODES),
+            "decision_mode": decision_mode, "decision_mode_error": decision_error,
+            "decision_modes": list(config.DECISION_MODES),
             "pattern_proposals": proposals_mode, "pattern_proposals_error": proposals_error,
             "block_patterns": {"proposals": stored["proposals"], "accepted": stored["accepted"],
                                "rejected": len(stored["rejected"]), "error": patterns_error},
@@ -343,11 +359,12 @@ def handle_integration_save(body):
         except (OSError, ValueError) as exc:
             raise SetupError(str(exc))
         return handle_integration_get()
-    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "comment_mode", "duplicate_mode", "dependency_mode", "layer_mode", "pattern_proposals"):
+    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "comment_mode", "duplicate_mode", "dependency_mode", "layer_mode", "link_mode", "pr_comment", "decision_mode", "pattern_proposals"):
         action = body["action"]
         allowed = {"hook_mode": config.HOOK_MODES, "doc_mode": config.DOC_MODES, "comment_mode": config.COMMENT_MODES,
                    "duplicate_mode": config.DUPLICATE_MODES, "dependency_mode": config.DEPENDENCY_MODES,
-                   "layer_mode": config.LAYER_MODES,
+                   "layer_mode": config.LAYER_MODES, "link_mode": config.LINK_MODES, "pr_comment": config.PR_COMMENT_MODES,
+                   "decision_mode": config.DECISION_MODES,
                    "pattern_proposals": config.PATTERN_PROPOSAL_MODES}[action]
         if body.get("mode") not in allowed:
             raise SetupError(f"Invalid mode: use {', '.join(allowed)}.")
@@ -836,7 +853,7 @@ __I18N__
 
       <div class="card" id="health-card">
         <div class="card-head"><h3>Model failures (last 24 h)</h3><span class="pill" id="health-pill" data-tone="busy">Checking</span></div>
-        <p class="lede">Failed calls to a gateway model, grouped by type (429, 503, timeout, ...) and role, with the latest lines of each group. A model that fails half of its calls (5 or more) also raises a Windows notification.</p>
+        <p class="lede">Failed calls to a gateway model, grouped by type (429, 503, timeout, ...) and role, with the latest lines of each group. A model that fails half of its calls (5 or more) also raises a Windows notification. Calls refused while a model is paused show as Circuit open and do not count toward that limit.</p>
         <div id="health-table"></div>
       </div>
 
@@ -1276,7 +1293,7 @@ for (const [id, action] of [["btn-upgrade-apply", "apply"], ["btn-upgrade-declin
   });
 }
 const FAILURE_TYPES = { "429": "429 Too Many Requests", "503": "503 Service Unavailable", "5xx": "Other 5xx", timeout: "Timeout",
-  connection: "Connection", auth: "Authentication (401/403)", other: "Other" };
+  connection: "Connection", circuit_open: "Circuit open", auth: "Authentication (401/403)", other: "Other" };
 const PURPOSE_LABELS = { index_embedding: "Indexing", query_embedding: "Query", rerank: "Rerank", embedding_probe: "Model check", scope: "Scope" };
 function healthHtml(data) {
   const when = (at) => esc(new Date(at * 1000).toLocaleString());
@@ -1463,6 +1480,18 @@ const RULES = [
     intro: "When the project has confirmed layers (.smart-tool/layers.json), warns about a call an edit adds from a lower layer to a function of a higher one. A project without layers is never checked. It never blocks.",
     options: [["warn", "Warn", "The edit runs; the agent is told which new calls go up the layers.", true],
               ["off", "Off", "No layer checks."]] },
+  { key: "link_mode", title: "Broken local links on edit", applies: "Applies on the next edit.",
+    intro: "Checks the relative links (href, src, Markdown link targets) an edit of an HTML or Markdown file adds or changes against the files on disk, and says which ones it could not check. Links that were already broken are left alone. It never blocks.",
+    options: [["warn", "Warn", "The edit runs; the agent is told which new links point to a file that does not exist.", true],
+              ["off", "Off", "No link checks."]] },
+  { key: "pr_comment", title: "Impact report as a pull request comment", applies: "Applies on the next request of an agent.",
+    intro: "Lets Smart Tool post the impact report as a comment on a pull request through the gh CLI, with your own gh login. This writes to GitHub: nothing is ever posted while this is off, and each post is one agent request (project_manage action=pr_impact_comment). A rerun replaces the previous Smart Tool comment instead of adding another.",
+    options: [["off", "Off", "Nothing is posted to GitHub.", true],
+              ["on", "On", "Agents may post the impact report as a comment on a pull request through the gh CLI."]] },
+  { key: "decision_mode", title: "Recorded decisions on edit", applies: "Applies on the next edit.",
+    intro: "Looks up the notes of the project (docs/research, the backlog, CLAUDE.md and AGENTS.md) and its commit messages for the functions an edit touches, and names the ones that record a decision about them. A single-word function name counts only when a note qualifies it with its module or class. It never blocks.",
+    options: [["warn", "Warn", "The edit runs; the agent is told which notes and commits record a decision about a touched function.", true],
+              ["off", "Off", "No decision lookup."]] },
   { key: "pattern_proposals", title: "Block patterns proposed by a model", applies: "Applies to the next review.",
     intro: "Afterwards, never delaying a call, the scope model (else the router model) reviews searches the fixed rule let through and may propose block patterns. Nothing blocks until you accept it on the Redirects page.",
     options: [["on", "On", "Review in the background and list proposals for you.", true],

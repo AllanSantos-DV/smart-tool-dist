@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.9.81 - beta
+
+- `pr_impact` lists the functions the diff adds that no function and no test calls (the candidates `dead_code` finds, which
+  already leave out framework and registered functions), in the section "New functions nothing calls". The section is
+  left out when the diff adds no function or every new one has a caller; a graph the analysis limits cut is said, and so is a
+  check that cannot run. `project_manage action=dead_code` also reports the graph cut (`graph_note`). Tests:
+  `tests/test_pr_impact.py`, `tests/test_code_health.py`.
+- When an edit changes only the signature of a function (parameters, order, defaults, return annotation), the edit hook and
+  `pr_impact` list the callers outside the edited file, as they do for a removed or renamed function; the callers come from
+  the graph's resolved calls and its calls left unresolved by name, a graph the analysis limits cut is said instead of
+  claiming no caller, a name defined twice in one file (overloads) is not compared, and a failure is a visible note. Tests:
+  `tests/test_removed_callers.py`, `tests/test_pr_impact.py`.
+- The edit hook notes a broken local link when an HTML or Markdown file is edited, and so do the review of files a shell
+  call wrote and `project_manage action=pr_impact`: a relative `href`, `src` or Markdown link target that the edit adds or
+  changes and that points to no file or folder, resolved against the edited file and read with the reader the code graph
+  uses. A link that was already broken, http(s), `mailto:`, `tel:`, `data:` and `#anchor` links are left out. What cannot be
+  checked is listed with the reason instead of being dropped: a path from the root of a site, a template expression, a page
+  with a `<base>` element, a target that cannot be looked up, HTML that did not parse. `link_mode` (`warn` default, or
+  `off`) in `config.json` and on the setup screen; it never blocks. Tests: `tests/test_link_check.py`.
+- `project_manage action=pr_impact_comment pr=<number> base=<revision>` posts the `pr_impact` report as a comment on a pull
+  request through the `gh` CLI, from the project folder, and returns the comment URL. It writes to GitHub, so it is off
+  until the user turns on "Impact report as a pull request comment" in the setup screen (Agent rules; `pr_comment` in
+  `config.json`, `off` by default, any other value than `off` or `on` fails loudly); with it off, or with `gh` missing or
+  not logged in, it refuses before building anything. The comment ends with a hidden HTML marker: a rerun edits the last
+  comment that has it instead of stacking another, and the body shows no path of the user's machine. Tests:
+  `tests/test_pr_comment.py`, `tests/test_setup_integration.py`, `tests/test_setup_page_browser.py`.
+- The edit hook names the decisions recorded about the functions an edit touches: for the first three functions in a code
+  file, up to two notes of the project (`docs/research`, the backlog, `CLAUDE.md`, `AGENTS.md`) that name the function, as
+  `path:line` and the title, so the agent does not undo what a note documents. A single-word function name counts only
+  when a note qualifies it as `module.name` or `Class.name`, a compound name as the bare identifier. Measured on 46
+  touched functions of this repository, the notes shown were about the function in 22 of 22 cases (the earlier rule: 11 of
+  18; the raw search: 9 of 88) and the hook stayed silent on the 27 functions with no recorded decision. It reads files
+  only (no network, no model, no git history, 300 ms per function), says when it fails or is cut, and never blocks.
+  `decision_mode` (`warn`, default, or `off`) is on the Agent rules page of the setup screen; `pr_impact` uses the same rule
+  and also reads the commit messages. Tests: `tests/test_decision_notes.py`, `tests/test_pr_impact.py`. Measurement:
+  `docs/research/2026-11-18-decision-notes-keyword-quality.md`.
+- The tray menu has "Open tray log": it opens `tray.log`, and says so when the file does not exist yet. Tests:
+  `tests/test_tray_notices.py`.
+- A toast Windows refuses is also shown as a tray balloon with the text and the refusal (cut to the balloon limits) and is
+  still logged to `tray.log`; a balloon that fails is logged too, and the next notices are still shown. Tests:
+  `tests/test_tray_notices.py`.
+- The toast that says a newer version is available has an "Update now" button (the `update-now` action): it starts the
+  update screen for that version, and refuses any version text that is not an npm version number. Tests:
+  `tests/test_update_check.py`.
+- The failed-update toast carries the tag `update-failed`, so each tray start replaces it instead of stacking another one.
+  Tests: `tests/test_update_check.py`.
+- The edit hook's checks also run after a shell call that wrote files (`sed -i`, a redirection, `npm install`, `cargo add`).
+  The PostToolUse entry of Claude Code (Bash and PowerShell) and, new, of Codex (Bash, through the same thin command with
+  `--post`) reviews the files git shows changed since `HEAD`, tracked or not, whose modification time is not older than the
+  start of that call, which the PreToolUse hook records by `tool_use_id`; files already changed before the call are left
+  out. The notes are the ones `pr_impact` already adds to a whole diff (`hook_decision.review_diff`), added to the
+  call's context, never a block. A git failure, a start that was not recorded or a review that cannot run comes back as a
+  `Smart Tool shell review skipped` note; a folder that is not a git repository is left alone. Codex needs the hook update
+  (and its approval) once to get the new entry. Tests: `tests/test_transparent_redirect.py`,
+  `tests/test_codex_audit_hook.py`, `tests/test_web_fetch.py`.
+- The installer prints its messages in Portuguese when the user's language is Portuguese: the language picked in the
+  settings, else the Windows display language. Unreadable settings are reported on stderr and the Windows language is
+  used. `--language en|pt-BR` forces one; the update screen and the release install check pass `--language en`, because
+  they read the installer's English lines. The web runtime installer prints in the same language. Tests:
+  `tests/test_install_language.py`, `tests/test_update_splash.py`.
+- The refusals a call gets when its folder cannot become a project ("Not indexing ...: it is a personal folder ...") follow
+  the language saved in the settings like the rest of the product: Portuguese when it is chosen, with the folders and the
+  reason kept in the text, and the same English text as before otherwise. Tests: `tests/test_project_admission.py`,
+  `tests/test_i18n.py`.
+
 ## 0.9.80 - beta
 
 - The document converter keeps its results in one folder per version, `%LOCALAPPDATA%\SmartTool\cache\<version>\convert`,

@@ -40,8 +40,9 @@ def dead_code(root, view_id=None, limit=DEFAULT_LIMIT):
     """Functions nothing calls and functions only tests call, from the static call graph.
 
     Parameters: root (str) project folder; view_id (str or None) index view; limit (int) entries per list.
-    Returns: dict {"no_caller": [...], "only_tests": [...], "counts": {"no_caller", "only_tests"}, "note": str}; each entry
-    is {"name", "path", "line", "public"}. Candidates only: a call through a framework, a decorator registration,
+    Returns: dict {"no_caller": [...], "only_tests": [...], "counts": {"no_caller", "only_tests"}, "note": str,
+    "graph_note": str}; each entry is {"name", "path", "line", "public"}; `graph_note` says what the analysis limits cut from
+    the graph, "" when they cut nothing. Candidates only: a call through a framework, a decorator registration,
     reflection or a name built at run time is not seen.
     Raises: ValueError when the code graph is empty.
     """
@@ -55,7 +56,8 @@ def dead_code(root, view_id=None, limit=DEFAULT_LIMIT):
 
     return {"no_caller": [entry(a) for a in alone[:limit]], "only_tests": [entry(a) for a in tested[:limit]],
             "counts": {"no_caller": len(alone), "only_tests": len(tested)},
-            "note": "Candidates from the static call graph (Python and Go only): read each one before deleting it."}
+            "note": "Candidates from the static call graph (Python and Go only): read each one before deleting it.",
+            "graph_note": code_graph.left_out_sentence(model.graph) or ""}
 
 
 def coupled_with(root, paths, view_id=None, limit=DEFAULT_LIMIT):

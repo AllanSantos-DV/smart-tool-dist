@@ -5,14 +5,25 @@ from html.parser import HTMLParser
 from urllib.parse import unquote,urlsplit
 
 
+def local_target(origin,value):
+    """Caminho do alvo de uma referência local: relativo à pasta de `origin` (ou à raiz, se começar com '/')."""
+    path=urlsplit(value).path
+    return posixpath.normpath(posixpath.join(posixpath.dirname(origin),unquote(path))) if not path.startswith('/') else unquote(path).lstrip('/')
+
+
 def analyze(sources,all_paths):
+    """Referências locais e externas de HTML, CSS e Markdown.
+
+    Parâmetros: sources (dict caminho -> texto); all_paths (caminhos existentes, para resolver os alvos).
+    Retorna: dict com `dependencies` (source, target, specifier, line, kind, resolution), `diagnostics` e `parsed`.
+    """
     paths=set(all_paths);dependencies=[];diagnostics=[];parsed=[]
     def reference(origin,value,line,kind):
         if not value or value.startswith(('#','data:','javascript:','mailto:','tel:')):return
         url=urlsplit(value)
         if url.scheme or url.netloc:
             dependencies.append({'source':origin,'target':None,'specifier':value[:300],'line':line,'kind':kind,'resolution':'external'});return
-        target=posixpath.normpath(posixpath.join(posixpath.dirname(origin),unquote(url.path))) if not url.path.startswith('/') else unquote(url.path).lstrip('/')
+        target=local_target(origin,value)
         if target.startswith('../') or target==origin:return
         found=target if target in paths else None
         dependencies.append({'source':origin,'target':found,'specifier':value[:300],'line':line,'kind':kind,'resolution':'resolved' if found else 'unresolved'})

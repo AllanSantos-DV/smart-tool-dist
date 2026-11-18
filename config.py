@@ -47,6 +47,9 @@ DEFAULT_CONFIG = {
     "duplicate_mode": "warn",
     "dependency_mode": "warn",
     "layer_mode": "warn",
+    "link_mode": "warn",
+    "pr_comment": "off",
+    "decision_mode": "warn",
     "document_converter": "off",
     "document_converter_python": "",
     "docs_extras": {key: True for key in DOCS_EXTRAS},
@@ -84,6 +87,15 @@ DUPLICATE_MODES = ("warn", "off")
 # off = say nothing and make no network call.
 DEPENDENCY_MODES = ("warn", "off")
 LAYER_MODES = ("warn", "off")
+# Edit hook on HTML and Markdown files: warn = let the edit run and name the local links it adds or changes that point to a
+# file that does not exist, and the ones that cannot be checked; off = say nothing. Never blocks.
+LINK_MODES = ("warn", "off")
+# Posting the pr_impact report as a comment on a pull request through the gh CLI, a write to GitHub with the user's own
+# login: off = never; on = project_manage action=pr_impact_comment may post. Only the user turns it on, in the setup screen.
+PR_COMMENT_MODES = ("off", "on")
+# Edit hook on the functions an edit touches: warn = let the edit run and name the notes and commit messages of the project
+# that record a decision about them; off = say nothing. Never blocks.
+DECISION_MODES = ("warn", "off")
 # External converter read_document falls back to for a file type or a scanned PDF its native reader refuses: off = never;
 # auto = the first of kreuzberg and docling found installed; or one of them by name. The engine is looked for in the
 # interpreter named by `document_converter_python` (empty = the one Smart Tool runs on).
@@ -131,6 +143,29 @@ def layer_mode(cfg=None):
     value = (cfg if cfg is not None else load_config()).get("layer_mode") or DEFAULT_CONFIG["layer_mode"]
     if value not in LAYER_MODES:
         raise ValueError(f"Invalid layer_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
+    return value
+
+
+def link_mode(cfg=None):
+    value = (cfg if cfg is not None else load_config()).get("link_mode") or DEFAULT_CONFIG["link_mode"]
+    if value not in LINK_MODES:
+        raise ValueError(f"Invalid link_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
+    return value
+
+
+def pr_comment(cfg=None):
+    """The user's consent to post the impact report on a pull request: `off` (default) or `on`; any other value fails loudly."""
+    value = (cfg if cfg is not None else load_config()).get("pr_comment") or DEFAULT_CONFIG["pr_comment"]
+    if value not in PR_COMMENT_MODES:
+        raise ValueError(f"Invalid pr_comment ({value!r}) in {CONFIG_PATH}: use off or on.")
+    return value
+
+
+def decision_mode(cfg=None):
+    """The edit hook's decision-notes mode, `warn` or `off`; raises ValueError for any other value in the config file."""
+    value = (cfg if cfg is not None else load_config()).get("decision_mode") or DEFAULT_CONFIG["decision_mode"]
+    if value not in DECISION_MODES:
+        raise ValueError(f"Invalid decision_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
     return value
 
 

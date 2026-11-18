@@ -21,6 +21,7 @@ import venv
 import zipfile
 from pathlib import Path
 
+import i18n
 import node_locator
 
 
@@ -43,6 +44,12 @@ MOLI_URL = f"https://github.com/lexmount/moli/releases/download/v{MOLI_VERSION}/
 MOLI_SHA256 = "64c00ce02d6db8e1c22c55e88fbcaaf3e7517e930f24c25ff46a457b421040c8"
 MOLI_DIR = BROWSER_DIR / "moli"
 MOLI_EXE = MOLI_DIR / "moli.exe"
+LANGUAGE = "en"
+
+
+def t(text, **values):
+    """text (an English catalog key) in LANGUAGE, with its {placeholders} filled from values."""
+    return i18n.t(text, lang=LANGUAGE, **values)
 
 
 def _node_supported(node):
@@ -119,7 +126,7 @@ def _replace_folder(unpacked, final, temp_dir):
 
 def _install_node():
     """Baixa o Node LTS oficial e confere SHA-256 antes de extrair."""
-    print("Downloading Node LTS for the Smart Tool web runtime...", flush=True)
+    print(t("Downloading Node LTS for the Smart Tool web runtime..."), flush=True)
     with urllib.request.urlopen("https://nodejs.org/dist/index.json", timeout=30) as response:
         releases = json.load(response)
     release = next((row for row in releases if row.get("lts") and
@@ -144,7 +151,7 @@ def _install_node():
         if not (unpacked / "node.exe").is_file() or not (unpacked / "npm.cmd").is_file():
             raise RuntimeError("Node package does not contain the expected executables.")
         _replace_folder(unpacked, NODE_RUNTIME, temp_dir)
-    print(f"Node {version} installed inside Smart Tool.")
+    print(t("Node {version} installed inside Smart Tool.", version=version))
 
 
 def _moli_ready():
@@ -156,7 +163,7 @@ def _moli_ready():
 
 def _install_moli():
     """Downloads the pinned Moli release from GitHub, checks its SHA-256 and unpacks it into web_adapters/browser."""
-    print(f"Downloading Moli {MOLI_VERSION} (structured-first headless browser, 43 MB)...", flush=True)
+    print(t("Downloading Moli {version} (structured-first headless browser, 43 MB)...", version=MOLI_VERSION), flush=True)
     BROWSER_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="moli-setup-", dir=BROWSER_DIR) as temp:
         temp_dir = Path(temp)
@@ -167,7 +174,7 @@ def _install_moli():
         if not (unpacked / "moli.exe").is_file():
             raise RuntimeError("The Moli package does not contain moli.exe.")
         _replace_folder(unpacked, MOLI_DIR, temp_dir)
-    print(f"Moli {MOLI_VERSION} installed inside Smart Tool.")
+    print(t("Moli {version} installed inside Smart Tool.", version=MOLI_VERSION))
 
 
 def _run(args, *, cwd=None, label="Web dependency", idle_s=600, stream=False, attempts=1):
@@ -179,15 +186,19 @@ def _run(args, *, cwd=None, label="Web dependency", idle_s=600, stream=False, at
     env.setdefault("NODE_USE_SYSTEM_CA", "1")
     flags = (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0
     for attempt in range(1, attempts + 1):
-        print(f"{label}: starting{f' (attempt {attempt} of {attempts})' if attempt > 1 else ''}...", flush=True)
+        if attempt > 1:
+            print(t("{label}: starting (attempt {attempt} of {attempts})...", label=label, attempt=attempt,
+                    attempts=attempts), flush=True)
+        else:
+            print(t("{label}: starting...", label=label), flush=True)
         try:
             _run_once(args, cwd, env, flags, label, idle_s, stream)
-            print(f"{label}: done.", flush=True)
+            print(t("{label}: done.", label=label), flush=True)
             return
         except RuntimeError as exc:
             if attempt == attempts:
                 raise
-            print(f"{exc}; trying again.", flush=True)
+            print(t("{error}; trying again.", error=exc), flush=True)
 
 
 def _run_once(args, cwd, env, flags, label, idle_s, stream):
@@ -229,7 +240,7 @@ def _run_once(args, cwd, env, flags, label, idle_s, stream):
                 raise RuntimeError(f"{label} stopped: no output for {idle_s}s; last output: {tail[-1] if tail else 'none'}")
             if not stream and now - noted >= 30:
                 noted = now
-                print(f"{label}: waiting for {int(now - started)}s...", flush=True)
+                print(t("{label}: waiting for {seconds}s...", label=label, seconds=int(now - started)), flush=True)
             time.sleep(0.5)
         reader.join(timeout=10)
         if process.returncode:
@@ -374,7 +385,7 @@ def install(reuse_browser_runtime=None):
     status = _check()
     if not all(status.values()):
         raise RuntimeError(f"Incomplete web runtime: {status}")
-    print("Smart Tool runtime installed: Node, open-websearch, TypeScript, Java, Angular, Playwright MCP, Camoufox, Crawl4AI and Moli.")
+    print(t("Smart Tool runtime installed: Node, open-websearch, TypeScript, Java, Angular, Playwright MCP, Camoufox, Crawl4AI and Moli."))
 
 
 def main():
@@ -382,7 +393,10 @@ def main():
     parser.add_argument("--check", action="store_true", help="Show the status without installing")
     parser.add_argument("--reuse-browser-runtime", metavar="FOLDER",
                         help="Reuse an existing venv without duplicating files (useful when disk is low)")
+    parser.add_argument("--language", choices=i18n.config.LANGUAGES, default="en", help="language of the messages")
     args = parser.parse_args()
+    global LANGUAGE
+    LANGUAGE = args.language
     if args.check:
         status = _check()
         for name, ready in status.items():
@@ -391,7 +405,7 @@ def main():
     try:
         install(args.reuse_browser_runtime)
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-        print(f"Web runtime installation failed: {exc}", file=sys.stderr)
+        print(t("Web runtime installation failed: {error}", error=exc), file=sys.stderr)
         return 1
     return 0
 

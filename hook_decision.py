@@ -12,6 +12,8 @@ consulta legível nunca é negada: é respondida no contexto (`_answer_in_place`
 não altera permissão.
 """
 import os
+import subprocess
+import time
 import uuid
 
 import affected_tests
@@ -23,15 +25,18 @@ import credential_check
 import dependency_notice
 import doc_check
 import doc_scope
+import dossier
 import duplicates
 import edit_preview
 import index_profile
 import index_scope
 import layer_check
+import link_check
 import endpoint_sync
 import project_admission
 import project_store
 import redirect_rule
+import removed_callers
 import requester
 import router
 import tool_redirect
@@ -47,6 +52,13 @@ SINGLE_LANGUAGE_REASON = "redirected native search: its pattern is the only quer
 EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "apply_patch")
 MAX_DOC_FINDINGS = 5
 MAX_DUPLICATE_FINDINGS = 3
+MAX_DECISION_FUNCTIONS = 3
+DECISION_TIMEOUT_MS = 300
+MAX_SHELL_REVIEW_FILES = 20
+MAX_REVIEW_BYTES = 1_000_000
+# FAT keeps two-second timestamps: a file the call wrote can look older than the call.
+MTIME_SLACK_S = 2.0
+SHELL_START_TTL_S = 3600
 SMART_TOOL_SERVER = "smart-tool"
 SMART_SEARCH_TOOL = f"mcp__{SMART_TOOL_SERVER}__smart_search"
 REASON_MAX_CHARS = 200
@@ -292,6 +304,26 @@ def _layer_lines(findings):
             "if this one is intended, go ahead.")
 
 
+def _callers_lines(answers):
+    lines = []
+    for answer in answers:
+        resigned = "changed" in answer
+        for item in answer["findings"][:MAX_DOC_FINDINGS]:
+            same = f" A function named {item['name'].rpartition('.')[2]} also exists in {', '.join(item['also_defined_in'])}." \
+                if item["also_defined_in"] else ""
+            sites = removed_callers.sites_text(item)
+            lines.append(f"`{item['name']}` ({item['path']}) has a new signature after this edit and is called from {sites} "
+                         f"outside this file: check that the callers pass what it takes now.{same}" if resigned else
+                         f"`{item['name']}` ({item['path']}) is gone after this edit but is still called from "
+                         f"{sites}: update the callers or keep the name.{same}")
+        if not answer["findings"]:
+            names = ", ".join(f"`{name}`" for name in answer["changed" if resigned else "removed"])
+            lines.append(f"no caller of {names}, whose signature changed, was found." if resigned else
+                         f"no caller of the removed {names} was found.")
+    notes = " ".join(dict.fromkeys(answer["note"] for answer in answers if answer["note"]))
+    return "Smart Tool callers: " + " ".join(lines) + (f" {notes}" if notes else "")
+
+
 def _credential_lines(findings):
     lines = [f"{rel}:{item['line']} looks like a {item['kind']}" for rel, item in findings[:MAX_DOC_FINDINGS]]
     if len(findings) > MAX_DOC_FINDINGS:
@@ -300,15 +332,77 @@ def _credential_lines(findings):
             "variable or a secret store. If it is a fake value for a test, go ahead.")
 
 
-def _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode="off", layer_mode="off"):
+def _link_lines(broken, unchecked):
+    """The link notes: the links that point to nothing, and the ones that could not be checked with the reason."""
+    parts = []
+    if broken:
+        lines = [f"{rel}:{item['line']} points to `{item['link']}`, which does not exist" for rel, item in broken[:MAX_DOC_FINDINGS]]
+        if len(broken) > MAX_DOC_FINDINGS:
+            lines.append(f"{len(broken) - MAX_DOC_FINDINGS} more link(s) in the same situation")
+        parts.append("Smart Tool links: " + "; ".join(lines) + ". Fix the path, or create the file if it is coming next.")
+    if unchecked:
+        lines = [f"{rel}{':' + str(item['line']) if item['line'] else ''}{' `' + item['link'] + '`' if item['link'] else ''} "
+                 f"({item['why']})" for rel, item in unchecked[:MAX_DOC_FINDINGS]]
+        if len(unchecked) > MAX_DOC_FINDINGS:
+            lines.append(f"{len(unchecked) - MAX_DOC_FINDINGS} more not checked")
+        parts.append("Smart Tool links not checked: " + "; ".join(lines) + ".")
+    return parts
+
+
+
+
+def _decision_lines(found):
+    """The note that names the decisions recorded about the touched functions, each note once.
+
+    Parameters: found (list of (rel, function name, hits)) the functions with a note and their `dossier.notes_about` hits.
+    Returns: str, empty when every note was already said.
+    """
+    seen, sentences = set(), []
+    for rel, name, hits in found:
+        fresh = [hit for hit in hits if hit["id"] not in seen]
+        seen.update(hit["id"] for hit in fresh)
+        if fresh:
+            sentences.append(f"`{name}` ({rel}) is named in " + "; ".join(f"`{hit['id']}` {hit['title']}" for hit in fresh))
+    return "Smart Tool decision notes: " + ". ".join(sentences) + ". Read them before changing what they record." \
+        if sentences else ""
+
+
+def _decision_findings(root, rel, touched, failures):
+    """The recorded decisions about the touched functions of one file, looked up in the project's notes (not its commit
+    messages: reading them runs a `git log` the budget cannot cut) within `DECISION_TIMEOUT_MS` each.
+
+    Parameters: root (str) project folder; rel (str) path of the file relative to it; touched (list) the functions
+    `doc_check.written` found touched; failures (list) where a search that fails or is cut adds its line.
+    Returns: list of (rel, function name, hits) for the functions that a note or commit message names.
+    """
+    found = []
+    for function in touched:
+        try:
+            answer = dossier.notes_about(root, rel, function["name"], timeout_ms=DECISION_TIMEOUT_MS, history=False)
+        except (OSError, ValueError, RuntimeError) as exc:
+            failures.append(f"Smart Tool decision notes check skipped: {exc}")
+            break
+        line = f"Smart Tool decision notes search cut: {'; '.join(answer['reasons'])}"
+        if answer["reasons"] and line not in failures:
+            failures.append(line)
+        if answer["hits"]:
+            found.append((rel, function["name"], answer["hits"]))
+    return found
+
+
+def _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode="off", layer_mode="off",
+                 link_mode="off", decision_mode="off"):
     """Checks of an edit before it runs. Docstrings follow doc_mode, in code files of registered projects only (tests,
     docs and files outside a project are left out, as in the docs coverage): missing ones deny the edit in require mode and become a reminder in remind mode; a
     documented function whose signature changed always gets a reminder. Comments the edit adds in the wrong place
     (see comment_check) follow comment_mode in the same files: require denies, remind adds context. Copies of indexed
     functions follow duplicate_mode and only add context, never deny. An edit of a package.json, requirements*.txt or go.mod follows dependency_mode: advisories
-    of the added or changed dependencies are added as context, never a denial."""
+    of the added or changed dependencies are added as context, never a denial. Local links an edit of an HTML or Markdown
+    file adds or changes follow link_mode: missing targets and links that cannot be checked are added as context. The notes
+    and commit messages that name a touched function follow decision_mode and only add context."""
     with code_graph.pending_scope():
-        return _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode)
+        return _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode, link_mode,
+                                   decision_mode)
 
 
 def _dependency_part(before, after, ecosystem):
@@ -324,19 +418,29 @@ def _dependency_part(before, after, ecosystem):
         return f"{dependency_notice.PREFIX}dependency check skipped: {exc}"
 
 
-def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode="off"):
-    """The checks of an edit over (path, before, after) triples: docstrings, comments, documentation anchors, copies and
-    dependency advisories, each following its mode.
+def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode="off", link_mode="off",
+                    decision_mode="off"):
+    """The checks of an edit over (path, before, after) triples: docstrings, comments, documentation anchors, copies,
+    dependency advisories, local links, layers and the decisions recorded about the touched functions, each following its mode.
 
-    Parameters: changes (iterable of (absolute path, text before or None, text after)); the four modes (`off` skips a check).
+    Parameters: changes (iterable of (absolute path, text before or None, text after)); the modes (`off` skips a check).
     Returns: tuple (message parts, doc findings, comment findings); the parts are empty when nothing is worth saying.
     """
     doc_findings, scope_findings, duplicate_findings, failures, dependency_parts = [], [], [], [], []
-    comment_findings, layer_findings, credential_findings = [], [], []
+    comment_findings, layer_findings, credential_findings, caller_answers = [], [], [], []
+    broken_links, unchecked_links = [], []
+    decision_findings, decisions_asked = [], 0
     for path, before, after in changes:
         root = _project_of(path)
         rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root)).replace(os.sep, "/") if root else os.path.basename(path)
         credential_findings += [(rel, item) for item in credential_check.review(before, after)]
+        if link_mode != "off":
+            try:
+                found = link_check.review(path, before, after)
+                broken_links += [(rel, item) for item in found["broken"]]
+                unchecked_links += [(rel, item) for item in found["unchecked"]]
+            except (ValueError, RuntimeError, OSError) as exc:
+                failures.append(f"Smart Tool links check skipped: {exc}")
         ecosystem = dependency_notice.ecosystem_of(path)
         if dependency_mode != "off" and ecosystem:
             dependency_parts += [part for part in (_dependency_part(before, after, ecosystem),) if part]
@@ -364,12 +468,27 @@ def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_
                 layer_findings += [(rel, item) for item in layer_check.review(root, rel, before, after, edited)]
             except (ValueError, RuntimeError, OSError) as exc:
                 failures.append(f"Smart Tool layers check skipped: {exc}")
+        if decision_mode != "off" and root and index_profile.kind(rel, profile) == "code":
+            asked = edited["touched"][:MAX_DECISION_FUNCTIONS - decisions_asked]
+            decisions_asked += len(asked)
+            decision_findings += _decision_findings(root, rel, asked, failures)
+        if root:
+            try:
+                for review, key in ((removed_callers.review, "removed"), (removed_callers.signature_review, "changed")):
+                    answer = review(root, rel, before, after)
+                    if answer["findings"] or answer[key] and answer["note"]:
+                        caller_answers.append(answer)
+            except (ValueError, RuntimeError, OSError) as exc:
+                failures.append(f"Smart Tool callers check skipped: {exc}")
     parts = ([_doc_lines(doc_findings)] if doc_findings else []) + \
         ([_comment_lines(comment_findings)] if comment_findings else []) + \
         ([_scope_lines(scope_findings)] if scope_findings else []) + \
         ([_duplicate_lines(duplicate_findings)] if duplicate_findings else []) + \
         ([_layer_lines(layer_findings)] if layer_findings else []) + \
-        ([_credential_lines(credential_findings)] if credential_findings else []) + failures + dependency_parts
+        ([_decision_lines(decision_findings)] if decision_findings else []) + \
+        ([_callers_lines(caller_answers)] if caller_answers else []) + \
+        ([_credential_lines(credential_findings)] if credential_findings else []) + \
+        _link_lines(broken_links, unchecked_links) + failures + dependency_parts
     return parts, doc_findings, comment_findings
 
 
@@ -380,16 +499,115 @@ def review_diff(changes, cfg):
     Returns: str, the hook's message for the whole set; empty when every check is quiet or off.
     """
     modes = (config.doc_mode(cfg), config.duplicate_mode(cfg), config.dependency_mode(cfg), config.comment_mode(cfg),
-             config.layer_mode(cfg))
+             config.layer_mode(cfg), config.link_mode(cfg), config.decision_mode(cfg))
     with code_graph.pending_scope():
         return " ".join(_review_changes(changes, *modes)[0])
 
 
-def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode="off", layer_mode="off"):
+def file_changes(root, base, rels):
+    """The (path, text before, text after) triples `review_diff` takes, for the text files among `rels`.
+
+    Parameters: root (str) folder the paths are relative to; base (str) git revision holding the text before; rels (iterable
+    of str) forward-slash paths relative to root.
+    Returns: list of (absolute path, text at base or None for a file new since base, current text); a file that cannot be
+    read as UTF-8, is over MAX_REVIEW_BYTES or is gone is left out.
+    """
+    triples = []
+    for rel in rels:
+        full = os.path.join(root, *rel.split("/"))
+        try:
+            if os.path.getsize(full) > MAX_REVIEW_BYTES:
+                continue
+            with open(full, encoding="utf-8") as stream:
+                after = stream.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        try:
+            before = affected_tests._git(root, "show", f"{base}:./{rel}")
+        except ValueError:
+            before = None
+        triples.append((full, before, after))
+    return triples
+
+
+_SHELL_STARTS = {}
+
+
+def note_shell_start(payload):
+    """Records when a shell call (Bash, PowerShell) starts, by its tool_use_id: the PostToolUse payload carries no start
+    time and no snapshot, so this is what tells the files the call wrote from the ones that were already changed."""
+    if not isinstance(payload, dict) or payload.get("tool_name") not in tool_redirect.NO_OP or not payload.get("tool_use_id"):
+        return
+    now = time.time()
+    for old in [key for key, at in _SHELL_STARTS.items() if now - at > SHELL_START_TTL_S]:
+        _SHELL_STARTS.pop(old, None)
+    _SHELL_STARTS[payload["tool_use_id"]] = now
+
+
+def _in_git_repository(folder):
+    """Whether folder or one of its parents holds a `.git` entry (a folder, or a file for a worktree or submodule)."""
+    folder = os.path.abspath(folder)
+    while True:
+        if os.path.exists(os.path.join(folder, ".git")):
+            return True
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            return False
+        folder = parent
+
+
+def _shell_review(payload):
+    """PostToolUse notes for the files a shell call wrote (`sed -i`, a redirection, `npm install`): the files git shows
+    changed since HEAD, tracked or not, whose modification time is not older than the call's start (see
+    `note_shell_start`), through the same checks as `review_diff`. A file the user or another tool changed before the
+    call is left out. Anything that stops the review, a git failure included, comes back as a note.
+
+    Parameters: payload (dict) the PostToolUse payload of the call.
+    Returns: the hook output, `{}` when there is nothing to say.
+    """
+    started = _SHELL_STARTS.pop(payload["tool_use_id"], None)
+    cwd = payload.get("cwd")
+    cfg = config.load_config()
+    modes = (config.doc_mode(cfg), config.duplicate_mode(cfg), config.dependency_mode(cfg), config.comment_mode(cfg),
+             config.layer_mode(cfg), config.link_mode(cfg), config.decision_mode(cfg))
+    if set(modes) == {"off"}:
+        return {}
+    if not isinstance(cwd, str) or not os.path.isdir(cwd) or not _in_git_repository(cwd):
+        return {}
+    if started is None:
+        return _shell_note("the start of this call was not recorded, so the files it wrote cannot be told apart")
+    try:
+        changed = affected_tests._changes(cwd, "HEAD")
+        written = sorted(rel for rel, found in changed.items() if found["status"] != "deleted"
+                         and _written_since(os.path.join(cwd, *rel.split("/")), started - MTIME_SLACK_S))
+        notes = review_diff(file_changes(cwd, "HEAD", written[:MAX_SHELL_REVIEW_FILES]), cfg)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        return _shell_note(str(exc))
+    if len(written) > MAX_SHELL_REVIEW_FILES:
+        notes += f" {len(written) - MAX_SHELL_REVIEW_FILES} more changed file(s) were not reviewed."
+    notes = notes.strip()
+    return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": notes}} if notes else {}
+
+
+def _written_since(path, moment):
+    """Whether path was modified at or after moment (seconds since the epoch); a file that cannot be read was not."""
+    try:
+        return os.stat(path).st_mtime >= moment
+    except OSError:
+        return False
+
+
+def _shell_note(reason):
+    return {"hookSpecificOutput": {"hookEventName": "PostToolUse",
+                                   "additionalContext": f"Smart Tool shell review skipped: {reason}"}}
+
+
+def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode="off", layer_mode="off",
+                        link_mode="off", decision_mode="off"):
     """`_edit_review` inside one `code_graph.pending_scope`, so the pending-changes scan runs once per review."""
     parts, doc_findings, comment_findings = _review_changes(
         edit_preview.preview(payload.get("tool_name"), payload.get("tool_input"), payload.get("cwd")),
-        doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode)
+        doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode, link_mode, decision_mode)
     if not parts:
         return {}
     message = " ".join(parts)
@@ -404,20 +622,22 @@ def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comm
 
 def decide(payload, client, web_route, jobs):
     """Hook output for one PreToolUse payload: edits follow doc_mode (require | remind | off) and duplicate_mode
-    (warn | off) and dependency_mode (warn | off), and every edit review also notes credentials the edit writes, the other tools follow hook_mode (redirect | advise | off). In redirect mode the Smart Tool call that
+    (warn | off) and dependency_mode (warn | off) and decision_mode (warn | off), and every edit review also notes credentials the edit writes, the other tools follow hook_mode (redirect | advise | off). In redirect mode the Smart Tool call that
     replaces a redirected one starts in `jobs` under the call's tool_use_id (see `_redirect`); only a search whose
     query cannot be built, or a client that sends no tool_use_id, is denied with the exact call to make, and never in a
     subagent whose tool list has no Smart Tool MCP tool: it has nothing to switch to."""
     cfg = config.load_config()
+    note_shell_start(payload)
     if isinstance(payload, dict):
         requester.note_origin(payload.get("session_id"), payload.get("cwd"))
     if isinstance(payload, dict) and payload.get("tool_name") in EDIT_TOOLS:
-        doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode = (
+        doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode, link_mode, decision_mode = (
             config.doc_mode(cfg), config.duplicate_mode(cfg), config.dependency_mode(cfg), config.comment_mode(cfg),
-            config.layer_mode(cfg))
-        if "off" == doc_mode == duplicate_mode == dependency_mode == comment_mode == layer_mode:
+            config.layer_mode(cfg), config.link_mode(cfg), config.decision_mode(cfg))
+        if "off" == doc_mode == duplicate_mode == dependency_mode == comment_mode == layer_mode == link_mode == decision_mode:
             return {}
-        return _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode)
+        return _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode, link_mode,
+                            decision_mode)
     if isinstance(payload, dict) and str(payload.get("tool_name")).startswith(f"mcp__{SMART_TOOL_SERVER}__"):
         if payload["tool_name"] == SMART_SEARCH_TOOL:
             router.CLIENT.set(client)
@@ -523,8 +743,8 @@ def _log_served(client, payload):
 
 def after(payload, client, jobs):
     """PostToolUse output: the call's own response with the Smart Tool answer started for its tool_use_id in the field
-    the model reads (`updatedToolOutput`), or `{}` when there is none, it did not come in time or the response has an
-    unknown shape (the native output stays)."""
+    the model reads (`updatedToolOutput`); for a shell call with no such answer, the notes of `_shell_review` on the files
+    it wrote; else `{}` (the native output stays)."""
     if not isinstance(payload, dict) or not payload.get("tool_use_id"):
         return {}
     key, tool_name = payload["tool_use_id"], payload.get("tool_name")
@@ -532,7 +752,7 @@ def after(payload, client, jobs):
     jobs.forget(key)
     output = tool_redirect.output_for(tool_name, payload.get("tool_response"), text) if text else None
     if output is None:
-        return {}
+        return _shell_review(payload) if tool_name in tool_redirect.NO_OP else {}
     _log_served(client, payload)
     return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": output}}
 

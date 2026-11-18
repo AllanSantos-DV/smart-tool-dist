@@ -211,7 +211,7 @@ def embed(model, texts, deadline=None, cancel_check=None, on_retry=None):
             for attempt in range(1, MAX_ATTEMPTS + 1):
                 if cancel_check:
                     cancel_check()
-                model_breaker.guard(model)
+                model_health.guard("/v1/embeddings", model)
                 conn.timeout = _left(deadline)
                 try:
                     with model_breaker.slot(model):

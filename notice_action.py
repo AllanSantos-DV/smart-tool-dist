@@ -5,6 +5,7 @@ Started by Windows through the protocol registered in `toast_notice.register`, w
 refused) is appended to `notice-actions.log` in the data folder, because nothing else can show an error here.
 """
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -18,6 +19,7 @@ import toast_notice
 
 LOG_PATH = os.path.join(paths.DATA_DIR, "notice-actions.log")
 LOG_MAX_BYTES = 256 * 1024
+NPM_VERSION = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?")
 
 
 def run(uri):
@@ -43,6 +45,13 @@ def run(uri):
         import update_check
         webbrowser.open(update_check.SITE_URL)
         return "changes opened"
+    if action == "update-now":
+        import update_check
+        target = params.get("v", "")
+        if not NPM_VERSION.fullmatch(target):
+            raise ValueError(f"Not an npm version: {target[:40]!r}")
+        update_check.run_update(target, automatic=False)
+        return f"update to {target} started"
     if action == "mute-model":
         import model_health
         return model_health.mute(params.get("model", ""))

@@ -40,7 +40,7 @@ CLIENTS = {
                "docs": "https://code.claude.com/docs/en/hooks", "event": "PreToolUse", "matcher": "Grep|Glob|Read|Bash|PowerShell|WebSearch|WebFetch|Edit|MultiEdit|Write|mcp__smart-tool__smart_search|mcp__smart-tool__web_search|mcp__smart-tool__web_fetch", "http": True,
                "post_matcher": "Grep|Bash|PowerShell|WebFetch|WebSearch"},
     "codex": {"label": "Codex", "prefix": "codex", "files": [os.path.join(endpoint_sync.codex_dir(), "hooks.json"), os.path.join(endpoint_sync.codex_dir(), "config.toml")],
-              "docs": "https://learn.chatgpt.com/docs/hooks", "event": "PreToolUse", "matcher": "Bash|apply_patch",
+              "docs": "https://learn.chatgpt.com/docs/hooks", "event": "PreToolUse", "matcher": "Bash|apply_patch", "post_matcher": "Bash",
               "after_install": "Smart Tool recorded the approval of the new definition in Codex's config.toml, as /hooks "
                                "would, so Codex runs it from the next session on."},
     "cursor": {"label": "Cursor", "prefix": "cursor", "files": [os.path.join(HOME, ".cursor", "hooks.json")],
@@ -64,7 +64,7 @@ def _our_hook(hook):
 
 def _entries(client):
     """{event: (matcher, handler)} of our hook entries for the client: the PreToolUse, plus the PostToolUse that returns
-    the Smart Tool answer of a redirected call in Claude Code."""
+    the Smart Tool answer of a redirected call and the review of the files a shell call wrote."""
     spec = CLIENTS[client]
     entries = {spec["event"]: (spec["matcher"], _handler(client))}
     if spec.get("post_matcher"):
@@ -237,9 +237,11 @@ def _shell_safe(path):
     return path.replace("\\", "/")
 
 
-def _command(client):
-    """The PreToolUse command of a client without HTTP hooks, signed with HOOK_ORIGIN at the end."""
-    return f"{_shell_safe(sys.executable)} {_shell_safe(HOOK_SCRIPT)} --client {client} {HOOK_ORIGIN}"
+def _command(client, route=HTTP_PATH):
+    """The command of a client without HTTP hooks for the PreToolUse route (default) or the PostToolUse one, signed with
+    HOOK_ORIGIN at the end."""
+    after = " --post" if route == POST_PATH else ""
+    return f"{_shell_safe(sys.executable)} {_shell_safe(HOOK_SCRIPT)} --client {client}{after} {HOOK_ORIGIN}"
 
 
 def _port_file():
@@ -253,14 +255,14 @@ def _port_file():
 
 def _handler(client, route=HTTP_PATH, timeout=HTTP_TIMEOUT_S):
     """Claude Code posts the payload straight to the warm daemon (`type: "http"`, no process per tool call); other
-    clients run the thin command that forwards to the PreToolUse route."""
+    clients run the thin command that forwards to the route."""
     if CLIENTS[client].get("http"):
         registry = daemon_launcher.read_registry()
         if not registry or not registry.get("url"):
             raise ValueError("Smart Tool daemon has no registered URL; start the daemon before installing the hook.")
         query = f"client={client}&hook-origin={OWNER}&port-file={_port_file()}"
         return {"type": "http", "url": f"{registry['url']}{route}?{query}", "timeout": timeout}
-    return {"type": "command", "command": _command(client), "timeout": timeout}
+    return {"type": "command", "command": _command(client, route), "timeout": timeout}
 
 
 def _slot(groups, is_ours):
@@ -340,7 +342,7 @@ def install(client_info, token, confirm):
 
 
 def remove(client):
-    """Takes every redirect hook entry of ours (PreToolUse, and the PostToolUse of Claude Code) out of the client's hooks
+    """Takes every redirect hook entry of ours (PreToolUse and PostToolUse) out of the client's hooks
     file after a backup; other hooks stay, in Codex at the approval of their new index. Returns {client, changed, file,
     backup}."""
     path = os.path.realpath(CLIENTS[client]["files"][0])

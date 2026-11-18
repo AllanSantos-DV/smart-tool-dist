@@ -32,7 +32,7 @@ def fetch(path, token, method="GET", body=None, timeout=15):
     if OFFLINE.get():
         raise RuntimeError(OFFLINE.get())
     model=body.get("model") if isinstance(body,dict) else None
-    model_breaker.guard(model)
+    model_health.guard(path,model)
     with model_breaker.slot(model):
         started=time.monotonic();result=None;headers=None;failure=None
         try:

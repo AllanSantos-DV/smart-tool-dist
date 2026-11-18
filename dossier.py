@@ -1,7 +1,8 @@
 """Dossier mode of smart_search: a narrow keyword query over the notes a project keeps about its own intent
 (docs/research, the backlog, CLAUDE.md and AGENTS.md; with `history`, also the messages of its commits), answered with
 ids and one short excerpt per hit, inside a time budget. It reads straight from disk, uses no index and no model, and
-never raises on a slow or unreadable file: it stops at the deadline and says so in `degraded`/`reasons`. The commit
+never raises on a slow or unreadable file: it stops at the deadline and says so in `degraded`/`reasons`. `notes_about`
+narrows it to the notes that name one function. The commit
 messages come from `doc_insights.history`, whose first read of a repository runs one `git log` that no deadline can
 cut, so `history` is opt-in and a read that outlasts the budget is reported in `reasons`."""
 import json
@@ -13,6 +14,7 @@ DEFAULT_TIMEOUT_MS = 800
 MAX_TIMEOUT_MS = 5000
 DEFAULT_MAX_HITS = 5
 MAX_HITS = 10
+MAX_FUNCTION_NOTES = 2
 SNIPPET_CHARS = 160
 TITLE_CHARS = 80
 MAX_FILE_BYTES = 512 * 1024
@@ -100,11 +102,12 @@ def _commit_units(root):
             for commit in commits], note
 
 
-def query(root, text, timeout_ms=DEFAULT_TIMEOUT_MS, max_hits=DEFAULT_MAX_HITS, history=False):
+def query(root, text, timeout_ms=DEFAULT_TIMEOUT_MS, max_hits=DEFAULT_MAX_HITS, history=False, keep=None):
     """The dossier answer for `text` over the notes of `root`: `{"mode", "degraded", "reasons", "elapsed_ms",
     "scanned", "hits": [{"id", "source", "title", "snippet"}]}`, best hit first. `id` is `path:line` of the unit's
     first line, or `git:<hash>` for a commit message (`history` true; source `git`). `degraded` is true when the
-    deadline cut the scan or a file could not be read; `hits` then holds what was found until then."""
+    deadline cut the scan or a file could not be read; `hits` then holds what was found until then. `keep`, when given,
+    is a predicate over the whole text of a unit that a unit must also pass to count."""
     started = time.monotonic()
     deadline = started + timeout_ms / 1000
     terms = focus_terms(text)
@@ -126,7 +129,7 @@ def query(root, text, timeout_ms=DEFAULT_TIMEOUT_MS, max_hits=DEFAULT_MAX_HITS, 
             continue
         for number, unit in _units(lines):
             score = _score(unit, terms)
-            if score:
+            if score and (keep is None or keep("\n".join(unit))):
                 scored.append((score, rel, kind, number, unit))
     if unreadable:
         reasons.append("not read: " + "; ".join(unreadable[:5]))
@@ -139,7 +142,7 @@ def query(root, text, timeout_ms=DEFAULT_TIMEOUT_MS, max_hits=DEFAULT_MAX_HITS, 
             reasons.append(f"git history read took longer than {timeout_ms} ms")
         for short, _subject, unit in commits:
             score = _score(unit, terms)
-            if score:
+            if score and (keep is None or keep("\n".join(unit))):
                 scored.append((score, f"git:{short}", "git", None, unit))
     elif history:
         reasons.append(f"git history not read: timeout after {timeout_ms} ms")
@@ -148,6 +151,38 @@ def query(root, text, timeout_ms=DEFAULT_TIMEOUT_MS, max_hits=DEFAULT_MAX_HITS, 
              "snippet": _snippet(unit, terms)} for _score_value, rel, kind, number, unit in scored[:max_hits]]
     return {"mode": "dossier", "degraded": bool(reasons), "reasons": reasons,
             "elapsed_ms": round((time.monotonic() - started) * 1000), "scanned": scanned, "hits": hits}
+
+
+def mention_test(rel, qualified):
+    """A predicate over the text of one note: true when the note names the function `qualified` of the file `rel`.
+
+    A single word is also ordinary prose, so it counts only qualified, as `module.name` (the file's name without its
+    extension) or `Owner.name` (the class or function around it). A compound name (snake_case or camelCase, two words
+    or more) is distinctive enough as the bare identifier; it does not count when another name qualifies it
+    (`other.name`) or when it is itself a qualifier (`name.attribute`).
+    """
+    *owners, name = qualified.split(".")
+    stem = rel.rpartition("/")[2].rpartition(".")[0]
+    qualifiers = "|".join(re.escape(part) for part in (stem, *owners[-1:]) if part)
+    escaped = re.escape(name)
+    qualified_form = re.compile(rf"(?<![\w.])(?:{qualifiers})\.{escaped}(?!\w)")
+    if len([word for word in re.split(r"_|(?<=[a-z])(?=[A-Z])", name.strip("_")) if word]) < 2:
+        return lambda text: bool(qualified_form.search(text))
+    bare_form = re.compile(rf"(?<![\w.]){escaped}(?!\w|\.\w)")
+    return lambda text: bool(qualified_form.search(text) or bare_form.search(text))
+
+
+def notes_about(root, rel, qualified, timeout_ms=DEFAULT_TIMEOUT_MS, history=True):
+    """The notes of `root`, and its commit messages when `history`, that name one function, at most `MAX_FUNCTION_NOTES`.
+
+    Parameters: root (str) project folder; rel (str) path of the file of the function, relative to root with forward
+    slashes; qualified (str) the function's name as `doc_check.functions` gives it (`Class.method` for a method);
+    timeout_ms (int) scan budget; history (bool) also read the commit messages, whose first read after a commit runs a
+    `git log` no deadline can cut.
+    Returns: the `query` answer, keeping only the units `mention_test` accepts.
+    """
+    name = qualified.rpartition(".")[2].strip("_")
+    return query(root, name, timeout_ms, MAX_FUNCTION_NOTES, history=history, keep=mention_test(rel, qualified))
 
 
 def answer(arguments):

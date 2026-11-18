@@ -17,7 +17,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.80 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.81 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -84,7 +84,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.80 install
+npx @allansantos-dev/smart-tool@0.9.81 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -277,7 +277,12 @@ Redirects) and Maintenance (Setup audit, Startup).
    a touched function (a single-word name counts only as a code reference), the files that usually change in the same
    commits and are missing from the diff, the notes the edit hook would have added to the whole diff (comments, copies,
    dependency advisories, credentials) and the tests to run with their commands. It reads
-   only; publishing it as a pull-request comment is left to the CI step that calls it.
+   only. `project_manage action=pr_impact_comment pr=<number> base=<revision>` posts the same report as a comment on that
+   pull request through the `gh` CLI, from the project folder, and returns the comment URL. It writes to GitHub with your
+   own `gh` login, so it is off until you turn on "Impact report as a pull request comment" in the setup screen (Agent
+   rules; `"pr_comment": "on"` in `config.json`); with it off, or with `gh` missing or not logged in, it refuses and
+   posts nothing. A rerun edits the last Smart Tool comment (marked by a hidden HTML comment) instead of adding another,
+   and the body shows no path of your machine.
 
    **Shape of the project**: `project_manage action=hotspots` ranks the code files by commits times lines (the
    riskiest to change), `dead_code` lists the functions no code calls and those only tests call (static call graph,
@@ -288,6 +293,18 @@ Redirects) and Maintenance (Setup audit, Startup).
    **Layers on edit**: when the project has confirmed layers (`.smart-tool/layers.json`), an edit that adds a call from
    a lower layer to a function of a higher one is flagged to the agent; it never blocks. `layer_mode` in
    `config.json`: `warn` (default) or `off`, also on the setup screen.
+
+   **Broken links on edit**: an edit of an HTML or Markdown file that adds or changes a relative link (`href`, `src`,
+   a Markdown link target) to a file that does not exist is flagged to the agent, with the links it could not check
+   (a path from the site root, a template expression, a `<base>` element); it never blocks. `link_mode` in
+   `config.json`: `warn` (default) or `off`, also on the setup screen.
+   **Recorded decisions on edit**: for the first three functions an edit touches in a code file, the hook names up to two
+   notes of the project (`docs/research`, the backlog, `CLAUDE.md`, `AGENTS.md`) that name the function, as `path:line` and
+   the title, so the agent reads what was decided before undoing it. A single-word function name counts only when a note
+   qualifies it as `module.name` or `Class.name`, a compound name as the bare identifier; the search reads files only (no
+   network, no model, no git history, 300 ms per function), says when it fails or is cut, and never blocks.
+   `decision_mode` in `config.json`: `warn` (default) or `off`, also on the setup screen. The measurement behind the rule is
+   in `docs/research/2026-11-18-decision-notes-keyword-quality.md`.
 
    **Folder and layer in a search**: `smart_search folder="<path>"` (or a list) and `layer="<name>"` restrict the
    search to a folder of the project or to one of its confirmed layers, by their path globs. The filter runs before
@@ -437,7 +454,7 @@ fails to load is listed in the setup screen with its error and does not affect t
 ## Uninstall
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.80 uninstall [--target DIR] [--keep-data]
+npx @allansantos-dev/smart-tool@0.9.81 uninstall [--target DIR] [--keep-data]
 ```
 
 It asks nothing and opens no window. It stops the tray and the daemon, removes the logon task, the hook entries of Smart

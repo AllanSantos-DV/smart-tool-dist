@@ -36,6 +36,8 @@ NOTICE_INTERVAL_S = 600
 NOTICE_RETRY_S = 15
 UPDATE_RETRY_S = 300
 NOTICE_UNREACHABLE_LOG_S = 600
+BALLOON_TEXT_MAX = 255
+BALLOON_TITLE_MAX = 63
 LOG_PATH = os.path.join(paths.DATA_DIR, "tray.log")
 LOG_MAX_BYTES = 256 * 1024
 SETUP_URL = "http://127.0.0.1:8765/setup"
@@ -89,13 +91,13 @@ def _set_state(health, icon=None):
         icon.title = i18n.t(_TITLES[health])
 
 
-def _notify(icon, text, buttons=(), **values):
+def _notify(icon, text, buttons=(), tag=None, **values):
     """Windows notification, translated (text is an English catalog key; buttons are (catalog key, protocol link)). A
     toast under Smart Tool's own app id, since the tray balloon is shown as "Python"; when Windows refuses the toast,
-    the balloon carries the text and the refusal."""
+    the balloon carries the text and the refusal. A toast with a tag replaces the earlier one with the same tag."""
     message = i18n.t(text, **values)
     try:
-        toast_notice.show("Smart Tool", [message], [(i18n.t(label), uri) for label, uri in buttons])
+        toast_notice.show("Smart Tool", [message], [(i18n.t(label), uri) for label, uri in buttons], tag=tag)
     except Exception as exc:
         icon.notify(f"{message} ({exc})", "Smart Tool")
 
@@ -146,12 +148,17 @@ def _poll_loop(icon):
         time.sleep(POLL_INTERVAL_S)
 
 
-def _toast(title, lines, buttons, tag):
-    """One notice: a toast Windows refuses goes to `tray.log` and does not keep the next notices from being shown."""
+def _toast(icon, title, lines, buttons, tag):
+    """One notice: a toast Windows refuses goes to `tray.log` and, cut to what a balloon holds, to the tray balloon; a
+    balloon that fails is logged too, and neither keeps the next notices from being shown."""
     try:
         toast_notice.show(title, lines, buttons, tag=tag)
     except Exception as exc:
         _log(f"notice {tag}: {type(exc).__name__}: {exc}")
+        try:
+            icon.notify(f"{' '.join(lines)} ({exc})"[:BALLOON_TEXT_MAX], title[:BALLOON_TITLE_MAX])
+        except Exception as balloon_exc:
+            _log(f"notice {tag}: balloon failed: {type(balloon_exc).__name__}: {balloon_exc}")
 
 
 def _show_notices(icon, notices):
@@ -160,14 +167,14 @@ def _show_notices(icon, notices):
     if offer:
         lines = [f"{role}: {change['current']} -> {change['new']}" for role, change in offer["changes"].items()]
         nonce = offer["nonce"]
-        _toast(i18n.t("Smart Tool has new recommended models"), lines, [
+        _toast(icon, i18n.t("Smart Tool has new recommended models"), lines, [
             (i18n.t("Apply now"), toast_notice.action_uri("models-apply", n=nonce)),
             (i18n.t("Don't show again"), toast_notice.action_uri("models-decline", n=nonce)),
         ], "models-upgrade")
     for row in notices.get("failing") or []:
         last = row.get("last_error") or i18n.t("see the failure log in the settings")
         _toast(
-            i18n.t("{model} is failing", model=row["model"]),
+            icon, i18n.t("{model} is failing", model=row["model"]),
             [i18n.t("{errors} of {calls} calls failed in 24 h as {role}.", errors=row["errors"], calls=row["calls"],
                     role=row["role"]), last[:160]],
             [(i18n.t("Switch model"), toast_notice.action_uri("open-setup", section="models")),
@@ -238,7 +245,7 @@ def _announce_start(icon):
     if failed:
         log = (i18n.N_("View log"), toast_notice.action_uri("open-update-log"))
         _notify(icon, "The update to {target} failed; Smart Tool {version} is still installed. It is tried again in "
-                "24 h, or now from this menu.", [log], target=failed, version=version.VERSION)
+                "24 h, or now from this menu.", [log], tag="update-failed", target=failed, version=version.VERSION)
 
 
 def _update_loop(icon):
@@ -274,8 +281,9 @@ def _update_loop(icon):
                 _notify(icon, "Updating Smart Tool from {old} to {new}...", old=version.VERSION, new=latest)
                 update_check.run_update(latest, automatic=True)
             elif not known:
+                update_now = (i18n.N_("Update now"), toast_notice.action_uri("update-now", v=latest))
                 _notify(icon, "Smart Tool {version} is available: use \"Update to {version}\" in this menu.",
-                        version=latest)
+                        [update_now], version=latest)
         time.sleep(UPDATE_RETRY_S if unreachable else UPDATE_CHECK_INTERVAL_S)
 
 
@@ -346,6 +354,17 @@ def _choose_language(lang):
             _notify(icon, "Could not change the language: {error}", error=exc)
         _follow_language(icon)
     return choose
+
+
+def _open_log(icon, item):
+    """Menu action: opens `tray.log` with the program Windows associates with it, or says there is none yet."""
+    if not os.path.exists(LOG_PATH):
+        _notify(icon, "There is no tray log yet.")
+        return
+    try:
+        os.startfile(LOG_PATH)
+    except OSError as exc:
+        _notify(icon, "Could not open the log: {error}", error=exc)
 
 
 def _open_setup(icon, item):
@@ -440,6 +459,7 @@ def main():
             pystray.MenuItem(lambda item: i18n.t("Projects and indexing…"), _open_projects, default=True),
             pystray.MenuItem(lambda item: i18n.t("Index a folder…"), _add_project),
             pystray.MenuItem(lambda item: i18n.t("Open settings"), _open_setup),
+            pystray.MenuItem(lambda item: i18n.t("Open tray log"), _open_log),
             pystray.MenuItem(lambda item: i18n.t("Start with Windows"), _toggle_autostart, checked=_autostart_checked),
             pystray.MenuItem(_update_label, _update_now),
             pystray.MenuItem(lambda item: i18n.t("Update automatically"), _toggle_auto_update,

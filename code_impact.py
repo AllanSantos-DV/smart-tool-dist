@@ -127,7 +127,7 @@ def impact(root, symbol, view_id=None, depth=3, limit=30):
     outgoing = [_site(by_id, c["target"], c["line"], label.get(t)) for t in targets for c in callees[t]
                 if c["target"] not in targets]
     files = {s["path"] for s in found}
-    importers = sorted({d["source"] for d in data["dependencies"] if d.get("target") in files and d["source"] not in files})
+    importers = sorted({d["source"] for d in data.get("dependencies") or [] if d.get("target") in files and d["source"] not in files})
     ordered_tests = sorted(tests.values(), key=lambda t: (t["hops"], t["path"], t["line"]))
     shown = direct[:limit] + outgoing[:limit] + ordered_tests[:limit]
     _name_test_callbacks(root, by_id, shown)
