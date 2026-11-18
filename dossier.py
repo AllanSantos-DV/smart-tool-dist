@@ -1,7 +1,9 @@
 """Dossier mode of smart_search: a narrow keyword query over the notes a project keeps about its own intent
-(docs/research, the backlog, CLAUDE.md and AGENTS.md), answered with ids and one short excerpt per hit, inside a time
-budget. It reads straight from disk, uses no index and no model, and never raises on a slow or unreadable file: it
-stops at the deadline and says so in `degraded`/`reasons`."""
+(docs/research, the backlog, CLAUDE.md and AGENTS.md; with `history`, also the messages of its commits), answered with
+ids and one short excerpt per hit, inside a time budget. It reads straight from disk, uses no index and no model, and
+never raises on a slow or unreadable file: it stops at the deadline and says so in `degraded`/`reasons`. The commit
+messages come from `doc_insights.history`, whose first read of a repository runs one `git log` that no deadline can
+cut, so `history` is opt-in and a read that outlasts the budget is reported in `reasons`."""
 import json
 import os
 import re
@@ -89,11 +91,20 @@ def _score(unit_lines, terms):
     return sum((term in low) + (term in title) for term in terms)
 
 
-def query(root, text, timeout_ms=DEFAULT_TIMEOUT_MS, max_hits=DEFAULT_MAX_HITS):
+def _commit_units(root):
+    """`[(hash, subject, [lines])]` of the commits of `root`, newest first (a subject can carry the whole reason), and
+    the reason no history could be read (None when it was)."""
+    import doc_insights
+    commits, note = doc_insights.history(root)
+    return [(commit["hash"], commit["subject"], [commit["subject"], *commit["body"].splitlines()])
+            for commit in commits], note
+
+
+def query(root, text, timeout_ms=DEFAULT_TIMEOUT_MS, max_hits=DEFAULT_MAX_HITS, history=False):
     """The dossier answer for `text` over the notes of `root`: `{"mode", "degraded", "reasons", "elapsed_ms",
     "scanned", "hits": [{"id", "source", "title", "snippet"}]}`, best hit first. `id` is `path:line` of the unit's
-    first line. `degraded` is true when the deadline cut the scan or a file could not be read; `hits` then holds what
-    was found until then."""
+    first line, or `git:<hash>` for a commit message (`history` true; source `git`). `degraded` is true when the
+    deadline cut the scan or a file could not be read; `hits` then holds what was found until then."""
     started = time.monotonic()
     deadline = started + timeout_ms / 1000
     terms = focus_terms(text)
@@ -119,8 +130,21 @@ def query(root, text, timeout_ms=DEFAULT_TIMEOUT_MS, max_hits=DEFAULT_MAX_HITS):
                 scored.append((score, rel, kind, number, unit))
     if unreadable:
         reasons.append("not read: " + "; ".join(unreadable[:5]))
+    if history and time.monotonic() <= deadline:
+        commits, note = _commit_units(root)
+        scanned += 1
+        if note:
+            reasons.append(f"git history: {note}")
+        if time.monotonic() > deadline:
+            reasons.append(f"git history read took longer than {timeout_ms} ms")
+        for short, _subject, unit in commits:
+            score = _score(unit, terms)
+            if score:
+                scored.append((score, f"git:{short}", "git", None, unit))
+    elif history:
+        reasons.append(f"git history not read: timeout after {timeout_ms} ms")
     scored.sort(key=lambda item: -item[0])
-    hits = [{"id": f"{rel}:{number}", "source": kind, "title": _clean(unit[0])[:TITLE_CHARS],
+    hits = [{"id": rel if number is None else f"{rel}:{number}", "source": kind, "title": _clean(unit[0])[:TITLE_CHARS],
              "snippet": _snippet(unit, terms)} for _score_value, rel, kind, number, unit in scored[:max_hits]]
     return {"mode": "dossier", "degraded": bool(reasons), "reasons": reasons,
             "elapsed_ms": round((time.monotonic() - started) * 1000), "scanned": scanned, "hits": hits}
@@ -138,7 +162,10 @@ def answer(arguments):
         raise ValueError("smart_search mode=dossier requires 'query_identifiers' (or 'doc_query') with at least one word.")
     timeout_ms = _bounded(arguments, "timeout_ms", DEFAULT_TIMEOUT_MS, 1, MAX_TIMEOUT_MS)
     max_hits = _bounded(arguments, "max_hits", DEFAULT_MAX_HITS, 1, MAX_HITS)
-    return json.dumps(query(root, text, timeout_ms, max_hits), ensure_ascii=False, separators=(",", ":"))
+    history = arguments.get("history", False)
+    if not isinstance(history, bool):
+        raise ValueError("history must be true or false.")
+    return json.dumps(query(root, text, timeout_ms, max_hits, history), ensure_ascii=False, separators=(",", ":"))
 
 
 def _bounded(arguments, name, default, low, high):

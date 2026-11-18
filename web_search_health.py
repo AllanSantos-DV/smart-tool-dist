@@ -77,6 +77,37 @@ def _read_recent_records():
     return records
 
 
+def by_requester():
+    """The recent web search calls read back as who asked: one row per client and project folder.
+
+    Paused calls are not calls and are left out. The log never holds the query text.
+    Returns: dict {"rows": [{"client", "project", "sessions", "calls", "failed", "last_at", "sources"}], "calls": int,
+    "unattributed": int}; rows are busiest first, `sources` says how far the attribution got (see `requester`), and
+    `unattributed` counts the calls recorded without a requester.
+    """
+    groups, unattributed, calls = {}, 0, 0
+    for record in _read_recent_records():
+        if record.get("outcome") == "paused":
+            continue
+        calls += 1
+        who = record.get("requester")
+        if not isinstance(who, dict):
+            unattributed += 1
+            continue
+        row = groups.setdefault((who.get("client") or "unknown", who.get("project") or ""),
+                                {"sessions": set(), "calls": 0, "failed": 0, "last_at": 0, "sources": set()})
+        row["calls"] += 1
+        row["failed"] += not record.get("success")
+        row["last_at"] = max(row["last_at"], record.get("ts") or 0)
+        row["sessions"].add(who.get("session") or who.get("mcp_session") or "")
+        row["sources"].add(who.get("source") or "none")
+    rows = [{"client": client, "project": project, "sessions": len(row["sessions"]), "calls": row["calls"],
+             "failed": row["failed"], "last_at": row["last_at"], "sources": sorted(row["sources"])}
+            for (client, project), row in groups.items()]
+    rows.sort(key=lambda row: (-row["calls"], -row["last_at"]))
+    return {"rows": rows, "calls": calls, "unattributed": unattributed}
+
+
 def recent_success_rate(tier_name, window=DEFAULT_WINDOW):
     records = [r for r in _read_recent_records() if r.get("tier") == tier_name and r.get("outcome") != "paused"]
     if not records:

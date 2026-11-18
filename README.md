@@ -8,7 +8,7 @@ A local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharpe
 | `smart_scout` | Answers a question about the code with the lines that answer it: reads the candidate files inside Smart Tool and returns `path:lines` with the literal text, so the files never enter the agent's context; with a `scout_model`, a small model also writes a short answer and keeps only the lines that support it; a question about why something is as it is (why, reason, decided) also lists up to three decision notes from the notes the project keeps about its intent, as ids with one excerpt each |
 | `web_search` / `web_search_result` | Web search across several sources in parallel, in the query language and in English, with a cache shared across sessions; `depth="research"` runs a multi-round research loop |
 | `web_fetch` | Reads a known URL and returns only the answer to your prompt, written by a small model; pages are cached for 24 h. Pages over 60,000 characters are not cut: the model reads the parts closest to the prompt (needs an `embedding_model`) |
-| `read_document` | Reads a PDF, Word, PowerPoint or Excel file as compact text, a range at a time: type, size, page/slide/sheet count and estimated tokens first, then only the pages, slides or sheets asked for (`range="3-5"`), so the file never enters the agent's context whole. Opt-in: the native Read is not redirected. Scanned PDFs fail with that reason (no OCR) |
+| `read_document` | Reads a PDF, Word, PowerPoint, Excel, HTML, CSV or EPUB file as compact text, a range at a time: type, size, page/slide/sheet/part/chapter count and estimated tokens first, then only the units asked for (`range="3-5"`), so the file never enters the agent's context whole. Opt-in: the native Read is not redirected. Scanned PDFs fail with that reason (no OCR) |
 | `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage; `graph` with `symbol` tells what changing a function touches: callers, calls, the tests that reach it and the files that import it |
 
 Agents that must click, type or log in also get Microsoft's [Playwright MCP](https://github.com/microsoft/playwright-mcp),
@@ -17,7 +17,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.79 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.80 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -59,7 +59,8 @@ session on the machine, so the same question asked twice costs nothing the secon
 **Reading a page.** `web_fetch` takes a URL and a question. It downloads the page over plain HTTP; when the page only
 shows its content with JavaScript, it opens it in a headless browser ([Moli](https://github.com/lexmount/moli)
 first, Chromium as the fallback), which never reaches this machine or your local network. PDFs are read as text, page
-by page. A small model then reads the page and returns only the answer, with the source.
+by page, and so are Word, PowerPoint and Excel files (docx, pptx, xlsx), by content type or by the extension of the URL
+when the server sends a generic binary type. A small model then reads the page and returns only the answer, with the source.
 The agent receives a paragraph instead of the whole page.
 
 **Steering the agent (optional hook).** Agents keep reaching for their built-in tools out of habit. The hook sees
@@ -83,7 +84,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.79 install
+npx @allansantos-dev/smart-tool@0.9.80 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -143,10 +144,13 @@ Redirects) and Maintenance (Setup audit, Startup).
    show again**) and the **New recommended models** card on this page offer them: nothing changes until you apply, the
    models you had are kept, and **Switch back to my previous models** undoes it. The **Model failures (last 24 h)** table
    groups the failed gateway calls by type (429, 503, other 5xx, timeout, connection, authentication) and role, with the count, the first and last time and one sample, and shows the calls per purpose; a model that fails half of its calls (5 or more) also raises a
-   notification and a tray alert. A failure inside a tool call also comes back as a warning line in the tool answer;
+   notification and a tray alert. The **Model use (last 30 days)** card adds the calls, failures and, when the gateway
+   reports them, tokens and cost per purpose over every project, and flags a purpose whose calls in one hour pass twice
+   its own busiest hour of the previous week (and at least 100); the flag has **Mute for 7 days** and never raises a
+   notification. A failure inside a tool call also comes back as a warning line in the tool answer;
    calls made by a hook or by background work (index scope and profile, block-pattern proposals) have no answer to
-   carry it, so they show only in the table, the log and the notification. The local embedder is not in that table or in
-   the usage meter: it is a sidecar on your machine with no price, and its state is the **Local models** section.
+   carry it, so they show only in the table, the log and the notification. The embeddings home records its calls and failures there like any other model, with no price; its
+   state, and the reason when it cannot identify its model, is the **Embedder** section.
 3. **Agents**: register the MCP server in Claude Code or Codex (runs their official `mcp add` command), install the
    hook and choose its behavior under **Agent rules**. A hook written by an older Smart Tool shows as outdated, with
    what an update changes; updating previews the entry and rewrites only Smart Tool's, after a backup. Every
@@ -268,16 +272,38 @@ Redirects) and Maintenance (Setup audit, Startup).
    `llms.txt`; it never creates the file and rewrites only the block.
 
    **Impact of a change**: `project_manage action=pr_impact [base=main]` returns a Markdown report of the change set
-   against `base` (default `HEAD`): the touched functions with their callers, the documentation anchors left out of
-   date, and the tests to run with their commands. It reads only; publishing it as a pull-request comment is left to
-   the CI step that calls it.
+   against `base` (default `HEAD`): the touched functions with their callers and the tests that reach them (the ones no
+   test reaches are listed apart), the documentation anchors left out of date, the decision notes and commits that name
+   a touched function (a single-word name counts only as a code reference), the files that usually change in the same
+   commits and are missing from the diff, the notes the edit hook would have added to the whole diff (comments, copies,
+   dependency advisories, credentials) and the tests to run with their commands. It reads
+   only; publishing it as a pull-request comment is left to the CI step that calls it.
 
-   **Dependency check on edit**: an edit of `package.json`, `requirements*.txt` or `go.mod` that adds or changes a dependency lists the OSV advisory IDs of up to 5 of them (exact version, or the lower bound of `^`, `~`, `~=` and `>=`), answered from a 6 h disk cache or one 2.5 s batch call that sends only package names and versions; when OSV cannot answer, the reminder says the check was skipped and the edit goes on. `dependency_mode` in `config.json`: `warn` (default) or `off`.
+   **Shape of the project**: `project_manage action=hotspots` ranks the code files by commits times lines (the
+   riskiest to change), `dead_code` lists the functions no code calls and those only tests call (static call graph,
+   candidates to read before deleting), `import_cycles` lists the groups of files that import each other, and
+   `comments` lists comments in the wrong place across the code files (commented-out code, history tags, loose docs,
+   long inline blocks), for code written before the edit hook existed. Each takes `limit` and writes nothing.
+
+   **Layers on edit**: when the project has confirmed layers (`.smart-tool/layers.json`), an edit that adds a call from
+   a lower layer to a function of a higher one is flagged to the agent; it never blocks. `layer_mode` in
+   `config.json`: `warn` (default) or `off`, also on the setup screen.
+
+   **Folder and layer in a search**: `smart_search folder="<path>"` (or a list) and `layer="<name>"` restrict the
+   search to a folder of the project or to one of its confirmed layers, by their path globs. The filter runs before
+   the ranking, so the results are the best inside the scope, not a cut of the global list.
+
+   **Credential check on edit**: the lines an edit adds or changes in any file are checked for credential shapes that cannot be
+   anything else (GitHub, Slack, Stripe live, Anthropic and npm tokens, Google API keys, AWS access key ids and secret key lines, a
+   private-key header at the start of a line); the note names the file and line, never repeats the value and never blocks, and a
+   line that says it is an example is skipped.
+
+   **Dependency check on edit**: an edit of `package.json`, `requirements*.txt`, `pyproject.toml` (`project.dependencies` and `project.optional-dependencies`; Poetry tables are not read), `go.mod`, `Cargo.toml` (crates.io registry dependencies) or `pom.xml` (Maven, plain or property-resolved versions) that adds or changes a dependency lists the OSV advisory IDs of up to 5 of them (exact version, or the lower bound of `^`, `~`, `~=` and `>=`), answered from a 6 h disk cache or one 2.5 s batch call that sends only package names and versions; when OSV cannot answer, the reminder says the check was skipped and the edit goes on. `dependency_mode` in `config.json`: `warn` (default) or `off`.
 
    **PDFs** inside a project are indexed as text with `[page N]` markers (20 MiB, 300 pages and 20 s per file; a scanned, password-protected or corrupt PDF is skipped with the reason), so `smart_search` returns the page that holds a passage. **Presentations and workbooks** (`.pptx`, `.xlsx`) are indexed the
    same way: text of each slide under `[slide N]` with the speaker notes under `[notes N]`, each sheet under `[sheet NAME]` with one
-   tab-separated line per row (cached formula values; 100,000 rows or 1 MiB of text at most). Older formats (`.ppt`, `.xls`,
-   `.xlsm`) are not read.
+   tab-separated line per row (cached formula values; 100,000 rows or 1 MiB of text at most). A macro-enabled `.xlsm` is read
+   like an `.xlsx` (its XML parts only, no macro runs). Older formats (`.ppt`, `.xls`, `.xlsb`, `.pptm`) are not read.
 
    **Block patterns waiting for you** are shown in one approval panel: 8 per page, the ones that would have blocked
    the most logged calls first, a filter over pattern, reason and example, and bulk accept or reject of the selected
@@ -305,6 +331,17 @@ Redirects) and Maintenance (Setup audit, Startup).
    `project_manage action=junk` lists the registered projects that break these rules; with `confirm=true` it
    unregisters them and deletes their index files (never the project's own files) and writes a manifest in
    `junk-manifests`. The daemon applies the same test at start.
+
+   `project_manage action=deps project_root="<project>"` lists the known OSV advisories of every dependency the manifests
+   of the project declare (`package.json`, `requirements*.txt`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `pom.xml`), not only the ones an edit changed;
+   a `package.json` with a `package-lock.json` beside it is checked at the locked version when it satisfies the range. Only package
+   names and versions leave the machine, in batches of 100 per ecosystem. The setup audit runs the same check for every
+   registered project (a warning per manifest with advisories; the 6 h cache keeps it from asking OSV on every run).
+
+   `smart_search mode=dossier history=true` also searches the messages of the commits that have a body, and
+   `smart_search decision_notes=true` appends the decision notes of the project (research notes, backlog, CLAUDE.md,
+   AGENTS.md and commit messages) to a search answer; both are off by default, and the first read of a repository's
+   history can take longer than the dossier budget, which the answer then says.
 
    `project_manage` with `action=setup_audit` and a `project_root` (or `python setup_audit.py --project <folder>`)
    reports what Claude Code and Codex actually load for that folder (settings layers, enabled plugins of both,
@@ -335,10 +372,20 @@ Redirects) and Maintenance (Setup audit, Startup).
    definition in `~/.codex/config.toml`, as `/hooks` would, so no `/hooks` step is left; an entry Codex does not trust
    shows "Not approved in Codex", and **Update** records it. It is off by default. The hook script
    (`hooks/session_audit.py`) only asks the running service and prints nothing when the service is down.
-4. **Local models** (optional): if the mcp-memory embedding sidecar is installed on the machine, its local embedder
-   can serve as a fallback (or preferred) embedding model.
+4. **Embedder**: the embeddings home (casa-de-embeddings, the embedding service of this machine, found through
+   `~/.casa-de-embeddings/run/daemon.json`) is the default; the gateway's `embedding_model` and `rerank_model` are used
+   only when you choose **Gateway** here, never in place of a stopped home. The home's embedder is identified by the
+   `model_sha256` and `dimension` of its `/info`; a home that answers without them is reported as an error, never
+   replaced silently by lexical search. Rerank goes through the home's connector to the rerank host configured in it;
+   without one, results keep the hybrid order and say so. Switching the embedder re-embeds each project in the
+   background, one at a time: the old index keeps answering, the folder switches to the new index when it is complete,
+   and the vectors of the old model are then deleted. While the home is not running, a folder indexed with another model
+   keeps answering from that index and is not updated.
 5. **Web search providers** work without keys on their free public tiers; add your own key for more volume. Set your
-   own contact (e-mail or URL) if you want public APIs such as Wikimedia to see it in the User-Agent.
+   own contact (e-mail or URL) if you want public APIs such as Wikimedia to see it in the User-Agent. The same page lists
+   who asked the recent searches (client and project folder, never the text of a search).
+6. **Automatic updates** (Startup page): the switch the tray menu also has, with the installed version, the last npm check,
+   the last update and a failed automatic try; no network call is made to draw it.
 
 ## Writing a model adapter
 
@@ -390,7 +437,7 @@ fails to load is listed in the setup screen with its error and does not affect t
 ## Uninstall
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.79 uninstall [--target DIR] [--keep-data]
+npx @allansantos-dev/smart-tool@0.9.80 uninstall [--target DIR] [--keep-data]
 ```
 
 It asks nothing and opens no window. It stops the tray and the daemon, removes the logon task, the hook entries of Smart

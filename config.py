@@ -40,12 +40,15 @@ DEFAULT_CONFIG = {
     "research_max_iterations": 3,
     "quick_search_timeout_s": 120,
     "site_memory_similarity_threshold": 0.35,
-    "local_models": "fallback",
+    "embedder": "home",
     "hook_mode": "redirect",
     "doc_mode": "require",
     "comment_mode": "require",
     "duplicate_mode": "warn",
     "dependency_mode": "warn",
+    "layer_mode": "warn",
+    "document_converter": "off",
+    "document_converter_python": "",
     "docs_extras": {key: True for key in DOCS_EXTRAS},
     "auto_update": True,
     "language": "",
@@ -60,9 +63,10 @@ DEFAULT_CONFIG = {
     },
 }
 
-# Local models from the mcp-memory sidecar: fallback = only when the gateway has no model; off = never;
-# prefer = even when the gateway has one (embedding quality measured equal on the rerank gold set).
-LOCAL_MODEL_MODES = ("fallback", "off", "prefer")
+# Embedder of the project indexes: home = the embeddings home daemon of this machine (casa-de-embeddings), whose rerank
+# connector forwards to the host configured in it; gateway = the gateway's embedding_model and rerank_model, only when
+# the user chooses it. Neither replaces the other when it fails.
+EMBEDDERS = ("home", "gateway")
 # PreToolUse hook: redirect = deny the native tool and point to Smart Tool; advise = let it run and add the tip to the
 # agent's context; off = no routing at all.
 HOOK_MODES = ("redirect", "advise", "off")
@@ -79,6 +83,11 @@ DUPLICATE_MODES = ("warn", "off")
 # Edit hook on package.json, requirements*.txt and go.mod: warn = let the edit run and list the added or changed dependencies that have OSV advisories;
 # off = say nothing and make no network call.
 DEPENDENCY_MODES = ("warn", "off")
+LAYER_MODES = ("warn", "off")
+# External converter read_document falls back to for a file type or a scanned PDF its native reader refuses: off = never;
+# auto = the first of kreuzberg and docling found installed; or one of them by name. The engine is looked for in the
+# interpreter named by `document_converter_python` (empty = the one Smart Tool runs on).
+DOCUMENT_CONVERTERS = ("off", "auto", "kreuzberg", "docling")
 # Router model reviewing, in the background, searches the deterministic redirect rule let run: on = propose block
 # patterns for the user to accept in the setup screen; off = no review.
 PATTERN_PROPOSAL_MODES = ("on", "off")
@@ -116,6 +125,26 @@ def dependency_mode(cfg=None):
     if value not in DEPENDENCY_MODES:
         raise ValueError(f"Invalid dependency_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
     return value
+
+
+def layer_mode(cfg=None):
+    value = (cfg if cfg is not None else load_config()).get("layer_mode") or DEFAULT_CONFIG["layer_mode"]
+    if value not in LAYER_MODES:
+        raise ValueError(f"Invalid layer_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
+    return value
+
+
+def document_converter(cfg=None):
+    """The external converter setting: `{"mode": one of DOCUMENT_CONVERTERS, "python": interpreter path or ""}`. An
+    unknown mode or a python that is not text fails loudly."""
+    stored = cfg if cfg is not None else load_config()
+    mode = stored.get("document_converter") or DEFAULT_CONFIG["document_converter"]
+    python = stored.get("document_converter_python") or ""
+    if mode not in DOCUMENT_CONVERTERS:
+        raise ValueError(f"Invalid document_converter ({mode!r}) in {CONFIG_PATH}: use off, auto, kreuzberg or docling.")
+    if not isinstance(python, str):
+        raise ValueError(f"Invalid document_converter_python in {CONFIG_PATH}: a path to a Python interpreter.")
+    return {"mode": mode, "python": python}
 
 
 def docs_extras(cfg=None):
@@ -183,10 +212,14 @@ def hook_mode(cfg=None):
     return value
 
 
-def local_models_mode(cfg=None):
-    value = (cfg if cfg is not None else load_config()).get("local_models") or DEFAULT_CONFIG["local_models"]
-    if value not in LOCAL_MODEL_MODES:
-        raise ValueError(f"Invalid local_models ({value!r}) in {CONFIG_PATH}: use fallback, off or prefer.")
+def embedder(cfg=None):
+    cfg = cfg if cfg is not None else load_config()
+    if "local_models" in cfg:
+        raise ValueError(f"{CONFIG_PATH} has the old 'local_models' setting: delete it and choose the embedder (home or "
+                         "gateway) in the setup screen.")
+    value = cfg.get("embedder") or DEFAULT_CONFIG["embedder"]
+    if value not in EMBEDDERS:
+        raise ValueError(f"Invalid embedder ({value!r}) in {CONFIG_PATH}: use home or gateway.")
     return value
 
 

@@ -7,13 +7,16 @@
 import asyncio
 import ipaddress
 import json
+import os
 import socket
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from crawl4ai import AsyncWebCrawler, BFSDeepCrawlStrategy, CacheMode, CrawlerRunConfig
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import chromium_flags
+from crawl4ai import AsyncWebCrawler, BFSDeepCrawlStrategy, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.async_crawler_strategy import AsyncPlaywrightCrawlerStrategy
 from crawl4ai.deep_crawling.filters import FilterChain, URLFilter
 from playwright.async_api import Error as PlaywrightError
@@ -205,9 +208,10 @@ async def crawl(seed_url, max_pages):
         cache_mode=CacheMode.BYPASS,
         page_timeout=30000,
     )
-    strategy = AsyncPlaywrightCrawlerStrategy()
+    browser_config = BrowserConfig(extra_args=chromium_flags.python_chromium_args())
+    strategy = AsyncPlaywrightCrawlerStrategy(browser_config=browser_config)
     strategy.set_hook("on_page_context_created", _install_ssrf_route_guard)
-    async with AsyncWebCrawler(crawler_strategy=strategy) as crawler:
+    async with AsyncWebCrawler(crawler_strategy=strategy, config=browser_config) as crawler:
         results = await crawler.arun(url=safe_seed_url, config=config)
         return [
             {"url": r.url, "markdown": r.markdown.raw_markdown}

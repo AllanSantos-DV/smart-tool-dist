@@ -1,5 +1,7 @@
 """Fila justa entre raízes; jobs aguardando a mesma pasta não ocupam workers. Um job de prioridade maior passa à frente
-dos de prioridade menor ainda na fila (o que já está rodando não é interrompido)."""
+dos de prioridade menor ainda na fila (o que já está rodando não é interrompido). Pistas (`lane`) distintas da mesma pasta
+rodam em paralelo. Com `reserved_lane`, as outras pistas nunca ocupam o último worker livre: uma prioridade só ordena
+a fila e não libera worker, então sem a reserva uma busca espera o fim de um job longo."""
 import collections
 import concurrent.futures
 import threading
@@ -8,16 +10,19 @@ import project_identity
 
 
 class ProjectScheduler:
-    def __init__(self, workers=3):
+    def __init__(self, workers=3, reserved_lane=None):
         self.workers = workers
+        self.reserved_lane = reserved_lane
         self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="project")
         self._lock = threading.RLock()
         self._queues = collections.OrderedDict()
         self._running = set()
         self._closed = False
 
-    def submit(self, root, function, *args, priority=0):
-        key = project_identity.canonical_root(root)
+    def submit(self, root, function, *args, priority=0, lane=None):
+        """Queues `function`. Jobs of one folder run one at a time within a lane; jobs of one folder in different
+        lanes run side by side (the caller keeps them from writing the same data)."""
+        key = (project_identity.canonical_root(root), lane)
         future = concurrent.futures.Future()
         with self._lock:
             if self._closed:
@@ -31,6 +36,9 @@ class ProjectScheduler:
     def _dispatch(self):
         while len(self._running) < self.workers:
             waiting = [root for root in self._queues if root not in self._running]
+            if self.reserved_lane is not None and sum(
+                    lane != self.reserved_lane for _root, lane in self._running) >= self.workers - 1:
+                waiting = [key for key in waiting if key[1] == self.reserved_lane]
             if not waiting:
                 break
             key = max(waiting, key=lambda root: self._queues[root][0][3])

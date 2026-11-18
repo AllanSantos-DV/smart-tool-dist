@@ -102,7 +102,8 @@ def is_intent_question(question):
 
 def disk_lines(root, path, start, end):
     """`[(line_number, text)]` of lines `start..end` of the file as it is on disk now, or None when the file cannot be
-    read by the index rules (secret, dotfile, too large, binary, gone) or holds no line text (docx, pdf, pptx, xlsx)."""
+    read by the index rules (secret, dotfile, too large, binary, gone) or holds no line text (docx, pdf, pptx, xlsx;
+    `indexer.indexed_lines` serves those)."""
     if document_text.location_kind(path) != "source_line":
         return None
     data, encoding = indexer.read_indexable(root, path)
@@ -152,7 +153,8 @@ def evidence(root, rows, terms, max_files, window_lines):
     """Evidence items `{id, path, start, end, lines, symbols}` for the first `max_files` files of `rows` (search rows
     `{path, lines: "a-b", snippet, symbols}`), at most WINDOWS_PER_FILE non-overlapping windows per file, each the
     `window_lines` lines of the chunk with most `terms`, read from disk now. A file that cannot be read from disk keeps
-    the indexed snippet with its chunk range."""
+    the indexed snippet with its chunk range, except a PDF or Office file, whose window is chosen from the lines the
+    index stored (it never extracts the document again)."""
     items, files = [], []
     for row in rows:
         path = row["path"]
@@ -168,6 +170,8 @@ def evidence(root, rows, terms, max_files, window_lines):
         if len(mine) >= WINDOWS_PER_FILE or any(item["start"] <= end and start <= item["end"] for item in mine):
             continue
         lines = disk_lines(root, path, start, end)
+        if lines is None and document_text.is_extracted(path):
+            lines = indexer.indexed_lines(root, path, start, end)
         if lines:
             window = best_window(lines, terms, window_lines)
             if not window:

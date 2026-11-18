@@ -74,7 +74,8 @@ def npm_registry_evidence(package):
 
 NPM_NAME_RE = re.compile(r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+")
 NAME_RES = {"npm": NPM_NAME_RE, "PyPI": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*"),
-            "Go": re.compile(r"[A-Za-z0-9][A-Za-z0-9._~/-]*")}
+            "Go": re.compile(r"[A-Za-z0-9][A-Za-z0-9._~/-]*"), "crates.io": re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*"),
+            "Maven": re.compile(r"[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+")}
 
 
 def _osv_query(ecosystem, package, package_version):
@@ -120,7 +121,7 @@ def npm_advisories(package, package_version):
 def advisories_batch(ecosystem, packages, timeout):
     """Advisory IDs for each (package, version) of `packages` from one OSV `querybatch` call.
 
-    Parameters: ecosystem (str) "npm", "PyPI" or "Go"; packages (list of (name, version)); timeout (float) seconds for
+    Parameters: ecosystem (str) "npm", "PyPI", "Go", "crates.io" or "Maven"; packages (list of (name, version)); timeout (float) seconds for
     the request.
     Returns: list in the same order, each the sorted ID list or None when that package's answer is incomplete
     (next_page_token) or malformed, so it is unverified and not clean.

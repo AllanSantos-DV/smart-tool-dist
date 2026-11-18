@@ -48,6 +48,10 @@ MIN_CHARS = 200
 ANSWER_MAX_TOKENS = 1500
 FAILED_TTL_S = 600
 PLACEHOLDERS = ("carregando", "loading...", "enable javascript", "habilite o javascript", "ative o javascript")
+OFFICE_TYPES = {"application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx"}
+GENERIC_BINARY_TYPES = ("application/octet-stream", "application/zip", "binary/octet-stream")
 TEXT_TYPES = ("text/plain", "text/markdown", "text/x-markdown", "application/json", "text/csv", "application/xml",
               "text/xml")
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -226,6 +230,24 @@ def pdf_text(body, url, deadline):
         raise FetchError(f"PDF protected by a password is not read by web_fetch ({url}).") from None
 
 
+def office_extension(kind, url):
+    """`docx`, `pptx` or `xlsx` when the response is an Office file: by its content type, or by the extension in the URL
+    path when the server sends a generic binary type; None otherwise."""
+    if kind in OFFICE_TYPES:
+        return OFFICE_TYPES[kind]
+    extension = urllib.parse.urlsplit(url).path.rsplit(".", 1)[-1].lower()
+    return extension if kind in GENERIC_BINARY_TYPES and extension in OFFICE_TYPES.values() else None
+
+
+def office_text(body, extension, url):
+    """Text of a docx, pptx or xlsx with the markers and caps of document_text (the extractor the index uses, with its
+    archive guards); FetchError with the reason when the file cannot be read."""
+    try:
+        return document_text.extract(f"file.{extension}", body).decode("utf-8", errors="replace")
+    except document_text.DocumentError as exc:
+        raise FetchError(f"{extension} file could not be read ({url}): {exc}"[:300]) from None
+
+
 def read_page(url, deadline, render):
     """Page text (Markdown) from the 24 h cache, HTTP + trafilatura, or `render(url, deadline)` when HTTP comes thin."""
     url = normalize(url)
@@ -250,6 +272,8 @@ def read_page(url, deadline, render):
         text = _decode(body, charset)
     elif kind == "application/pdf":
         text = pdf_text(body, final_url, deadline)
+    elif office_extension(kind, final_url):
+        text = office_text(body, office_extension(kind, final_url), final_url)
     else:
         raise FetchError(f"Content type {kind} is not read by web_fetch ({final_url}).")
     if len(text.strip()) < MIN_CHARS:

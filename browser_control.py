@@ -29,6 +29,7 @@ import time
 import tomllib
 
 import atomic_io
+import chromium_flags
 import codex_config
 import endpoint_sync
 import install_runtime
@@ -44,14 +45,19 @@ CONFIG_PATH = os.path.join(paths.DATA_DIR, "playwright-mcp.json")
 HANDSHAKE_PATH = os.path.join(paths.DATA_DIR, "playwright-mcp-handshake.json")
 PROXY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lazy_mcp_proxy.py")
 AGENT_UA_MARK = "SmartToolAgentBrowser"
+MCP_PLAYWRIGHT_BUNDLE = install_runtime.NODE_DIR / "node_modules" / "playwright-core" / "lib" / "coreBundle.js"
 OUTPUT_MAX_BYTES = 100 * 1024 * 1024
 PROBE_TIMEOUT_S = 60
 DENIED_TOOLS = ("browser_run_code_unsafe",)
 _CODEX_TABLE_RE = re.compile(rf"^\[mcp_servers\.{SERVER}\][ \t]*\r?\n", re.M)
-_CHROMIUM_PROBE = ("from playwright.sync_api import sync_playwright\n"
+_CHROMIUM_PROBE = ("import sys\n"
+                   f"sys.path.insert(0, {os.path.dirname(os.path.abspath(__file__))!r})\n"
+                   "import chromium_flags\n"
+                   "from playwright.sync_api import sync_playwright\n"
                    "with sync_playwright() as p:\n"
                    " print(p.chromium.executable_path)\n"
-                   " b = p.chromium.launch(headless=True); print(b.new_page().evaluate('navigator.userAgent')); b.close()")
+                   " b = p.chromium.launch(headless=True, args=chromium_flags.python_chromium_args())\n"
+                   " print(b.new_page().evaluate('navigator.userAgent')); b.close()")
 
 
 def chromium():
@@ -100,7 +106,8 @@ def write_config(user_agent):
     a CORS request does not count it as an author header, so no preflight is added; a header in extraHTTPHeaders
     forced one on every cross-origin fetch and font."""
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    config = {"browser": {"contextOptions": {"userAgent": f"{user_agent} {AGENT_UA_MARK}"}}}
+    config = {"browser": {"launchOptions": {"args": [chromium_flags.disable_features_arg(MCP_PLAYWRIGHT_BUNDLE)]},
+                          "contextOptions": {"userAgent": f"{user_agent} {AGENT_UA_MARK}"}}}
     atomic_io.write_secret_text(CONFIG_PATH, json.dumps(config, indent=1))
     return CONFIG_PATH
 

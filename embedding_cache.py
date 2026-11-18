@@ -12,13 +12,35 @@ import time
 import project_identity
 
 
+def _open(root, directory):
+    os.makedirs(directory, exist_ok=True)
+    db = sqlite3.connect(os.path.join(directory, project_identity.project_id(root) + '.vectors.sqlite3'), timeout=10)
+    db.execute('PRAGMA secure_delete=ON')
+    db.execute('CREATE TABLE IF NOT EXISTS vectors(key TEXT PRIMARY KEY, vector BLOB NOT NULL, used_at REAL NOT NULL, '
+               'model TEXT)')
+    if 'model' not in {row[1] for row in db.execute('PRAGMA table_info(vectors)')}:
+        db.execute('ALTER TABLE vectors ADD COLUMN model TEXT')
+    return db
+
+
+def drop_other_models(root, directory, model):
+    """Deletes the cached vectors of every model but `model` and gives their space back to the disk. Rows written
+    before the cache recorded the model are deleted too, unless a build of `model` reused them since."""
+    db = _open(root, directory)
+    try:
+        dropped = db.execute('DELETE FROM vectors WHERE model IS NOT ?', (model,)).rowcount
+        db.commit()
+        if dropped:
+            db.execute('VACUUM')
+        return dropped
+    finally:
+        db.close()
+
+
 class VectorCache:
     def __init__(self, root, directory, contract):
-        os.makedirs(directory, exist_ok=True)
-        path = os.path.join(directory, project_identity.project_id(root) + '.vectors.sqlite3')
-        self.db = sqlite3.connect(path, timeout=10)
-        self.db.execute('PRAGMA secure_delete=ON')
-        self.db.execute('CREATE TABLE IF NOT EXISTS vectors(key TEXT PRIMARY KEY, vector BLOB NOT NULL, used_at REAL NOT NULL)')
+        self.db = _open(root, directory)
+        self.model = contract.get('model')
         self.contract = json.dumps(contract, sort_keys=True, ensure_ascii=False)
         self.dimensions = contract.get('dimensions')
         self.hits = self.misses = self.characters = 0
@@ -32,18 +54,20 @@ class VectorCache:
         packed = array.array('f', vector)
         if not all(math.isfinite(value) for value in packed):
             raise ValueError('Embedding does not fit in float32; cache not written.')
-        self.db.execute('INSERT OR REPLACE INTO vectors VALUES(?,?,?)',
-                        (self.key(text), packed.tobytes(), time.time()))
+        self.db.execute('INSERT OR REPLACE INTO vectors VALUES(?,?,?,?)',
+                        (self.key(text), packed.tobytes(), time.time(), self.model))
 
     def embed(self, texts, embed_batch, validate, use_cache=True, split=None, workers=1):
         """Cache lookups and writes stay on the calling thread (sqlite); only embed_batch runs in workers."""
         output = [None] * len(texts)
         missing = {}
         for i, text in enumerate(texts):
-            row = self.db.execute('SELECT vector FROM vectors WHERE key=?', (self.key(text),)).fetchone() if use_cache else None
+            row = self.db.execute('SELECT vector, model FROM vectors WHERE key=?', (self.key(text),)).fetchone() if use_cache else None
             if row and self.dimensions:
                 vector = array.array('f'); vector.frombytes(row[0])
                 validate(vector, self.dimensions)
+                if row[1] is None:
+                    self.db.execute('UPDATE vectors SET model=? WHERE key=?', (self.model, self.key(text)))
                 output[i] = list(vector)
                 self.hits += 1
             else:

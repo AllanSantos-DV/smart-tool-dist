@@ -38,6 +38,84 @@ def _tables(db):
     db.execute('CREATE TABLE IF NOT EXISTS usage_hourly(hour INTEGER,purpose TEXT,attempts INTEGER,errors INTEGER,PRIMARY KEY(hour,purpose))')
     db.execute('CREATE TABLE IF NOT EXISTS usage_index_jobs(job_id TEXT PRIMARY KEY,project_id TEXT,view_id TEXT,view_label TEXT,at REAL,kind TEXT,embedded_chunks INTEGER,reused_chunks INTEGER,unchanged_files INTEGER,embedded_characters INTEGER)')
     db.execute('CREATE TABLE IF NOT EXISTS usage_imports(project_id TEXT PRIMARY KEY)')
+    db.execute('CREATE TABLE IF NOT EXISTS usage_alerts(purpose TEXT PRIMARY KEY,muted_until REAL)')
+
+
+VOLUME_FLOOR=100
+VOLUME_FACTOR=2
+VOLUME_BASELINE_HOURS=168
+VOLUME_MUTE_S=7*86400
+PURPOSE_MAX_CHARS=40
+
+
+def _raw_volume(db,now):
+    """Purposes whose attempts in the current UTC hour exceed their threshold: the larger of VOLUME_FLOOR and
+    VOLUME_FACTOR times the 99th percentile of that purpose's hourly attempts over the previous VOLUME_BASELINE_HOURS
+    hours (hours with calls only)."""
+    hour=int(now//3600)
+    series={}
+    for purpose,at,attempts in db.execute('SELECT purpose,hour,SUM(attempts) FROM usage_hourly WHERE hour>=? AND hour<=? GROUP BY purpose,hour',(hour-VOLUME_BASELINE_HOURS,hour)):
+        series.setdefault(purpose,{})[at]=attempts
+    found=[]
+    for purpose,hours in sorted(series.items()):
+        current=hours.get(hour,0)
+        past=sorted(value for at,value in hours.items() if at<hour)
+        baseline=past[max(0,math.ceil(len(past)*0.99)-1)] if past else 0
+        threshold=max(VOLUME_FLOOR,VOLUME_FACTOR*baseline)
+        if current>threshold:found.append({'purpose':purpose,'attempts':current,'threshold':threshold,'baseline_p99':baseline})
+    return found
+
+
+def _volume(now):
+    with project_store._LOCK,project_store._db() as db:
+        _tables(db)
+        found=_raw_volume(db,now)
+        muted=dict(db.execute('SELECT purpose,muted_until FROM usage_alerts').fetchall())
+    return [{**row,'muted':muted.get(row['purpose'],0)>now} for row in found]
+
+
+def volume_alerts(now=None):
+    """Purposes whose model calls in the current hour are far above their own history and not muted.
+
+    Parameters: now (float or None) epoch seconds. Returns: list of {purpose, attempts, threshold, baseline_p99, muted}."""
+    return [row for row in _volume(now or time.time()) if not row['muted']]
+
+
+def mute_volume(purpose,now=None):
+    """Silences the volume alert of one purpose for 7 days; the numbers stay on the card.
+
+    Raises: ValueError when purpose is not a short text."""
+    if not isinstance(purpose,str) or not purpose.strip() or len(purpose)>PURPOSE_MAX_CHARS:
+        raise ValueError('Name the purpose to mute (up to %d characters).'%PURPOSE_MAX_CHARS)
+    now=now or time.time()
+    with project_store._LOCK,project_store._db() as db:
+        _tables(db)
+        db.execute('INSERT INTO usage_alerts VALUES(?,?) ON CONFLICT(purpose) DO UPDATE SET muted_until=excluded.muted_until',(purpose,now+VOLUME_MUTE_S))
+    return 'volume alerts for %s muted for 7 days'%purpose
+
+
+def overview(days=30,now=None):
+    """Calls, errors and reported tokens and cost of every project per purpose over the last `days` UTC days, and the
+    hourly volume alerts (muted ones included, flagged).
+
+    Parameters: days (int) 1 to 366; now (float or None) epoch seconds.
+    Returns: {days, totals, by_purpose, volume, currency, notes}; reported tokens and cost are None when no call reported them."""
+    if type(days) is not int or not 1<=days<=366:raise ValueError('Choose a period from 1 to 366 days.')
+    now=now or time.time()
+    cutoff=(datetime.datetime.fromtimestamp(now,datetime.timezone.utc)-datetime.timedelta(days=days-1)).date().isoformat()
+    with project_store._LOCK,project_store._db() as db:
+        _tables(db)
+        rows=db.execute('SELECT purpose,SUM(attempts),SUM(errors),SUM(prompt_tokens),SUM(output_tokens),SUM(token_reports),SUM(reported_usd),SUM(price_reports) FROM usage_daily WHERE day>=? GROUP BY purpose ORDER BY SUM(attempts) DESC',(cutoff,)).fetchall()
+    def entry(purpose,attempts,errors,prompt,output,tokens,usd,prices):
+        return {'purpose':purpose,'attempts':attempts,'errors':errors,'prompt_tokens':prompt if tokens else None,
+                'output_tokens':output if tokens else None,'reported_usd':usd if prices else None}
+    by_purpose=[entry(*row) for row in rows]
+    totals={'attempts':sum(r['attempts'] for r in by_purpose),'errors':sum(r['errors'] for r in by_purpose),
+            'reported_usd':round(sum(r['reported_usd'] or 0 for r in by_purpose),6) if any(r['reported_usd'] is not None for r in by_purpose) else None}
+    return {'days':days,'totals':totals,'by_purpose':by_purpose,'volume':_volume(now),'currency':'USD',
+            'notes':['Calls and tokens are measured starting with the version that added the meter.',
+                     'Monetary values appear only when reported by the model gateway; they are not an estimate of the full bill.',
+                     'A volume alert compares the current hour with the same purpose over the previous week; it never raises a notification.']}
 
 
 def _number(value):

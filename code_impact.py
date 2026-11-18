@@ -1,6 +1,7 @@
 """What changing a function touches, from the indexed code graph: where it is defined, who calls it, what it calls,
 which tests reach it through static calls and which files import its module, each with the first line of its
 docstring. Answers the question an agent asks before an edit without a chain of searches and file reads."""
+import difflib
 import os
 import re
 from collections import defaultdict
@@ -21,6 +22,15 @@ def _matches(symbols, name):
     pool = [s for s in symbols if s["path"] == path or s["path"].endswith("/" + path)] if path else symbols
     exact = [s for s in pool if s["id"] == wanted or s["name"] == wanted]
     return exact or [s for s in pool if s["name"].split(".")[-1] == wanted]
+
+
+def _closest_names(symbols, name, limit=3):
+    """Up to `limit` indexed function or class names that resemble `name` (case ignored), best first."""
+    wanted = name.strip().rpartition("::")[2].casefold()
+    by_lower = {}
+    for symbol in symbols:
+        by_lower.setdefault(symbol["name"].split(".")[-1].casefold(), symbol["name"].split(".")[-1])
+    return [by_lower[key] for key in difflib.get_close_matches(wanted, list(by_lower), n=limit, cutoff=0.6)]
 
 
 def _site(by_id, symbol_id, line, of=None):
@@ -85,7 +95,9 @@ def impact(root, symbol, view_id=None, depth=3, limit=30):
     diagnostics = [d.get("reason") for d in data.get("diagnostics") or [] if d.get("reason")]
     if not found:
         cause = f" Analysis problems: {'; '.join(diagnostics)}" if diagnostics else ""
-        raise ValueError(f"No function or class named {symbol!r} in the indexed view; check the name or reindex.{cause}")
+        close = _closest_names(data.get("symbols") or [], symbol)
+        hint = f" Closest names: {', '.join(close)}." if close else ""
+        raise ValueError(f"No function or class named {symbol!r} in the indexed view; check the name or reindex.{hint}{cause}")
     profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile"))
     by_id = {s["id"]: s for s in data["symbols"]}
     callers, callees = defaultdict(list), defaultdict(list)

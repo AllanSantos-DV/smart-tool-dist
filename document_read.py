@@ -1,9 +1,10 @@
-"""read_document: PDF, Word, PowerPoint and Excel files read as compact text, one page, slide or sheet range at a time.
+"""read_document: PDF, Word, PowerPoint, Excel, HTML, CSV and EPUB files read as compact text, one page, slide, sheet,
+part or chapter range at a time.
 
 The agent gets the file facts first (type, size, pages, slides or sheets, estimated tokens) and then only the range it
 asks for, so a 200-page PDF is never loaded whole. Extraction is the one of document_text (pypdf in an isolated
-subprocess for PDF; zipfile and ElementTree with the shared guards for docx, pptx and xlsx); this module adds the unit
-split, the markdown shape, the compaction of PDF line wrapping and the range arithmetic."""
+subprocess for PDF; zipfile and ElementTree with the shared guards for docx, pptx, xlsx and epub; the standard HTML
+and CSV parsers for html and csv); this module adds the unit split, the markdown shape, the compaction of PDF line wrapping and the range arithmetic."""
 import collections
 import math
 import os
@@ -11,10 +12,14 @@ import re
 import threading
 import unicodedata
 
+import document_converter
 import document_text
 
-KINDS = {'.pdf': 'pdf', '.docx': 'docx', '.pptx': 'pptx', '.xlsx': 'xlsx'}
-UNIT_NAMES = {'pdf': 'page', 'docx': 'part', 'pptx': 'slide', 'xlsx': 'sheet'}
+KINDS = {'.pdf': 'pdf', '.docx': 'docx', '.pptx': 'pptx', '.xlsx': 'xlsx', '.xlsm': 'xlsx', '.html': 'html', '.htm': 'html',
+         '.csv': 'csv', '.epub': 'epub'}
+UNIT_NAMES = {'pdf': 'page', 'docx': 'part', 'pptx': 'slide', 'xlsx': 'sheet', 'html': 'part', 'csv': 'sheet',
+              'epub': 'chapter', 'converted': 'part'}
+LABELLED_KINDS = ('pdf', 'docx', 'html', 'epub', 'converted')
 DEFAULT_MAX_CHARS = 20_000
 MAX_CHARS_LIMIT = 100_000
 DOCX_PART_CHARS = 6_000
@@ -24,6 +29,14 @@ LONG_LINE = 60
 
 _cache = collections.OrderedDict()
 _cache_lock = threading.Lock()
+
+
+class NoTextLayer(document_text.DocumentError):
+    """A PDF whose pages carry no text: `pages` is its page count."""
+
+    def __init__(self, pages):
+        super().__init__(f'PDF of {pages} pages has no text layer (scanned pages are not read; there is no OCR).')
+        self.pages = pages
 
 
 class Unit:
@@ -74,13 +87,12 @@ def compact_pdf_text(text):
 
 
 def _pdf_units(data):
-    """Units and facts of a PDF, one unit per page; raises DocumentError for a password, a corrupt file or a file with no
-    text layer at all (scanned pages are not read, there is no OCR)."""
+    """Units and facts of a PDF, one unit per page; raises DocumentError for a password or a corrupt file, and NoTextLayer
+    for a file with no text layer at all."""
     pages, count = document_text.pdf_pages(data, document_text.PDF_TIMEOUT_S, document_text.PDF_MAX_PAGES,
                                            document_text.PDF_MAX_CHARS)
     if not any(pages):
-        raise document_text.DocumentError(
-            f'PDF of {count} pages has no text layer (scanned pages are not read; there is no OCR).')
+        raise NoTextLayer(count)
     units = [Unit(number, compact_pdf_text(page) or '(no text on this page)') for number, page in enumerate(pages, 1)]
     facts = {'pages': count, 'pages without text': sum(1 for page in pages if not page)}
     if count > len(pages):
@@ -89,19 +101,45 @@ def _pdf_units(data):
     return units, facts
 
 
-def _docx_units(data):
-    """Units and facts of a docx: the markdown blocks grouped in parts of about DOCX_PART_CHARS characters, a block never
-    split (a docx has no fixed pages, they depend on the renderer)."""
+def _parts(blocks):
+    """The markdown blocks grouped in parts of about DOCX_PART_CHARS characters, a block never split."""
     parts, current, size = [], [], 0
-    for block in document_text.docx_blocks(data):
+    for block in blocks:
         if current and size + len(block) > DOCX_PART_CHARS:
             parts.append('\n'.join(current))
             current, size = [], 0
         current.append(block)
         size += len(block) + 1
     parts.append('\n'.join(current))
+    return parts
+
+
+def _docx_units(data):
+    """Units and facts of a docx: the markdown blocks grouped in parts (a docx has no fixed pages, they depend on the
+    renderer)."""
+    parts = _parts(document_text.docx_blocks(data))
     return [Unit(number, text) for number, text in enumerate(parts, 1)], {
         'parts': len(parts), 'note': f'a docx has no fixed pages; a part is about {DOCX_PART_CHARS:,} characters'}
+
+
+def _html_units(data):
+    """Units and facts of an html file: the markdown blocks grouped in parts, as a docx (an html file has no pages)."""
+    parts = _parts(document_text.html_blocks(data))
+    return [Unit(number, text) for number, text in enumerate(parts, 1)], {
+        'parts': len(parts), 'note': f'a part is about {DOCX_PART_CHARS:,} characters of the page text'}
+
+
+def _csv_units(data):
+    """Units and facts of a csv file: one unit, the sheet `csv`, one tab-separated line per row."""
+    rows = document_text.csv_rows(data)
+    return [Unit(1, '\n'.join(['[sheet csv]'] + rows), 'csv')], {'rows': len(rows)}
+
+
+def _epub_units(data):
+    """Units and facts of an epub: one unit per chapter of the reading order."""
+    chapters = document_text.epub_chapters(data)
+    units = [Unit(number, '\n'.join(blocks) or '(no text)') for number, blocks in enumerate(chapters, 1)]
+    return units, {'chapters without text': sum(1 for blocks in chapters if not blocks)}
 
 
 def _pptx_units(data):
@@ -121,14 +159,51 @@ def _xlsx_units(data):
     return units, {'sheet names': ', '.join(f'{u.number}={u.name}' for u in units)}
 
 
-_BUILDERS = {'pdf': _pdf_units, 'docx': _docx_units, 'pptx': _pptx_units, 'xlsx': _xlsx_units}
+def _converted_pdf_units(path, count):
+    """Units and facts of a PDF with no text layer, read by the external converter as page images."""
+    result = document_converter.convert(path, expected_pages=count, force_ocr=True)
+    units = [Unit(number, page.strip() or '(no text on this page)') for number, page in enumerate(result.pages, 1)]
+    facts = {'pages without text': sum(1 for page in result.pages if not page.strip()),
+             'read by': f'{result.engine} (OCR of the page images)'}
+    if len(units) != count:
+        facts['note'] = f'the converter returned {len(units)} pages for a file of {count}'
+    return units, facts
+
+
+def _converted_units(path):
+    """Units and facts of a file the native reader has no type for, read by the external converter: its text grouped in
+    parts as a docx."""
+    result = document_converter.convert(path)
+    text = '\n\n'.join(page.strip() for page in result.pages if page.strip())
+    parts = _parts(text.split('\n'))
+    return [Unit(number, part) for number, part in enumerate(parts, 1)], {'parts': len(parts),
+                                                                          'read by': result.engine}
+
+
+def _build(path, kind):
+    """Units and facts of the file at `path`: its native builder, or, for a kind the native reader has none for and for a
+    PDF without a text layer, the external converter when the setting turns it on."""
+    if kind == 'converted':
+        return _converted_units(path)
+    with open(path, 'rb') as stream:
+        data = stream.read()
+    try:
+        return _BUILDERS[kind](data)
+    except NoTextLayer as exc:
+        if not document_converter.enabled():
+            raise
+        return _converted_pdf_units(path, exc.pages)
+
+
+_BUILDERS = {'pdf': _pdf_units, 'docx': _docx_units, 'pptx': _pptx_units, 'xlsx': _xlsx_units, 'html': _html_units,
+             'csv': _csv_units, 'epub': _epub_units}
 
 
 def load(path):
     """The document at `path`, split into units. Parsed documents are kept for a few calls (keyed by path, size and
     modification time), so reading page after page parses the file once.
 
-    Parameters: path (absolute path of a .pdf, .docx, .pptx or .xlsx file). Returns: a Document. Raises: ValueError for a
+    Parameters: path (absolute path of a .pdf, .docx, .pptx, .xlsx, .html, .htm, .csv or .epub file). Returns: a Document. Raises: ValueError for a
     relative path, a missing file, an unsupported type or a file over the size limit of its type; DocumentError with a
     readable reason for a file the extractor refuses (corrupt, encrypted, hostile, scanned, without text)."""
     if not isinstance(path, str) or not path.strip():
@@ -136,27 +211,27 @@ def load(path):
     if not os.path.isabs(path):
         raise ValueError(f'read_document needs an absolute path, got {path!r}')
     extension = os.path.splitext(path)[1].lower()
-    if extension not in KINDS:
+    converted = extension not in KINDS and extension in document_converter.EXTENSIONS and document_converter.enabled()
+    if extension not in KINDS and not converted:
         raise ValueError(f"read_document reads {', '.join(KINDS)} files; {extension or 'this file'} is not supported "
-                         '(use the normal Read for plain text; legacy .doc, .xls and .ppt and macro files are not read)')
+                         '(use the normal Read for plain text; legacy .doc, .xls, .xlsb and .ppt and macro files other than .xlsm are not read)')
     try:
         info = os.stat(path)
     except OSError as exc:
         raise ValueError(f'cannot read {path}: {exc.strerror or type(exc).__name__}') from None
     if not os.path.isfile(path):
         raise ValueError(f'{path} is not a file')
-    if info.st_size > document_text.size_limit(path):
-        raise ValueError(f'{path} is {info.st_size / 1048576:.1f} MiB, over the '
-                         f'{document_text.size_limit(path) // 1048576} MiB limit of a {extension} file')
+    limit = document_text.PDF_MAX_BYTES if converted else document_text.size_limit(path)
+    if info.st_size > limit:
+        raise ValueError(f'{path} is {info.st_size / 1048576:.1f} MiB, over the {limit // 1048576} MiB limit of a '
+                         f'{extension} file')
     key = (os.path.normcase(path), info.st_size, info.st_mtime_ns)
     with _cache_lock:
         if key in _cache:
             _cache.move_to_end(key)
             return _cache[key]
-    with open(path, 'rb') as stream:
-        data = stream.read()
-    kind = KINDS[extension]
-    units, facts = _BUILDERS[kind](data)
+    kind = 'converted' if converted else KINDS[extension]
+    units, facts = _build(path, kind)
     document = Document(path, kind, info.st_size, units, facts)
     with _cache_lock:
         _cache[key] = document
@@ -241,7 +316,7 @@ def read(path, range_spec=None, max_chars=DEFAULT_MAX_CHARS, info_only=False):
     body, shown, size, cut = [], [], 0, None
     for number in numbers:
         text = document.units[number - 1].text
-        label = f'[{unit} {number}]\n' if document.kind in ('pdf', 'docx') else ''
+        label = f'[{unit} {number}]\n' if document.kind in LABELLED_KINDS else ''
         piece = label + text
         if shown and size + len(piece) > max_chars:
             break

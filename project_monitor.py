@@ -70,11 +70,18 @@ def snapshot(root, scope):
 
 
 def index_model(current=None):
-    return local_embedder.resolve(config.load_config().get("embedding_model"), current)
+    return local_embedder.resolve(config.load_config(), current)
 
 
 def needs_model_rebuild(meta, configured_model):
-    return meta.get("model_id") != configured_model or not meta.get("exists")
+    """Whether the index must be built again for `configured_model`; never while the target model is unknown (None:
+    the embeddings home is not running and the index keeps answering as it is)."""
+    return configured_model is not None and (meta.get("model_id") != configured_model or not meta.get("exists"))
+
+
+def needs_model_switch(meta, configured_model):
+    """Whether an existing index holds another model than `configured_model` and must be re-embedded."""
+    return bool(meta.get("chunks")) and needs_model_rebuild(meta, configured_model)
 
 class ProjectMonitor:
     def __init__(self, enqueue, watcher_factory=directory_watch.DirectoryWatcher):
@@ -92,6 +99,7 @@ class ProjectMonitor:
         self._gap_level = {}
         self._filters = {}
         self._views = {}
+        self._switch = set()
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -238,6 +246,7 @@ class ProjectMonitor:
         projects = project_store.all_projects()
         self._sync_watchers(projects, now)
         busy = project_store.projects_with_pending_job()
+        switching = bool(busy)
         for project in projects:
             key = project["id"]
             if not monitored(project):
@@ -269,7 +278,13 @@ class ProjectMonitor:
                 if scope is not None:
                     changed |= snapshot(project["root"], scope) != indexer.manifest_snapshot(project["root"])
                 full = time.time() - meta.get("full_scan_at", 0) >= FULL_CHECK_S
-                changed |= needs_model_rebuild(meta, index_model(meta.get("model_id")))
+                target = index_model(meta.get("model_id"))
+                free = local_embedder.is_local(target) or target == indexer.LEXICAL_MODEL
+                if free and needs_model_switch(meta, target):
+                    self._switch.add(key)
+                else:
+                    self._switch.discard(key)
+                    changed |= needs_model_rebuild(meta, target)
                 project_store.update(key, last_checked=time.time())
                 if changed or full or project.get("dirty_seq", 0) > project.get("indexed_seq", 0):
                     with self._lock:
@@ -281,8 +296,17 @@ class ProjectMonitor:
                     if first:
                         project_store.mark_dirty(key, "Reconciliation found a pending update.")
                     project_store.record_changes(key, full=full, scope=rescope)
-            # Monitoramento local é independente do gasto com o modelo. O padrão
-            # somente registra pendência; a próxima busca executa o diff e embeddings.
+            # A switch to a model that costs nothing (the embeddings home, or lexical) runs in every update mode, one
+            # project at a time, so the old index keeps answering and searches keep a free worker. Outside eager mode
+            # any other change only stays pending for the next search, which pays the embeddings.
+            if key in self._switch:
+                if not switching:
+                    switching = True
+                    with self._lock:
+                        self._pending.setdefault(key, {"paths": set(), "last": now - DEBOUNCE_S, "full": False,
+                                                       "force_scope": False, "revision": 0})
+                    self._dispatch(key, now)
+                continue
             if project.get('update_mode', 'on_search') != 'eager':
                 with self._lock:
                     self._pending.pop(key, None)
@@ -314,7 +338,8 @@ class ProjectMonitor:
 
     def _dispatch_quiet(self, now):
         """Between full passes: sends the projects whose debounce ended, without listing every project of the registry.
-        A project that is not eager, is busy or is no longer monitored is left to the next full pass."""
+        A project that is not eager, is busy, is switching model or is no longer monitored is left to the next full
+        pass."""
         self._flush_notes(now)
         with self._lock:
             ready = [key for key, pending in self._pending.items()
@@ -324,7 +349,8 @@ class ProjectMonitor:
         busy = project_store.projects_with_pending_job()
         for key in ready:
             project = project_store.get(key)
-            if (project and key not in busy and monitored(project) and project.get("update_mode", "on_search") == "eager"):
+            if (project and key not in busy and key not in self._switch and monitored(project)
+                    and project.get("update_mode", "on_search") == "eager"):
                 self._dispatch(key, now)
 
     def _run(self):

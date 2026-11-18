@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.9.80 - beta
+
+- The document converter keeps its results in one folder per version, `%LOCALAPPDATA%\SmartTool\cache\<version>\convert`,
+  named by a hash of the file content, the engine and the OCR flag: the same file read again is answered from that folder
+  without starting the engine, a second run creates no file, two runs at once make one, a failed read leaves nothing, and
+  the folders of older versions are deleted the first time it is used. It no longer makes a new temporary folder in the
+  system temp for every read. Tests: `tests/test_document_converter.py`.
+- The edit hook also notes a credential an edit writes, in any file: only on the lines the edit adds or changes, and only
+  for shapes that cannot be anything else (GitHub, Slack, Stripe live, Anthropic and npm tokens, Google API keys, AWS
+  access key ids and secret key lines, a private-key header at the start of a line). Lines that say they are an example are
+  skipped, the note names the file and line and never repeats the value, and it never blocks. Tests:
+  `tests/test_credential_check.py`.
+- `project_manage action=pr_impact` adds two sections: the files that usually change in the same commits as the diff's files
+  and are missing from it (the history coupling of `doc_insights`, import-linked pairs left out), and the decision notes and
+  commit messages that name a touched function. A single-word function name counts only as a code reference (backticks or a
+  call), because words such as `load` or `report` are ordinary prose: measured on this repository, the bare-word match
+  returned unrelated notes for most single-word names. Tests: `tests/test_pr_impact.py`, `tests/test_code_health.py`.
+- The dependency check reads `Cargo.toml` (crates.io: the dependency, dev-dependency and build-dependency tables, `target.*`
+  and `workspace.dependencies`; path, git and `workspace = true` entries are not registry packages) and `pom.xml` (Maven:
+  `groupId:artifactId`, `${property}` versions resolved from the pom's own properties; a range or a version inherited from a
+  parent or BOM is reported as not verified), on an edit and in the audit. The OSV names `crates.io` and `Maven` come from
+  the OSV schema. Tests: `tests/test_dependency_manifests.py`.
+- Web search page: a table of who asked the recent searches, one row per client and project folder (sessions, calls,
+  failures, last call, how the requester was attributed), read from the log the search tiers already write; the text of a
+  search is never recorded. Tests: `tests/test_web_search_requesters.py`.
+- Startup page: an automatic update card with the switch (the same `auto_update` key as the tray menu), the installed
+  version, the last npm check, the last update, a failed automatic try and the manual command, read from the state file with
+  no network call; the switch is refused while `SMART_TOOL_AUTO_UPDATE=off` is set, as in the tray. Tests:
+  `tests/test_update_card.py`.
+- The browsers Smart Tool starts with Chromium (the Playwright MCP server the agent drives, its start-up probe, the
+  Tier 4 crawl) no longer scan USB devices: they carry `WebUsbDeviceDetection` in their `--disable-features`. The scan
+  ran a few seconds after launch and froze a USB microphone that was recording. Chromium keeps only the last
+  `--disable-features` switch and Playwright appends the caller's arguments after its own list, so the switch repeats
+  the list of the Playwright bundle in use and adds the feature; a bundle where that list cannot be found fails loudly.
+  Existing installs pick it up on the next update. Tests: `tests/test_chromium_flags.py`
+  (`docs/research/2026-11-17-webusb-do-navegador-de-automacao.md`).
+- `web_fetch` reads Word, PowerPoint and Excel files by URL (docx, pptx, xlsx): by content type, or by the extension
+  in the URL when the server sends a generic binary type, through the extractor the index uses and its archive guards.
+  A file that cannot be read says why. Tests: `tests/test_web_fetch.py`.
+- `project_manage action=deps` lists the OSV advisories of every dependency the project's manifests declare, in
+  batches of 100 per ecosystem (the edit notice shares the cache). `smart_search mode=dossier history=true` also
+  searches commit messages, and `smart_search decision_notes=true` appends the project's decision notes to a search
+  answer; both default to off. Tests: `tests/test_sister_candidates.py`.
+- `read_document` also reads HTML (`.html`, `.htm`), CSV and EPUB files with no new dependency: the standard HTML and
+  CSV parsers, and the archive guards of the Office formats for the epub package (its chapters are read in spine
+  order). A page or book in an encoding the reader cannot use, or over the text budget, fails with the reason. Tests:
+  `tests/test_document_formats.py`.
+- The dependency check reads `pyproject.toml` (`project.dependencies` and `project.optional-dependencies`; Poetry
+  tables are not read), both on an edit and in the audit. `project_manage action=deps` asks OSV about the version a
+  `package-lock.json` beside a `package.json` resolved when it satisfies the range (a stale lock, or a dependency missing
+  from it, keeps the lower bound of the range). The setup audit runs the same check for every registered project and
+  reports a warning per manifest with advisories, or a note when OSV cannot answer; the 6-hour advisory cache keeps the
+  30-minute schedule from asking again. `read_document` and the index read `.xlsm` workbooks like `.xlsx` (XML parts
+  only; `.xlsb`, `.xls`, `.ppt` and `.pptm` stay unread). Tests: `tests/test_second_lens.py`.
+- `project_manage action=pr_impact` lists the tests that reach each touched function, the functions no test reaches and
+  the notes the edit hook would have added to the whole diff, so commits made without the hook get the same checks.
+  New actions `hotspots`, `dead_code`, `import_cycles` and `comments` answer the questions the generated pages hold
+  without writing them. `layer_mode` (default `warn`, on the setup screen) flags an edit that adds a call from a lower
+  layer to a higher one of the confirmed layers. `smart_search` takes `folder` and `layer`, applied before ranking. The
+  setup screen shows the 30-day model use over every project and an hourly volume alert (twice the busiest hour of the
+  purpose's previous week, at least 100, mutable for 7 days, never a notification). Tests: `tests/test_pr_impact.py`,
+  `tests/test_code_health.py`, `tests/test_layer_check.py`, `tests/test_search_scope.py`,
+  `tests/test_usage_overview.py`.
+- `smart_scout` answers with the best excerpt of a PDF, docx, pptx or xlsx: the window is chosen from the lines the
+  index stored for the file (`indexer.indexed_lines`) instead of falling back to the search snippet, and the document
+  is never extracted again. A file the index holds no lines of keeps the snippet. Tests: `tests/test_scout.py`.
+
 ## 0.9.79 - beta
 
 - A graph cut by its limits says what it left out: `left_out` with the files, symbols and call or import relations

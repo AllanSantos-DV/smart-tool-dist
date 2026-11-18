@@ -1,5 +1,6 @@
 """Extração local de texto DOCX, PPTX, XLSX e PDF, sem Office, execução de macros ou acesso externo."""
 import contextlib
+import csv
 import io
 import json
 import posixpath
@@ -9,6 +10,8 @@ import sys
 import zipfile
 import xml.etree.ElementTree as ET
 import zlib
+from html.parser import HTMLParser
+from urllib.parse import unquote
 
 VERSION = 3
 PDF_MAX_BYTES = 20 * 1024 * 1024
@@ -58,7 +61,9 @@ class _Package:
         self.label = label
         self.xml_bytes = 0
 
-    def parse(self, name):
+    def read(self, name):
+        """The bytes of one part, charged to the XML budget; raises DocumentError for an encrypted or oddly compressed
+        part and for one that would pass the budget."""
         info = self.entries[name]
         if info.flag_bits & 1 or info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
             raise DocumentError(f'Encrypted {self.label} or unsupported compression.')
@@ -67,7 +72,13 @@ class _Package:
         with self.archive.open(info) as stream:
             raw = stream.read(MAX_XML_BYTES - self.xml_bytes + 1)
         self.xml_bytes += len(raw)
-        if self.xml_bytes > MAX_XML_BYTES or b'<!DOCTYPE' in raw.upper() or b'<!ENTITY' in raw.upper():
+        if self.xml_bytes > MAX_XML_BYTES:
+            raise DocumentError(f'{self.label} contains excessive XML or disallowed entities.')
+        return raw
+
+    def parse(self, name):
+        raw = self.read(name)
+        if b'<!DOCTYPE' in raw.upper() or b'<!ENTITY' in raw.upper():
             raise DocumentError(f'{self.label} contains excessive XML or disallowed entities.')
         builder = _DocumentTreeBuilder()
         builder.label = self.label
@@ -451,6 +462,182 @@ def extract_xlsx(data):
     return ('\n'.join(lines) + '\n').encode('utf-8')
 
 
+_SKIPPED_HTML = frozenset(('script', 'style', 'noscript', 'template', 'svg', 'head'))
+_BLOCK_HTML = frozenset(('p', 'div', 'br', 'section', 'article', 'header', 'footer', 'main', 'aside', 'nav', 'ul', 'ol',
+                         'blockquote', 'pre', 'hr', 'figure', 'figcaption', 'dl', 'dt', 'dd', 'table', 'body', 'form',
+                         'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li'))
+_CHARSET = re.compile(rb'charset\s*=\s*["\']?([\w.:-]+)', re.I)
+
+
+def _decode_text(data, label, declared=False):
+    """Text of a file's bytes: UTF-8 (a BOM is dropped), UTF-16 with a BOM, or, for markup, the charset it declares in
+    its first 2 KiB. A file that is none of those is refused, never decoded into wrong characters."""
+    if data.startswith((b'\xff\xfe', b'\xfe\xff')):
+        return data.decode('utf-16')
+    try:
+        return data.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        found = _CHARSET.search(data[:2048]) if declared else None
+        if found:
+            try:
+                return data.decode(found.group(1).decode('ascii'))
+            except (LookupError, UnicodeDecodeError):
+                pass
+    raise DocumentError(f'{label} is not UTF-8 and declares no encoding the reader can use.')
+
+
+class _HtmlText(HTMLParser):
+    """Markdown blocks of an HTML document: headings as `#`, list items as `- `, table rows as `a | b`, the other text
+    as lines. No tree is built and nothing is fetched or executed; script, style and the head except its title are
+    skipped. Output goes through a _Lines budget, so a page over MAX_TEXT_BYTES of text is refused."""
+
+    def __init__(self, label):
+        super().__init__(convert_charrefs=True)
+        self.blocks = _Lines(label)
+        self.pieces, self.prefix, self.skipped = [], '', 0
+        self.row, self.cell, self.title, self.in_title = [], 0, [], False
+
+    def _flush(self):
+        text = ' '.join(''.join(self.pieces).split())
+        self.pieces = []
+        if text:
+            self.blocks.add(self.prefix + text)
+        self.prefix = ''
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'body':
+            self.skipped = 0
+        if tag == 'title':
+            self.in_title = not self.title
+        elif tag in _SKIPPED_HTML:
+            self.skipped += 1
+        elif self.skipped:
+            return
+        elif tag in ('td', 'th'):
+            self.cell += 1
+        elif tag == 'tr':
+            self._flush()
+        elif tag in _BLOCK_HTML and not self.cell:
+            self._flush()
+            if tag[0] == 'h' and len(tag) == 2:
+                self.prefix = '#' * int(tag[1]) + ' '
+            elif tag == 'li':
+                self.prefix = '- '
+
+    def handle_endtag(self, tag):
+        if tag == 'title':
+            self.in_title = False
+        elif tag in _SKIPPED_HTML:
+            self.skipped = max(0, self.skipped - 1)
+        elif self.skipped:
+            return
+        elif tag in ('td', 'th') and self.cell:
+            self.cell -= 1
+            self.row.append(' '.join(''.join(self.pieces).split()))
+            self.pieces = []
+        elif tag == 'tr':
+            if any(self.row):
+                self.blocks.add(' | '.join(self.row))
+            self.row = []
+        elif tag in _BLOCK_HTML and not self.cell:
+            self._flush()
+
+    def handle_data(self, data):
+        if self.in_title:
+            self.title.append(data)
+        elif not self.skipped:
+            self.pieces.append(data)
+
+    def result(self):
+        self.close()
+        self._flush()
+        title = ' '.join(''.join(self.title).split())
+        return ([f'# {title}'] if title else []) + list(self.blocks)
+
+
+def _html_blocks(data, label):
+    parser = _HtmlText(label)
+    parser.feed(_decode_text(data, label, declared=True))
+    return parser.result()
+
+
+def html_blocks(data):
+    """Markdown blocks of an .html or .htm file in document order, for reading: the title as `#`, headings as `#`
+    levels, list items as `- `, table rows as `a | b`, other text as lines. Scripts, styles and the rest of the head
+    are not text; a link is its text.
+
+    Parameters: data (the file bytes). Returns: a list of blocks. Raises: DocumentError with a readable reason for an
+    encoding the reader cannot use, a page over MAX_TEXT_BYTES of text, or one without text."""
+    blocks = _html_blocks(data, 'HTML')
+    if not blocks:
+        raise DocumentError('HTML has no text.')
+    return blocks
+
+
+def csv_rows(data):
+    """The rows of a .csv file, for reading: one tab-joined line per non-empty row (the delimiter is `,`, `;`, tab or
+    `|`, found from the first 4 KiB), a line break inside a cell turned into a space.
+
+    Parameters: data (the file bytes). Returns: a list of lines. Raises: DocumentError with a readable reason for an
+    encoding the reader cannot use, malformed quoting, a file over XLSX_MAX_ROWS rows or MAX_TEXT_BYTES of text, or one
+    without text."""
+    text = _decode_text(data, 'CSV')
+    try:
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=',;\t|')
+    except csv.Error:
+        dialect = csv.excel
+    rows = _Lines('CSV')
+    try:
+        for record in csv.reader(io.StringIO(text, newline=''), dialect):
+            values = [' '.join(cell.split()) for cell in record]
+            if any(values):
+                if len(rows) >= XLSX_MAX_ROWS:
+                    raise DocumentError(f'CSV over {XLSX_MAX_ROWS} rows.')
+                rows.add('\t'.join(values))
+    except csv.Error as exc:
+        raise DocumentError(f'Could not read this CSV: {exc}.') from None
+    if not rows:
+        raise DocumentError('CSV has no text.')
+    return list(rows)
+
+
+def _epub_chapter_paths(package):
+    """Zip names of the XHTML parts of an EPUB in reading order: the package document the container names, its spine
+    resolved through the manifest. A part outside the archive or a path leaving it is refused."""
+    container = package.parse('META-INF/container.xml')
+    rootfile = next((node.get('full-path') for node in container.iter() if _local(node.tag) == 'rootfile'), None)
+    opf = posixpath.normpath((rootfile or '').lstrip('/'))
+    if not rootfile or opf.startswith('..') or opf not in package.entries:
+        raise DocumentError('Invalid EPUB or excessive structure.')
+    package_root = package.parse(opf)
+    manifest = {node.get('id'): node for node in package_root.iter() if _local(node.tag) == 'item'}
+    base = posixpath.dirname(opf)
+    paths = []
+    for itemref in (node for node in package_root.iter() if _local(node.tag) == 'itemref'):
+        item = manifest.get(itemref.get('idref'))
+        if item is None or item.get('media-type') not in ('application/xhtml+xml', 'text/html'):
+            continue
+        part = posixpath.normpath(posixpath.join(base, unquote(item.get('href', '')).split('#')[0]))
+        if part.startswith('..') or part not in package.entries:
+            raise DocumentError('Invalid EPUB or excessive structure.')
+        paths.append(part)
+    return paths
+
+
+def epub_chapters(data):
+    """The chapters of an .epub in reading order, for reading. Each XHTML part of the spine is read as HTML (see
+    html_blocks); the package is opened with the same guards as the Office formats.
+
+    Parameters: data (the file bytes). Returns: a list of block lists, one per chapter (a chapter without text is an
+    empty list). Raises: DocumentError with a readable reason for a corrupt, encrypted, oversized or hostile package, an
+    encoding the reader cannot use, or a book without any text."""
+    with _open_package(data, 'EPUB', 'META-INF/container.xml') as package:
+        chapters = [_html_blocks(package.read(path), 'EPUB') for path in _epub_chapter_paths(package)]
+    if not any(chapters):
+        raise DocumentError('EPUB has no text.')
+    return chapters
+
+
 PDF_SCRIPT = """
 import io, json, sys
 import pypdf
@@ -524,14 +711,15 @@ def extract_pdf(data):
     return (text + "\n").encode("utf-8", "replace")
 
 
-_EXTENSIONS = ('.docx', '.pptx', '.xlsx', '.pdf')
+_EXTENSIONS = ('.docx', '.pptx', '.xlsx', '.xlsm', '.pdf')
 
 
 def is_extracted(path):
     """Whether the file type goes through a text extractor before indexing.
 
-    Parameters: path (any file name or path). Returns: True for `.docx`, `.pptx`, `.xlsx` and `.pdf`, case-insensitive;
-    macro and binary formats (`.xlsm`, `.xlsb`, `.xls`, `.ppt`, `.pptm`) are not extracted."""
+    Parameters: path (any file name or path). Returns: True for `.docx`, `.pptx`, `.xlsx`, `.xlsm` and `.pdf`,
+    case-insensitive; an `.xlsm` is read as an `.xlsx` (its XML parts only, no macro runs); the binary and other macro
+    formats (`.xlsb`, `.xls`, `.ppt`, `.pptm`) are not extracted."""
     return str(path).lower().endswith(_EXTENSIONS)
 
 
@@ -552,7 +740,7 @@ def extract(path, data):
         return extract_pdf(data)
     if name.endswith('.pptx'):
         return extract_pptx(data)
-    if name.endswith('.xlsx'):
+    if name.endswith(('.xlsx', '.xlsm')):
         return extract_xlsx(data)
     return extract_docx(data)
 

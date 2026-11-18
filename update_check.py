@@ -159,6 +159,24 @@ def notices(now=None):
     return found
 
 
+def status():
+    """What the setup screen shows about updates, from the state file and the config only (no network).
+
+    Returns: dict with installed (str), latest and checked_at (the last npm check; None before the first), available
+    (bool, latest is newer than installed), command (the update command when available, else None), updated (the record
+    {from, to, at} of the last update, or None), failed (the version an automatic update went for and did not install,
+    else None), enabled (the `auto_update` config), env_opt_out (bool) and automatic (both allow automatic updates).
+    Raises: ValueError when `auto_update` in the config is not a boolean.
+    """
+    state = _state()
+    latest = state.get("latest")
+    available = bool(latest) and _parts(latest) > _parts(version.VERSION)
+    return {"installed": version.VERSION, "latest": latest, "checked_at": state.get("checked_at"), "available": available,
+            "command": update_command(latest) if available else None, "updated": state.get("updated"),
+            "failed": failed_update(), "enabled": config.auto_update(), "env_opt_out": env_opted_out(),
+            "automatic": automatic_enabled()}
+
+
 def run_update(latest, automatic):
     """Starts the update screen (update_splash.py) detached from the tray, which the installer stops and restarts:
     it runs the install command with no console window and shows each step and the result. npx is looked up by the

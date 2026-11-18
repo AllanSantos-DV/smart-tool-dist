@@ -30,6 +30,7 @@ import urllib.request
 import yaml
 
 import atomic_io
+import dependency_notice
 import client_hooks
 import endpoint_sync
 import paths
@@ -56,7 +57,8 @@ DOCS = {"claude_hooks": "https://code.claude.com/docs/en/hooks.md", "codex_hooks
         "claude_memory": "https://code.claude.com/docs/en/memory.md",
         "codex_agents_md": "https://developers.openai.com/codex/guides/agents-md",
         "claude_mcp": "https://code.claude.com/docs/en/mcp.md", "mcp_lifecycle":
-        "https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle"}
+        "https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle",
+        "osv": "https://google.github.io/osv.dev/post-v1-querybatch/"}
 _SCRIPT_RE = re.compile(r"""["']?([^\s"'|&;<>]+\.(?:js|cjs|mjs|py|ps1|sh|bat|cmd|exe))["']?""", re.IGNORECASE)
 # The quoted program text after -e / -c / -p / -Command / --eval: code, not a file the hook runs.
 _INLINE_CODE_RE = re.compile(r"""\s(?:-e|-c|-p|-Command|--eval)\s+(?:"(?:[^"\\]|\\.)*"|'[^']*')""", re.IGNORECASE)
@@ -848,6 +850,36 @@ def _public(section):
     return out
 
 
+def check_dependencies(project):
+    """Known advisories of the dependencies the manifests of the project declare, one warning per manifest. Names and
+    versions go to OSV; the shared 6-hour cache keeps the 30-minute schedule from asking again.
+
+    Parameters: project (str) project folder.
+    Returns: list of findings; one `info` finding when the check could not run, none for a project without manifests or
+    without advisories.
+    """
+    try:
+        report = dependency_notice.audit(project)
+    except dependency_notice.DependencyCheckError as exc:
+        return [_finding("dependency_advisories_unchecked", "info", "project", "dependency advisories",
+                         f"The dependency advisory check could not run: {exc}", DOCS["osv"],
+                         "Fix the cause named in the detail (OSV unreachable, or the advisory cache file), then run the "
+                         "audit again.")]
+    findings = []
+    for manifest in report["manifests"]:
+        if not manifest["vulnerable"]:
+            continue
+        shown = "; ".join(f"{item['package']}@{item['version']}: {', '.join(item['advisories'][:3])}"
+                          for item in manifest["vulnerable"][:5])
+        more = len(manifest["vulnerable"]) - 5
+        findings.append(_finding("dependency_advisories", "warn", "project", manifest["path"],
+                                 f"{len(manifest['vulnerable'])} of {manifest['packages']} dependencies have advisories: "
+                                 f"{shown}" + (f"; {more} more" if more > 0 else "") + ".", DOCS["osv"],
+                                 f"In {manifest['path']}, move each listed package to a version past its advisories; "
+                                 "project_manage action=deps lists every advisory ID.", [manifest["path"]]))
+    return findings
+
+
 def run(project, probe=True, save=True, probe_max_age=0, trigger="manual"):
     """Collects both harnesses for project, runs every check and returns the report; with save, stores it and
     marks findings new or resolved against the previous report of the same project. probe_max_age reuses recent
@@ -867,6 +899,7 @@ def run(project, probe=True, save=True, probe_max_age=0, trigger="manual"):
     findings += check_agents(claude)
     findings += check_instructions(project, claude, codex)
     findings += check_codex_config(codex)
+    findings += check_dependencies(project)
     unverified = list(snapshot.unverified)
     if not probe:
         unverified.append("MCP servers and HTTP hook endpoints were not contacted (probe off)")

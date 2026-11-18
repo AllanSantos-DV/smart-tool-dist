@@ -8,6 +8,8 @@ import threading
 import time
 import uuid
 
+import process_limits
+
 START_TIMEOUT_S = 45
 START_FAILURE_COOLDOWN_S = 60
 SERVICE_IDLE_S = 300
@@ -26,37 +28,6 @@ class BrowserSkipped(RuntimeError):
 
 class BrowserExited(RuntimeError):
     pass
-
-
-def _kill_on_close_job():
-    import ctypes
-    from ctypes import wintypes
-
-    class IoCounters(ctypes.Structure):
-        _fields_ = [(name, ctypes.c_ulonglong) for name in
-                    ("read_ops", "write_ops", "other_ops", "read_bytes", "write_bytes", "other_bytes")]
-
-    class BasicLimits(ctypes.Structure):
-        _fields_ = [("per_process_time", ctypes.c_longlong), ("per_job_time", ctypes.c_longlong),
-                    ("flags", wintypes.DWORD), ("min_ws", ctypes.c_size_t), ("max_ws", ctypes.c_size_t),
-                    ("active_processes", wintypes.DWORD), ("affinity", ctypes.c_size_t),
-                    ("priority", wintypes.DWORD), ("scheduling", wintypes.DWORD)]
-
-    class ExtendedLimits(ctypes.Structure):
-        _fields_ = [("basic", BasicLimits), ("io", IoCounters), ("process_memory", ctypes.c_size_t),
-                    ("job_memory", ctypes.c_size_t), ("peak_process_memory", ctypes.c_size_t),
-                    ("peak_job_memory", ctypes.c_size_t)]
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-    job = kernel32.CreateJobObjectW(None, None)
-    if not job:
-        raise ctypes.WinError(ctypes.get_last_error())
-    limits = ExtendedLimits()
-    limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-    if not kernel32.SetInformationJobObject(wintypes.HANDLE(job), 9, ctypes.byref(limits), ctypes.sizeof(limits)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    return kernel32, job
 
 
 class BrowserService:
@@ -126,7 +97,7 @@ class BrowserService:
         # Kill-on-close job: the browser tree dies with the daemon even when the daemon is killed hard.
         try:
             if self.job is None:
-                self.job = _kill_on_close_job()
+                self.job = process_limits.kill_on_close_job()
             kernel32, job = self.job
             import ctypes
             from ctypes import wintypes

@@ -55,6 +55,7 @@ import index_inventory
 import usage_meter
 import document_read
 import document_text
+import dependency_notice
 import dossier
 import scout
 import embedding_cache
@@ -76,6 +77,7 @@ import site_memory
 import web_search_adapters
 import browser_service_client
 import local_embedder
+import low_priority
 import web_search_health
 import web_fetch
 import version
@@ -172,6 +174,12 @@ SITE_MEMORY_MAX_TOPICS = 50
 # em até 0,064 e pares úteis a partir de 0,148. 0,12 separa as duas amostras
 # sem endurecer o limiar de embedding (0,35), que é só filtro de candidatos.
 SITE_MEMORY_RERANK_MIN_SCORE = 0.12
+# The cosine scale depends on the embedder: granite (the embeddings home) puts unrelated web queries at 0.48 to 0.73,
+# where text-embedding-3-small puts them at 0.09 to 0.54. On the same 20 near and 20 far pairs
+# (docs/spikes/web_memory_threshold_spike.py), 0.62 and 0.68 keep every near pair and as many far ones as 0.35 and 0.45
+# keep on the gateway model. The configured site memory threshold is the gateway's.
+HOME_SITE_MEMORY_SIMILARITY = 0.62
+SIMILAR_SEARCH_MIN_COSINE = {"gateway": 0.45, "home": 0.68}
 
 
 def _parse_bounded_int(value, default, min_v, max_v, field_name):
@@ -204,7 +212,10 @@ SMART_SEARCH_RESULT_WAIT_S = 15
 SMART_SEARCH_MAX_PENDING = 8
 BACKGROUND_MAX_PENDING = 8
 INTERACTIVE_PRIORITY = 1
-SMART_SEARCH_EXECUTOR = project_scheduler.ProjectScheduler(workers=3)
+# Slowest first-index speed measured on a CPU-only embedder (docs/research/2026-11-16-indexacao-cpu-busca-durante-o-indice.md).
+CPU_INDEX_FILES_PER_MINUTE = 180
+_INDEX_RUNNING = {}
+SMART_SEARCH_EXECUTOR = project_scheduler.ProjectScheduler(workers=3, reserved_lane="search")
 _PROJECT_LOCKS = {}
 _PROJECT_LOCKS_LOCK = threading.Lock()
 _PROJECT_MONITOR = None
@@ -373,10 +384,10 @@ SERVER_INSTRUCTIONS = (
 TOOLS = [
     {
         "name": "project_manage",
-        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project (a project whose folder is gone shows as unavailable with the reason); status shows storage, scope and jobs, and with a path inside a registered project answers for the deepest one that holds it (resolved_from). graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers, the documentation entries it leaves out of date and the tests to run with their command; it publishes nothing. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; each view carries stale (not updated for 30 days, the test of the daily cleanup that removes them) and stale_bytes sums them; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. junk (no project_root) lists the registered projects that were never projects: a personal, system, application-data or build folder, a subfolder of a repository or of another project, a folder of projects, or a folder that no longer exists (on a drive or share that is mounted); with confirm=true it unregisters them and deletes only their index files, and the manifest says what went. A project is the folder where the session started, so smart_search and register refuse a folder that is not a project and index a new one only from the session that started in it. Jobs via smart_search_result.",
+        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project (a project whose folder is gone shows as unavailable with the reason); status shows storage, scope and jobs, and with a path inside a registered project answers for the deepest one that holds it (resolved_from). deps lists the known OSV advisories of every dependency the manifests of the project declare (package.json, requirements*.txt, pyproject.toml, go.mod), not only the ones an edit changed, at the version a package-lock.json beside a package.json resolved when it satisfies the range; only package names and versions leave the machine. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers and the tests that reach them (those no test reaches are listed apart), the documentation entries it leaves out of date, the notes the edit hook would have added to the whole diff (comments, copies, dependency advisories) and the tests to run with their command; it publishes nothing. hotspots (limit) ranks the code files by commits times lines, the riskiest to change; dead_code lists the functions no code calls and those only tests call (static call graph, candidates); import_cycles lists the groups of files that import each other; comments lists comments in the wrong place (commented-out code, history tags, loose docs, long inline blocks) across the code files, not only in an edit. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; each view carries stale (not updated for 30 days, the test of the daily cleanup that removes them) and stale_bytes sums them; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. junk (no project_root) lists the registered projects that were never projects: a personal, system, application-data or build folder, a subfolder of a repository or of another project, a folder of projects, or a folder that no longer exists (on a drive or share that is mounted); with confirm=true it unregisters them and deletes only their index files, and the manifest says what went. A project is the folder where the session started, so smart_search and register refuse a folder that is not a project and index a new one only from the session that started in it. Jobs via smart_search_result.",
         "inputSchema": {
             "type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "layers", "affected_tests", "pr_impact", "setup_audit", "redirect_proposals", "redirect_decide", "junk"]},
+                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "layers", "affected_tests", "pr_impact", "hotspots", "dead_code", "import_cycles", "comments", "setup_audit", "redirect_proposals", "redirect_decide", "junk", "deps"]},
                 "ids": {"type": "array", "items": {"type": "string"}, "description": "redirect_decide: proposal ids from redirect_proposals (accepted ids for remove)"},
                 "decision": {"type": "string", "enum": ["accept", "instruct", "reject", "remove"], "description": "redirect_decide: accept redirects matching calls to smart_search; instruct lets them run with a tip naming smart_search; reject discards; remove deletes an accepted pattern"},
                 "finding_id": {"type": "string"},
@@ -424,7 +435,7 @@ TOOLS = [
         "name": "smart_search",
         "_meta": ALWAYS_LOAD,
         "description": (
-            "Semantic search (embed+rerank) over the project's index: the first step to understand code in a "
+            "Search over the project's index (lexical, plus semantic with an embedding model and reranked with a rerank model, when configured): the first step to understand code in a "
             "project, finding functions, flows and reusable code by meaning, ranked, with name:line. Use it before "
             "a series of Grep/Read; use Grep only for an exact literal or inside a known file. "
             "Results come in three blocks, code, test and doc, plus the project profile with the natural "
@@ -454,6 +465,10 @@ TOOLS = [
                                         "test": {"type": "integer", "minimum": 1, "maximum": 20},
                                         "doc": {"type": "integer", "minimum": 1, "maximum": 20}}}],
                           "description": "Results per block: one number for all blocks or {code, test, doc}; each 1-20, total at most 20. Defaults to the project's search_limits, else 5"},
+                "folder": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}, "maxItems": 10}],
+                           "description": "Only files under this folder of the project (a project-relative path, or a list of them); applied before ranking, so the results are the best inside the folder"},
+                "layer": {"type": "string",
+                          "description": "Only files of this layer, by the path globs of the project's confirmed layers (project_manage action=layers); applied before ranking"},
                 "detail": {"type": "string", "enum": ["compact", "full"], "default": "compact",
                            "description": "compact: 240-character excerpts, and ranking (when rerank) and location_kind (when source_line) left out of each result; full: 500-character excerpts with every field"},
                 "mode": {"type": "string", "enum": ["search", "dossier"], "default": "search",
@@ -462,6 +477,10 @@ TOOLS = [
                                "description": "mode=dossier only: scan budget; past it the answer is marked degraded"},
                 "max_hits": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5,
                              "description": "mode=dossier only: hits returned"},
+                "history": {"type": "boolean", "default": False,
+                            "description": "mode=dossier only: also search the messages of the project's commits that have a body (hits with source git and id git:<hash>); the first read of a repository can take longer than timeout_ms"},
+                "decision_notes": {"type": "boolean", "default": False,
+                                   "description": "mode=search only: append the project's decision notes (docs/research, the backlog, CLAUDE.md, AGENTS.md and commit messages) under decision_notes"},
             },
             "required": ["project_root"],
         },
@@ -573,21 +592,22 @@ TOOLS = [
     {
         "name": "read_document",
         "description": (
-            "Reads a PDF, Word (.docx), PowerPoint (.pptx) or Excel (.xlsx) file as compact text, a range at a time, "
-            "inside Smart Tool so the file never enters your context whole. The answer opens with the facts: type, "
+            "Reads a PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx), HTML (.html, .htm), CSV (.csv) or EPUB "
+            "(.epub) file as compact text, a range at a time, inside Smart Tool so the file never enters your context whole. The answer opens with the facts: type, "
             "size, page, slide, sheet or part count and the estimated tokens of all the text; then comes the text of "
             "the range you asked for (default: from the start, up to max_chars) with a `next:` line naming the range "
             "to continue. PDF pages come with the layout noise removed (ligatures, hyphenation, wrapped lines); docx "
             "as markdown (headings, lists, tables) in parts of about 6,000 characters because a docx has no fixed "
             "pages; pptx per slide with the speaker notes; xlsx per sheet, one tab-separated line per row with the "
-            "cached formula values. Use info_only first to size a large file and pick the pages you need. A scanned "
+            "cached formula values; html as markdown in parts like a docx; csv as one sheet, one tab-separated line per row; "
+            "epub per chapter in reading order. Use info_only first to size a large file and pick the pages you need. A scanned "
             "PDF (no text layer) fails with that reason; there is no OCR. Not for plain text or code: use Read."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Absolute path of the .pdf, .docx, .pptx or .xlsx file"},
-                "range": {"type": "string", "description": "Pages, slides, docx parts or sheets to read: `3`, `3-5`, `7-` (to the end), `-4` (the first four) or a comma list like `1,4-6`; a sheet name also works for a workbook. Default: from the first one"},
+                "path": {"type": "string", "description": "Absolute path of the .pdf, .docx, .pptx, .xlsx, .html, .htm, .csv or .epub file"},
+                "range": {"type": "string", "description": "Pages, slides, parts, chapters or sheets to read: `3`, `3-5`, `7-` (to the end), `-4` (the first four) or a comma list like `1,4-6`; a sheet name also works for a workbook. Default: from the first one"},
                 "max_chars": {"type": "integer", "minimum": 1000, "maximum": document_read.MAX_CHARS_LIMIT, "default": document_read.DEFAULT_MAX_CHARS, "description": "Cap of the text returned (about four characters per token)"},
                 "info_only": {"type": "boolean", "default": False, "description": "Return only the facts (type, size, counts, estimated tokens), no text"},
             },
@@ -804,8 +824,9 @@ def _embed(model, texts, token, deadline=None, on_retry=None, cancel_check=None)
 
 
 def _rerank(model, query, documents, top_n, token, deadline=None):
-    """Rows `{index, relevance_score}` of the best `top_n` documents. Only an HTTP answer that is worth repeating
-    (429, 5xx) is asked again, after the wait of `_wait_to_retry`; a timeout fails at once so a search does not stall."""
+    """Rows `{index, relevance_score}` of the best `top_n` documents from the gateway. Only an HTTP answer that is worth
+    repeating (429, 5xx) is asked again, after the wait of `_wait_to_retry`; a timeout fails at once so a search does
+    not stall."""
     if not documents:
         return []
     top_n = min(top_n, len(documents))
@@ -822,6 +843,20 @@ def _rerank(model, query, documents, top_n, token, deadline=None):
             if attempt >= EMBED_MAX_ATTEMPTS or not _transient_embed_error(exc):
                 raise
             _wait_to_retry(exc, attempt, deadline)
+    return _rerank_rows(response, documents, top_n)
+
+
+def _home_rerank(query, documents, top_n, deadline=None):
+    """`_rerank` through the embeddings home, which forwards to the rerank host configured in it."""
+    if not documents:
+        return []
+    top_n = min(top_n, len(documents))
+    return _rerank_rows(local_embedder.rerank(query, documents, top_n, deadline=deadline), documents, top_n)
+
+
+def _rerank_rows(response, documents, top_n):
+    """The best `top_n` rows of a rerank answer in the Cohere form, highest score first. Scores are opaque: only their
+    order within one answer counts. A repeated or out-of-range index, or a missing score, raises."""
     rows = response.get("results", []) if isinstance(response, dict) else []
     if not isinstance(rows, list) or not rows:
         raise ValueError("The reranker returned no valid results.")
@@ -833,7 +868,46 @@ def _rerank(model, query, documents, top_n, token, deadline=None):
                 not isinstance(score, (int, float)) or not math.isfinite(score)):
             raise ValueError("The reranker returned an invalid index or score.")
         seen.add(idx)
-    return rows[:top_n]
+    return sorted(rows, key=lambda row: row["relevance_score"], reverse=True)[:top_n]
+
+
+def _reranker(cfg, token):
+    """The reranker as `rerank(query, documents, top_n, deadline)`, or None when there is none: the gateway's
+    rerank_model when the user chose the gateway, else the embeddings home when a rerank host is configured in it."""
+    if config.embedder(cfg) == "gateway":
+        model = cfg.get("rerank_model")
+        return (lambda query, documents, top_n, deadline=None:
+                _rerank(model, query, documents, top_n, token, deadline=deadline)) if model else None
+    return _home_rerank if local_embedder.rerank_configured() else None
+
+
+def _web_embedder(cfg):
+    """Embedding model of the web memory, the same choice as the project indexes (config `embedder`); None when there
+    is none: no gateway embedding_model, or the embeddings home not running or unusable."""
+    try:
+        model = local_embedder.resolve(cfg)
+    except local_embedder.IdentityError as exc:
+        _log(f"web memory without vectors: {exc}")
+        return None
+    return None if model in (None, indexer.LEXICAL_MODEL) else model
+
+
+def _web_memory_models(cfg, token):
+    """`(embedding_model, rerank, problem)` of the web memory (sources that helped before, reuse of similar searches).
+    It follows config `embedder` like the project indexes: a stopped home is never replaced by the gateway. `problem`
+    says what is missing, empty when both are there."""
+    try:
+        model = local_embedder.resolve(cfg)
+        rerank = _reranker(cfg, token)
+    except local_embedder.IdentityError as exc:
+        return None, None, str(exc)
+    model = None if model in (None, indexer.LEXICAL_MODEL) else model
+    if config.embedder(cfg) == "gateway":
+        missing = [name for name, value in (("embedding_model", model), ("rerank_model", rerank)) if not value]
+        return model, rerank, " and ".join(missing) + " missing" if missing else ""
+    if not model:
+        return None, rerank, "the embeddings home is not running"
+    return model, rerank, "" if rerank else "no rerank host configured in the embeddings home"
 
 
 LOG_PATH = os.path.join(RUN_DIR, "daemon.log")
@@ -1018,6 +1092,52 @@ def _cold_overlay(root, queries):
     return {"drop": [], "chunks": chunks}, warning
 
 
+def _duration(seconds):
+    return f"{round(seconds)} s" if seconds < 90 else f"{-(-round(seconds) // 60)} min"
+
+
+def _indexing_notice(root, model, indexed, total):
+    """Where the running index build of `root` stands and how long it should take: the speed so far once files were
+    indexed, else, on a CPU-only embedder, the slowest measured speed as an upper bound."""
+    with _JOBS_LOCK:
+        job = dict(_jobs.get(_INDEX_RUNNING.get(project_identity.canonical_root(root))) or {})
+    done = max(indexed, job.get("processed_files") or 0)
+    total = max(job.get("total_files") or 0, total, done)
+    since = next((at for phase, at in reversed(job.get("phases", [])) if phase == "indexing"), None)
+    left = total - done
+    if done and since and time.time() > since:
+        eta = f"about {_duration(left * (time.time() - since) / done)} left at the speed so far"
+    elif local_embedder.runs_on_cpu(model):
+        eta = f"expected time on this CPU-only embedder: up to about {_duration(left * 60 / CPU_INDEX_FILES_PER_MINUTE)}"
+    else:
+        eta = "time left not known yet"
+    return (f"Indexing in progress: {done} of {total} files indexed ({100 * done // max(total, 1)}%), {eta}. Results "
+            "rank the indexed files by meaning and keywords and read the others from disk by keyword; repeat the "
+            "search later for the full ranking.")
+
+
+def _partial_search(root, model, texts, token, job_id):
+    """`(vectors, path, overlay, notice)` for a search made while the index of `root` is being built: the query is
+    embedded and searched in the part of the new index already committed, and the files not committed yet are read
+    from disk by keyword."""
+    path, indexed = indexer.partial_index(root, model)
+    scope = index_scope.load_scope(root)
+    files = index_scope.resolve_included_files(root, scope if index_scope.valid_scope(scope) else {"include": []})
+    notice = _indexing_notice(root, model, len(indexed), len(files))
+    vectors = {}
+    if path:
+        try:
+            vectors = dict(zip(texts, _embed(model, texts, token, deadline=_job_deadline(job_id),
+                                             cancel_check=lambda: _job_checkpoint(job_id))))
+        except ProjectJobCancelled:
+            raise
+        except Exception as exc:
+            notice += " Embedding unavailable, so the indexed files were searched by keyword only. " + _project_error(exc)
+    chunks, _scanned = indexer.keyword_chunks(root, [rel for rel in files if rel not in indexed], texts,
+                                              COLD_SCAN_BUDGET_S)
+    return vectors, path, {"drop": [], "chunks": chunks}, notice
+
+
 def _lag_overlay(root, lag):
     """`(overlay, warning)` for `indexer.search`: the stale files read from disk, searched by keyword in place of their
     outdated chunks, and the notice telling the agent that indexing is in progress. `(None, "")` when the index is
@@ -1137,31 +1257,43 @@ def _prepare_project_index(arguments, job_id, cfg, token, query_vector=None, pre
                   "sample_paths": included[:30]}
         project_store.update(project_identity.project_id(root), preview=result)
         return result
-    model = model or local_embedder.resolve(cfg.get("embedding_model"), indexer.info(root).get("model_id"))
+    model = model or local_embedder.resolve(cfg, indexer.info(root).get("model_id"))
+    if model is None:
+        raise RuntimeError(f"The embeddings home is not running: this folder's index holds "
+                           f"{indexer.info(root).get('model_id')} and keeps answering; re-embedding starts when the "
+                           "home answers.")
     lexical = model == indexer.LEXICAL_MODEL
     current = indexer.info(root)
     known_dimensions = current.get("dimensions") if current.get("model_id") == model else None
+    gentle = not lexical and local_embedder.runs_on_cpu(model)
     if not lexical and query_vector is None and not known_dimensions:
         _update_job(job_id, phase="model_probe")
-        query_vector = _embed(model, ["Smart Tool: indexing dimension check."], token,
-                              deadline=_job_deadline(job_id), cancel_check=checkpoint,
-                              on_retry=lambda attempt, items: _update_job(job_id, phase="indexing_retry",
-                                  retry_attempt=attempt, batch_items=items))[0]
+        with low_priority.background() if gentle else contextlib.nullcontext():
+            query_vector = _embed(model, ["Smart Tool: indexing dimension check."], token,
+                                  deadline=_job_deadline(job_id), cancel_check=checkpoint,
+                                  on_retry=lambda attempt, items: _update_job(job_id, phase="indexing_retry",
+                                      retry_attempt=attempt, batch_items=items))[0]
     checkpoint()
     _update_job(job_id, phase="indexing")
     full_check = bool(arguments.get("full_check") or project.get("needs_full_check") or
                       time.time() - current.get("full_scan_at", 0) >= project_monitor.FULL_CHECK_S)
-    stats = indexer.reindex(
-        root, included,
-        None if lexical else lambda texts: _embed(model, texts, token, deadline=_job_deadline(job_id),
-                             cancel_check=checkpoint, on_retry=lambda attempt, items: _update_job(
-                                 job_id, phase="indexing_retry", retry_attempt=attempt, batch_items=items)),
-        on_progress=lambda processed, total: _update_job(
-            job_id, phase="indexing", processed_files=processed, total_files=total),
-        model_id=model, expected_dimensions=None if lexical else known_dimensions or len(query_vector),
-        force_rebuild=bool(arguments.get("force_rebuild")), full_check=full_check,
-        changed_paths=set(arguments.get("changed_paths") or []) | set(project.get('dirty_paths', [])), cancel_check=checkpoint,
-    )
+
+    def embed_batch(texts):
+        with low_priority.background() if gentle else contextlib.nullcontext():
+            return _embed(model, texts, token, deadline=_job_deadline(job_id), cancel_check=checkpoint,
+                          on_retry=lambda attempt, items: _update_job(
+                              job_id, phase="indexing_retry", retry_attempt=attempt, batch_items=items))
+
+    with low_priority.background() if gentle else contextlib.nullcontext():
+        stats = indexer.reindex(
+            root, included, None if lexical else embed_batch,
+            on_progress=lambda processed, total: _update_job(
+                job_id, phase="indexing", processed_files=processed, total_files=total),
+            model_id=model, expected_dimensions=None if lexical else known_dimensions or len(query_vector),
+            force_rebuild=bool(arguments.get("force_rebuild")), full_check=full_check,
+            changed_paths=set(arguments.get("changed_paths") or []) | set(project.get('dirty_paths', [])),
+            cancel_check=checkpoint,
+        )
     _update_job(job_id, stats=stats, index_updated=stats.get("ready", True))
     project_store.update(project_identity.project_id(root), index=indexer.info(root),
                          last_stats=stats, last_checked=time.time(), scope_summary={
@@ -1188,15 +1320,20 @@ def _grouped_yaml(profile, blocks, warning):
     return "\n".join(lines) + "\n"
 
 
-LOCAL_EMBEDDER_DOWN_WARNING = ("The mcp-memory local embedder is configured but not responding: index and search are lexical only "
-                               "until it is back (check the mcp-memory embedding service).")
+HOME_DOWN_WARNING = ("The embeddings home is not running: index and search are lexical only until it answers (start or "
+                     "reinstall casa-de-embeddings; it announces itself in ~/.casa-de-embeddings/run/daemon.json).")
+RERANK_MISSING_WARNING = {
+    "gateway": "Rerank not configured: hybrid lexical/vector order, less precise at the top. Configure a rerank_model.",
+    "home": ("Rerank not configured: hybrid lexical/vector order, less precise at the top. Configure a rerank host in the "
+             "embeddings home."),
+}
 EMPTY_RESULT_NOTICE = ("No matches. Do not fall back to Grep, Read of folders or shell search: retry smart_search with other "
                        "identifier terms, another group, or a wider top_k, and if it stays empty report that the code was not found.")
 LEXICAL_WARNING = ("No embedding model: index and search are lexical only (exact words, no synonyms or cross-language matches). "
                    "Configure an embedding_model for semantic search.")
 
 
-def _rerank_blocks(model, groups, queries, found, vectors, token, deadline=None):
+def _rerank_blocks(rerank, groups, queries, found, vectors, deadline=None):
     """`({group: rows}, {group: error})` of the blocks that have candidates and a query vector. One rerank request goes
     out per distinct query, not per block: the candidates of the blocks that share a query travel together and come back
     split by block (`index` is the position inside the block's candidates). A reranker scores each document against the
@@ -1210,7 +1347,7 @@ def _rerank_blocks(model, groups, queries, found, vectors, token, deadline=None)
         owners = [(group, position) for group in members for position in range(len(found[group]))]
         documents = [found[group][position][4] for group, position in owners]
         try:
-            rows = _rerank(model, query, documents, len(documents), token, deadline=deadline)
+            rows = rerank(query, documents, len(documents), deadline=deadline)
         except Exception as exc:
             failed.update({group: _project_error(exc) for group in members})
             continue
@@ -1245,6 +1382,42 @@ def _nested_projects_note(root):
             f"results; search them with smart_search on their folder: {'; '.join(parts)}{more}.")
 
 
+def _switch_search(root, old, target, texts, token, problem, cfg, job_id):
+    """`(vectors, search_model, overlay, notice)` for a search of a folder whose index holds `old` while the embedder
+    is now `target` (None while the embeddings home is not running). The old index answers, with the query embedded by
+    its own model when that model can still be asked (a gateway model and the gateway answers), else by keyword; the
+    files changed since are read from disk by keyword. The re-embedding into `target` runs in the background, queued
+    here when it is not; the folder switches to the new index only when it is complete."""
+    vectors, search_model, failure = {}, None, ""
+    if old != indexer.LEXICAL_MODEL and not local_embedder.is_local(old) and not problem:
+        try:
+            vectors = dict(zip(texts, _embed(old, texts, token, deadline=_job_deadline(job_id),
+                                             cancel_check=lambda: _job_checkpoint(job_id))))
+            search_model = old
+        except ProjectJobCancelled:
+            raise
+        except Exception as exc:
+            failure = " Embedding the query with that model failed. " + _project_error(exc)
+    lag = _index_lag(root, old, cfg, problem, job_id)
+    overlay, stale = _lag_overlay(root, lag) if lag else (None, "")
+    how = "ranked by meaning and keywords" if search_model else "by keyword only"
+    if target is None:
+        notice = (f"The embeddings home is not running: results come from this folder's index built with {old}, {how}. "
+                  "Re-embedding with the home starts when it answers.")
+    else:
+        key = project_identity.canonical_root(root)
+        with _JOBS_LOCK:
+            job = dict(_jobs.get(_INDEX_RUNNING.get(key)) or {})
+        queued = "" if key in _INDEX_RUNNING or _index_update_running(root) else \
+            _refresh_in_background(root, {"refresh": True})
+        progress = (f" ({job['processed_files']} of {job['total_files']} files so far)"
+                    if job.get("total_files") else "")
+        notice = (f"Re-embedding in progress: this folder's index was built with {old} and is being rebuilt with "
+                  f"{target} in the background{progress}. Results come from the old index, {how}; the folder switches "
+                  "to the new index when it is complete." + (" " + queued if queued else ""))
+    return vectors, search_model, overlay, " ".join(text for text in (notice + failure, stale) if text)
+
+
 def _perform_smart_search_isolated(arguments, job_id):
     _update_job(job_id, phase="auth")
     problem = _gateway_problem()
@@ -1255,18 +1428,28 @@ def _perform_smart_search_isolated(arguments, job_id):
     queries = {"code": arguments["query"], "test": arguments["query"], "doc": arguments["doc_query"]}
     texts = list(dict.fromkeys(queries[group] for group in groups))
     cfg = config.load_config()
-    model = local_embedder.resolve(cfg.get("embedding_model"), indexer.info(root).get("model_id"))
+    current = indexer.info(root)
+    model = local_embedder.resolve(cfg, current.get("model_id"))
+    unreachable = problem and model not in (None, indexer.LEXICAL_MODEL) and not local_embedder.is_local(model)
+    old = (current.get("model_id") if current.get("chunks") and current.get("model_id") != model and not unreachable
+           else None)
+    model = indexer.LEXICAL_MODEL if model is None and old is None else model
     warnings = []
     vectors = {}
     overlay = None
     search_model = model
+    search_path = None
     source = "index"
     if problem:
         model_client.OFFLINE.set(problem)
     token = "" if problem else model_client.get_token()
-    if model == indexer.LEXICAL_MODEL:
-        warnings.append(LOCAL_EMBEDDER_DOWN_WARNING if local_embedder.configured() and config.local_models_mode(cfg) != "off"
-                        else LEXICAL_WARNING)
+    rerank = _reranker(cfg, token)
+    if old is not None:
+        vectors, search_model, overlay, notice = _switch_search(root, old, model, texts, token, problem, cfg, job_id)
+        source = "index+disk" if overlay else source
+        warnings.append(notice)
+    elif model == indexer.LEXICAL_MODEL:
+        warnings.append(HOME_DOWN_WARNING if config.embedder(cfg) == "home" else LEXICAL_WARNING)
         try:
             if not arguments.get("_existing_index_only"):
                 _prepare_project_index(arguments, job_id, cfg, token, model=model)
@@ -1277,6 +1460,11 @@ def _perform_smart_search_isolated(arguments, job_id):
                 raise
             warnings.append("Lexical index not updated; results from the last ready index. " + _project_error(exc))
             search_model = None
+    elif arguments.get("_during_index") and _index_lag(root, model, cfg, problem, job_id) is None:
+        vectors, search_path, overlay, notice = _partial_search(root, model, texts, token, job_id)
+        search_model = model if vectors else None
+        source = "partial"
+        warnings.append(notice)
     elif _cold_index(root, cfg, problem):
         overlay, notice = _cold_overlay(root, texts)
         search_model = None
@@ -1306,7 +1494,8 @@ def _perform_smart_search_isolated(arguments, job_id):
             if lag is not None:
                 overlay, notice = _lag_overlay(root, lag)
                 source = "index+disk" if overlay else source
-                warnings += [text for text in (notice, _refresh_in_background(root, lag)) if text]
+                warnings += [text for text in (notice, None if arguments.get("_during_index")
+                                               else _refresh_in_background(root, lag)) if text]
             elif not arguments.get("_existing_index_only"):
                 try:
                     _prepare_project_index(arguments, job_id, cfg, token, query_vector=next(iter(vectors.values())),
@@ -1320,8 +1509,8 @@ def _perform_smart_search_isolated(arguments, job_id):
                     search_model = None
                     if indexer.info(root).get("model_id") != model:
                         vectors = {}
-            if vectors and not cfg.get("rerank_model"):
-                warnings.append("Rerank not configured: hybrid lexical/vector order, less precise at the top. Configure a rerank_model.")
+            if vectors and not rerank:
+                warnings.append(RERANK_MISSING_WARNING[config.embedder(cfg)])
     _job_checkpoint(job_id)
     saved_scope = index_scope.load_scope(root) or {}
     profile = index_profile.current(saved_scope.get("profile"))
@@ -1348,15 +1537,18 @@ def _perform_smart_search_isolated(arguments, job_id):
     query_terms = _symbol_terms(" ".join(queries[group] for group in groups if group != "doc"))
     detail = arguments.get("detail", "compact")
     _update_job(job_id, phase="searching")
+    in_scope = _scope_filter(root, arguments)
     found = {group: indexer.search(root, vectors.get(queries[group]), top_k=max(limits[group] * 4, candidate_pool),
                                    query=queries[group], model_id=search_model, overlay=overlay,
-                                   include=lambda path, group=group: index_profile.kind(path, profile) == group)
+                                   path=search_path,
+                                   include=lambda path, group=group: index_profile.kind(path, profile) == group
+                                   and (in_scope is None or in_scope(path)))
              for group in groups}
 
     reranked, rerank_failed = {}, {}
-    if cfg.get("rerank_model"):
+    if rerank:
         _update_job(job_id, phase="reranking")
-        reranked, rerank_failed = _rerank_blocks(cfg["rerank_model"], groups, queries, found, vectors, token,
+        reranked, rerank_failed = _rerank_blocks(rerank, groups, queries, found, vectors,
                                                  deadline=_job_deadline(job_id))
 
     def search_block(group):
@@ -1389,7 +1581,8 @@ def _perform_smart_search_isolated(arguments, job_id):
             warnings.append(problem)
     _job_checkpoint(job_id)
     if not any(blocks.values()):
-        notes.append(EMPTY_RESULT_NOTICE)
+        notes.append(EMPTY_RESULT_NOTICE + (" The folder and layer filters of this search may be too narrow."
+                                            if in_scope else ""))
     nested = _nested_projects_note(root)
     if nested:
         notes.append(nested)
@@ -1411,8 +1604,8 @@ def _perform_project_index_isolated(arguments, job_id, preview=False):
     problem = _gateway_problem()
     cfg = config.load_config()
     if problem:
-        model = local_embedder.resolve(cfg.get("embedding_model"), indexer.info(arguments["project_root"]).get("model_id"))
-        if model != indexer.LEXICAL_MODEL and not local_embedder.is_local(model):
+        model = local_embedder.resolve(cfg, indexer.info(arguments["project_root"]).get("model_id"))
+        if model not in (None, indexer.LEXICAL_MODEL) and not local_embedder.is_local(model):
             raise RuntimeError(problem)
         model_client.OFFLINE.set(problem)
         return _prepare_project_index(arguments, job_id, cfg, "", preview=preview, model=model)
@@ -1446,9 +1639,19 @@ def _run_project_job_in_view(job_id, arguments, kind):
         if arguments.get('_requested_view') and arguments['_requested_view'] != index_views.public(view):
             raise index_views.ViewChanged('The branch or commit changed while the job was waiting. Start again on the current view.')
         _update_job(job_id, view=index_views.public(view))
-        with _project_lock(arguments["project_root"]):
-            result = (_perform_smart_search(arguments, job_id) if kind == "smart_search"
-                      else _perform_project_index(arguments, job_id, preview=kind == "project_preview"))
+        key = project_identity.canonical_root(arguments["project_root"])
+        if kind == "smart_search" and key in _INDEX_RUNNING:
+            result = _perform_smart_search({**arguments, "_existing_index_only": True, "_during_index": True}, job_id)
+        else:
+            with _project_lock(arguments["project_root"]):
+                if kind == "project_index":
+                    _INDEX_RUNNING[key] = job_id
+                try:
+                    result = (_perform_smart_search(arguments, job_id) if kind == "smart_search"
+                              else _perform_project_index(arguments, job_id, preview=kind == "project_preview"))
+                finally:
+                    if kind == "project_index":
+                        _INDEX_RUNNING.pop(key, None)
         _set_job(job_id, status="done", phase="done", result=result, error=None)
         current = project_store.get(project_id) or {}
         with _JOBS_LOCK:
@@ -1531,7 +1734,8 @@ def _submit_project_job_locked(kind, arguments):
                          enabled=kind != "project_preview" or project.get("enabled", False))
     try:
         future = SMART_SEARCH_EXECUTOR.submit(root, _run_project_job, job_id, arguments, kind,
-                                              priority=INTERACTIVE_PRIORITY if interactive else 0)
+                                              priority=INTERACTIVE_PRIORITY if interactive else 0,
+                                              lane="search" if interactive else "index")
         with _JOBS_LOCK:
             if not future.done():
                 _JOB_FUTURES[job_id] = future
@@ -1646,8 +1850,9 @@ def _optional_text(arguments, name):
 
 
 _SMART_SEARCH_FIELDS = {"project_root", "query_identifiers", "query_comments", "doc_query",
-                        "single_language_reason", "group", "top_k", "detail"}
-_DOSSIER_FIELDS = {"project_root", "query_identifiers", "query_comments", "doc_query", "mode", "timeout_ms", "max_hits"}
+                        "single_language_reason", "group", "top_k", "detail", "folder", "layer"}
+_DOSSIER_FIELDS = {"project_root", "query_identifiers", "query_comments", "doc_query", "mode", "timeout_ms", "max_hits",
+                   "history"}
 
 
 def _reject_kind(message):
@@ -1671,6 +1876,11 @@ def _handle_smart_search(arguments):
     if mode != "search":
         raise ValueError("mode must be search or dossier.")
     arguments = {key: value for key, value in arguments.items() if key != "mode"}
+    want_notes = arguments.pop("decision_notes", False)
+    if not isinstance(want_notes, bool):
+        raise ValueError("decision_notes must be true or false.")
+    notes_text = " ".join(arguments[key] for key in ("query_identifiers", "query_comments", "doc_query")
+                          if isinstance(arguments.get(key), str))
     try:
         arguments = _smart_search_arguments(arguments)
     except ValueError as exc:
@@ -1688,7 +1898,17 @@ def _handle_smart_search(arguments):
             return _agent_search_answer(_smart_search_job_payload(job_id))
         result = future.result()
     _mark_notice_delivered(job_id)
-    return result
+    return _with_decision_notes(result, arguments["project_root"], notes_text) if want_notes else result
+
+
+def _with_decision_notes(result, root, text):
+    """The finished search answer with a `decision_notes:` line (JSON, which is valid YAML) after it: the hits of the
+    project's decision notes for `text`, commit messages included, and why any of them is missing."""
+    if not isinstance(result, str) or not dossier.focus_terms(text):
+        return result
+    found = dossier.query(root, text, max_hits=scout.DECISION_NOTES_MAX, history=True)
+    notes = {"decision_notes": found["hits"], **({"decision_notes_warnings": found["reasons"]} if found["reasons"] else {})}
+    return result.rstrip("\n") + "\n" + json.dumps(notes, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
 def _mark_notice_delivered(job_id):
@@ -1814,6 +2034,52 @@ def _update_notices():
         return []
 
 
+def _search_scope(project_root, folder, layer):
+    """The folder and layer filters of a smart_search, validated.
+
+    Parameters: project_root (str); folder (str, list of str or None) project-relative folders; layer (str or None) a
+    layer of the project's confirmed layers. Returns: tuple (list of folders with forward slashes and no outer
+    slashes, layer name or None). Raises: ValueError for a folder that is absolute or climbs out of the project, a layer
+    the project does not declare and a project without confirmed layers.
+    """
+    folders = [folder] if isinstance(folder, str) else folder
+    if folders is not None and (not isinstance(folders, list) or not folders
+                                or not all(isinstance(item, str) and item.strip() for item in folders)):
+        raise ValueError("folder must be a project-relative path or a list of them.")
+    clean = []
+    for item in folders or []:
+        parts = [part for part in item.strip().replace("\\", "/").split("/") if part not in ("", ".")]
+        if item.strip().startswith(("/", "\\")) or re.match(r"[A-Za-z]:", item.strip()) or ".." in parts:
+            raise ValueError(f"folder {item!r} must be relative to the project root and stay inside it.")
+        clean.append("/".join(parts))
+    if layer is None:
+        return clean, None
+    if not isinstance(layer, str) or not layer.strip():
+        raise ValueError("layer must be the name of a layer of the project.")
+    import layers
+    rule = layers.load(project_root)
+    if rule is None:
+        raise ValueError("layer needs confirmed layers: this project has none (project_manage action=layers).")
+    names = [item["name"] for item in rule.layers]
+    if layer not in names:
+        raise ValueError(f"layer {layer!r} is not declared by this project; its layers are {', '.join(names)}.")
+    return clean, layer
+
+
+def _scope_filter(root, arguments):
+    """Predicate over project-relative paths for the folder and layer filters of a search, or None without filters."""
+    folders, layer = arguments.get("folders") or [], arguments.get("layer")
+    if not folders and not layer:
+        return None
+    import layers
+    rule = layers.load(root) if layer else None
+
+    def inside(path):
+        return (not folders or any(not folder or path == folder or path.startswith(folder + "/") for folder in folders)) \
+            and (rule is None or rule.assign(path) == layer)
+    return inside
+
+
 def _smart_search_arguments(arguments):
     if not isinstance(arguments, dict):
         raise ValueError("smart_search requires its arguments as a JSON object")
@@ -1853,9 +2119,11 @@ def _smart_search_arguments(arguments):
     detail = arguments.get("detail", "compact")
     if detail not in SEARCH_DETAILS:
         raise ValueError("detail must be compact or full.")
+    folders, layer = _search_scope(project_root, arguments.get("folder"), arguments.get("layer"))
     query = " ".join(part for part in (identifiers, comments) if part) or doc_query
     arguments = {"project_root": project_root, "query": query, "top_k": limits, "group": group, "detail": detail,
                  "doc_query": doc_query or comments or identifiers,
+                 **({"folders": folders} if folders else {}), **({"layer": layer} if layer else {}),
                  **({"single_language_reason": reason} if reason else {})}
     session, client = _session_client()
     if session is not None and "hook_notice" not in session:
@@ -2133,8 +2401,7 @@ def _find_duplicates(root, arguments, dismissed):
     if type(include_tests) is not bool:
         raise ValueError("include_tests must be true or false.")
     limit = _parse_bounded_int(arguments.get("limit"), default=30, min_v=1, max_v=200, field_name="limit")
-    configured_model = local_embedder.resolve(config.load_config().get("embedding_model"),
-                                              indexer.info(root).get("model_id"))
+    configured_model = local_embedder.resolve(config.load_config(), indexer.info(root).get("model_id"))
     if configured_model == indexer.LEXICAL_MODEL:
         configured_model = None
     view = index_views.describe(root)
@@ -2211,6 +2478,14 @@ def _project_action(arguments):
         return _redirect_action(arguments)
     if arguments.get("action") == "junk":
         return _junk_action(arguments)
+    if arguments.get("action") == "deps":
+        root = arguments.get("project_root")
+        if not isinstance(root, str) or not os.path.isdir(root):
+            raise ValueError("deps needs project_root: the folder whose dependency manifests to check against OSV.")
+        try:
+            return dependency_notice.audit(root)
+        except dependency_notice.DependencyCheckError as exc:
+            raise ValueError(f"dependency check could not run: {exc}") from None
     if arguments.get("action") == "setup_audit":
         root = arguments.get("project_root")
         if not isinstance(root, str) or not os.path.isdir(root):
@@ -2232,7 +2507,7 @@ def _project_action(arguments):
     action = arguments.get("action", "list")
     if action == "probe":
         return _probe_index_models()
-    if action in ('graph','compare','duplicates','duplicates_dismiss','duplicates_restore','docs','layers','affected_tests','pr_impact'):
+    if action in ('graph','compare','duplicates','duplicates_dismiss','duplicates_restore','docs','layers','affected_tests','pr_impact','hotspots','dead_code','import_cycles','comments'):
         # Análise somente leitura pode demorar; não prende o lock global de ações.
         key=arguments.get('project_id')
         if not isinstance(key,str) or not re.fullmatch(r'[a-f0-9]{16}',key):
@@ -2273,6 +2548,10 @@ def _project_action(arguments):
         if action=='layers':
             import layers
             return layers.report(project['root'],arguments.get('layers'),arguments.get('confirm',False),arguments.get('view_id'))
+        if action in ('hotspots','dead_code','import_cycles','comments'):
+            import code_health
+            limit=_parse_bounded_int(arguments.get('limit'),default=25,min_v=1,max_v=200,field_name='limit')
+            return getattr(code_health,action)(project['root'],arguments.get('view_id'),limit)
         if action=='pr_impact':
             import pr_impact
             limit=_parse_bounded_int(arguments.get('limit'),default=30,min_v=1,max_v=200,field_name='limit')
@@ -2312,22 +2591,27 @@ def _project_action(arguments):
     return result
 
 
+HOME_RERANK = "embeddings home rerank host"
+
+
 def _probe_index_models():
     global _GATEWAY_STATUS
     with _GATEWAY_LOCK:
         cfg = config.load_config()
-        embedding = local_embedder.resolve(cfg.get("embedding_model"))
+        gateway = config.embedder(cfg) == "gateway"
+        embedding = local_embedder.resolve(cfg)
         embedding = None if embedding == indexer.LEXICAL_MODEL else embedding
-        local_down = (config.local_models_mode(cfg) == "prefer" and local_embedder.configured()
-                      and not local_embedder.info())
-        models = [embedding, cfg.get("rerank_model")]
+        home_down = not gateway and not embedding
+        rerank_model = cfg.get("rerank_model") if gateway else HOME_RERANK if local_embedder.rerank_configured() else None
+        models = [embedding, rerank_model]
         if _GATEWAY_STATUS.get("models") == models and time.time() - _GATEWAY_STATUS.get("checked_at", 0) < 30:
             return {"gateway": dict(_GATEWAY_STATUS), "cached": True}
         result = {"checked_at": time.time(), "models": models}
         try:
-            if not local_embedder.is_local(embedding) or cfg.get("rerank_model"):
+            token = ""
+            if gateway:
                 _require_valid_credential()
-            token = "" if local_embedder.is_local(embedding) and not cfg.get("rerank_model") else model_client.get_token()
+                token = model_client.get_token()
         except Exception as exc:
             result.update(status="needs_config", error=_project_error(exc))
         else:
@@ -2335,10 +2619,8 @@ def _probe_index_models():
                 if not model:
                     result[kind] = {"status": "not_configured"}
                     continue
-                if kind == "embedding" and local_down:
-                    result[kind] = {"status": "error", "error": "Prefer-local mode: the mcp-memory local embedder is not "
-                                    "responding; local indexes have no vector part until it is back.",
-                                    "elapsed_s": 0.0}
+                if kind == "embedding" and home_down:
+                    result[kind] = {"status": "error", "error": HOME_DOWN_WARNING, "elapsed_s": 0.0}
                     continue
                 start = time.monotonic()
                 try:
@@ -2346,7 +2628,10 @@ def _probe_index_models():
                         vector = _embed(model, ["Smart Tool: indexing diagnostics."], token, deadline=start + 60)[0]
                         result[kind] = {"status": "ok", "dimensions": len(vector)}
                     else:
-                        _rerank(model, "indexing", ["Indexing files for search."], 1, token, deadline=start + 30)
+                        if model == HOME_RERANK:
+                            _home_rerank("indexing", ["Indexing files for search."], 1, deadline=start + 30)
+                        else:
+                            _rerank(model, "indexing", ["Indexing files for search."], 1, token, deadline=start + 30)
                         result[kind] = {"status": "ok"}
                 except Exception as exc:
                     result[kind] = {"status": "error", "error": _project_error(exc)}
@@ -2675,14 +2960,14 @@ def _site_memory_correlate(query, records=None, deadline=None, include_content=T
         if not records:
             return set(), []
         cfg = config.load_config()
-        embedding_model = cfg.get("embedding_model")
-        rerank_model = cfg.get("rerank_model")
-        if not embedding_model or not rerank_model:
-            _web_model_warn("Site memory off (sources that helped before are not prioritized): embedding_model or rerank_model missing.")
+        token = model_client.get_token() if config.embedder(cfg) == "gateway" else ""
+        embedding_model, rerank, problem = _web_memory_models(cfg, token)
+        if problem:
+            _web_model_warn(f"Site memory off (sources that helped before are not prioritized): {problem}.")
             return set(), []
-        threshold = config.clamp_site_memory_similarity_threshold(cfg.get("site_memory_similarity_threshold"))
+        threshold = (config.clamp_site_memory_similarity_threshold(cfg.get("site_memory_similarity_threshold"))
+                     if config.embedder(cfg) == "gateway" else HOME_SITE_MEMORY_SIMILARITY)
         topics = list({r["topic"] for r in records})[:SITE_MEMORY_MAX_TOPICS]
-        token = model_client.get_token()
         timed = {"deadline": deadline} if deadline is not None else {}
         vectors = _embed(embedding_model, [query] + topics, token, **timed)
         query_vec, topic_vecs = vectors[0], vectors[1:]
@@ -2693,7 +2978,7 @@ def _site_memory_correlate(query, records=None, deadline=None, include_content=T
         if not candidates:
             research_metrics.log_site_memory(query, threshold, scored_topics, recalled=0)
             return set(), []
-        reranked = _rerank(rerank_model, query, candidates, len(candidates), token, **timed)
+        reranked = rerank(query, candidates, len(candidates), **timed)
         rerank_scores = {}
         for item in reranked:
             idx = item.get("index")
@@ -3198,7 +3483,8 @@ def _cache_match(depth, query, scope, cfg, token, deadline):
     for entry in entries:
         if _normalized(entry.get("query")) == normalized:
             stored = entry.get("topic_vector") or {}
-            return entry, (stored.get("values") if stored.get("model") == cfg.get("embedding_model") else None)
+            model = _web_embedder(cfg)
+            return entry, (stored.get("values") if model and stored.get("model") == model else None)
     if freshness.npm_version_only(query) or freshness.npm_version_security_only(query):
         package = freshness.npm_package(query)
         wants_security = freshness.npm_security_intent(query)
@@ -3209,12 +3495,11 @@ def _cache_match(depth, query, scope, cfg, token, deadline):
                 return entry, None
     if model_client.OFFLINE.get():
         return None, None
-    embed_model, rerank_model = cfg.get("embedding_model"), cfg.get("rerank_model")
+    embed_model, rerank, problem = _web_memory_models(cfg, token)
     match_model = cfg.get("router_model") or cfg.get("research_model")
-    if not embed_model or not rerank_model or not match_model:
-        missing = [name for name, value in (("embedding_model", embed_model), ("rerank_model", rerank_model),
-                                            ("router_model", match_model)) if not value]
-        _web_model_warn("Reuse of similar searches off (only the same question is reused): missing " + ", ".join(missing) + ".")
+    if problem or not match_model:
+        reasons = [text for text in (problem, "" if match_model else "router_model missing") if text]
+        _web_model_warn("Reuse of similar searches off (only the same question is reused): " + "; ".join(reasons) + ".")
         return None, None
     entries = [entry for entry in entries
                if (entry.get("topic_vector") or {}).get("model") == embed_model]
@@ -3224,11 +3509,11 @@ def _cache_match(depth, query, scope, cfg, token, deadline):
         vector = _embed(embed_model, [query], token, deadline=deadline)[0]
         scored = sorted(((indexer.cosine_similarity(vector, entry["topic_vector"]["values"]), i)
                          for i, entry in enumerate(entries)), reverse=True)
-        candidates = [i for score, i in scored[:10] if score >= 0.45]
+        candidates = [i for score, i in scored[:10] if score >= SIMILAR_SEARCH_MIN_COSINE[config.embedder(cfg)]]
         if not candidates:
             return None, vector
         topics = [str(entries[i].get("query") or "") for i in candidates]
-        ranked = _rerank(rerank_model, query, topics, min(3, len(candidates)), token, deadline=deadline)
+        ranked = rerank(query, topics, min(3, len(candidates)), deadline=deadline)
         for row in ranked[:3]:
             index = row.get("index")
             if not isinstance(index, int) or not 0 <= index < len(candidates):
@@ -3300,7 +3585,7 @@ def _validated_cache_result(depth, query, scope, cfg, token, deadline, requested
     hit = _revalidated(depth, entry, cfg, deadline)
     if hit and topic_vector is not None and not pending and _normalized(entry["query"]) != _normalized(query):
         research_cache.put(_cache_namespace(depth, scope), query, entry["result"], entry["classification"],
-                           cfg.get("embedding_model"), topic_vector, origin=entry)
+                           _web_embedder(cfg), topic_vector, origin=entry)
     return hit, topic_vector
 
 
@@ -3392,7 +3677,7 @@ def _store_fresh_research(depth, query, scope, result, sources, cfg, topic_vecto
             classification["npm_advisories"] = (osv_source["osv_advisory_ids"]
                                                  if osv_source else None)
     namespace = _cache_namespace(depth, scope)
-    embed_model = cfg.get("embedding_model")
+    embed_model = _web_embedder(cfg)
     saved_at = research_cache.put(namespace, query, result, classification,
                                   embed_model if topic_vector else None, topic_vector)
     if saved_at is not None and not model_client.OFFLINE.get():
@@ -3421,10 +3706,11 @@ def _complete_research(namespace, query, saved_at, sources, pending, cfg, topic_
         _log(f"volatility not judged; reuse requires a check: {classification['error']}")
     classification.update({key: value for key, value in pending.items()
                            if key.startswith("npm_") or key == "security_intent"})
-    embed_model = cfg.get("embedding_model")
+    embed_model = _web_embedder(cfg)
     if topic_vector is None and embed_model:
         try:
-            topic_vector = _embed(embed_model, [query], model_client.get_token())[0]
+            topic_vector = _embed(embed_model, [query], "" if local_embedder.is_local(embed_model)
+                                  else model_client.get_token())[0]
         except Exception as exc:
             _log(f"research vector not generated; reuse by exact text only: {type(exc).__name__}: {exc}")
     if not research_cache.complete(namespace, query, saved_at, classification,
@@ -3998,10 +4284,11 @@ def _render_page(url, deadline):
 def _web_fetch_embed(texts, deadline):
     """Vectors for the pieces of a long page and the prompt, with the pieces cached per embedding model. Fails loudly
     without an embedding model: a long page is never cut back to its start in silence."""
-    model = local_embedder.resolve(config.load_config().get("embedding_model"), None)
+    model = local_embedder.resolve(config.load_config(), None)
     if not model or model == indexer.LEXICAL_MODEL:
         raise RuntimeError("This page is longer than 60,000 characters and choosing its relevant parts needs an "
-                           "embedding_model, which is not configured")
+                           "embedder (the embeddings home running, or the gateway's embedding_model), which is not "
+                           "available")
     try:
         token = model_client.get_token()
         probe = _embed(model, texts[-1:], token, deadline=deadline)
@@ -4257,7 +4544,7 @@ def _session_audit_hook(handler):
 
 
 def _handle_read_document(arguments):
-    """read_document: facts and a page, slide, sheet or part range of a PDF, docx, pptx or xlsx as compact text (see
+    """read_document: facts and a page, slide, sheet, part or chapter range of a PDF, docx, pptx, xlsx, html, csv or epub as compact text (see
     document_read). Fails loudly, with the reason, for a path that is not absolute or readable, an unsupported or
     oversized file, a password, a scanned PDF, a corrupt or hostile package and a range outside the document; one metric
     row records the kind, the estimated tokens of the whole text and of the answer."""
@@ -4420,13 +4707,15 @@ _SETUP_SAVES = {
     "/setup/models": setup_ui.handle_models_save,
     "/setup/models/upgrade": setup_ui.handle_upgrade_action,
     "/setup/providers": setup_ui.handle_providers_save,
-    "/setup/local-models": setup_ui.handle_local_models_save,
+    "/setup/embedder": setup_ui.handle_embedder_save,
     "/setup/integration": setup_ui.handle_integration_save,
     "/setup/gateway": setup_ui.handle_gateway_save,
     "/setup/autostart": setup_ui.handle_autostart_action,
+    "/setup/updates": setup_ui.handle_updates_save,
     "/setup/contact": setup_ui.handle_contact_save,
     "/setup/language": setup_ui.handle_language_save,
     "/setup/audit": setup_ui.handle_audit,
+    "/setup/usage/mute": setup_ui.handle_usage_mute,
 }
 
 
@@ -4563,6 +4852,18 @@ class MCPHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._write_json(500, {"error": _sanitize_text(str(exc))})
             return
+        if self.path == "/setup/usage":
+            try:
+                self._write_json(200, setup_ui.handle_usage_get())
+            except Exception as exc:
+                self._write_json(500, {"error": _sanitize_text(str(exc))})
+            return
+        if self.path == "/setup/web-search/requesters":
+            try:
+                self._write_json(200, setup_ui.handle_web_requesters_get())
+            except Exception as exc:
+                self._write_json(500, {"error": _sanitize_text(str(exc))})
+            return
         if self.path in ("/setup/models/upgrade", "/setup/models/health"):
             try:
                 self._write_json(200, setup_ui.handle_upgrade_get() if self.path.endswith("upgrade")
@@ -4593,9 +4894,9 @@ class MCPHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._write_json(500, {"error": _sanitize_text(str(exc))})
             return
-        if self.path == "/setup/local-models":
+        if self.path == "/setup/embedder":
             try:
-                self._write_json(200, setup_ui.handle_local_models_get())
+                self._write_json(200, setup_ui.handle_embedder_get())
             except Exception as exc:
                 self._write_json(500, {"error": _sanitize_text(str(exc))})
             return
@@ -4608,6 +4909,12 @@ class MCPHandler(BaseHTTPRequestHandler):
         if self.path == "/setup/autostart":
             try:
                 self._write_json(200, setup_ui.handle_autostart_get())
+            except Exception as exc:
+                self._write_json(500, {"error": _sanitize_text(str(exc))})
+            return
+        if self.path == "/setup/updates":
+            try:
+                self._write_json(200, setup_ui.handle_updates_get())
             except Exception as exc:
                 self._write_json(500, {"error": _sanitize_text(str(exc))})
             return

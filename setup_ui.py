@@ -32,14 +32,17 @@ import i18n
 import model_catalog
 import model_defaults
 import model_health
+import usage_meter
 import model_upgrade
 import local_embedder
 import project_store
 import secret_store
 import setup_audit
+import update_check
 import integration_metrics
 import version
 import web_search_external
+import web_search_health
 
 SETUP_TOKEN = secrets.token_urlsafe(24)
 
@@ -204,6 +207,25 @@ def handle_health_get():
     return model_health.summary()
 
 
+def handle_usage_get():
+    """The 30-day use of the model gateway over every project, per purpose, and the hourly volume alerts."""
+    return usage_meter.overview(30)
+
+
+def handle_usage_mute(body):
+    """Mutes the volume alert of `body["purpose"]` for 7 days and returns the refreshed overview."""
+    try:
+        usage_meter.mute_volume(body.get("purpose") if isinstance(body, dict) else None)
+    except ValueError as exc:
+        raise SetupError(str(exc))
+    return handle_usage_get()
+
+
+def handle_web_requesters_get():
+    """Who asked the recent web searches: one row per client and project folder, never the query text."""
+    return web_search_health.by_requester()
+
+
 def handle_notices():
     """What the tray should show now: the model offer (once a day until answered) and models over the failure limit
     (once a day each). Fetching marks them announced, so each toast is shown once per reminder period. A project's
@@ -213,23 +235,40 @@ def handle_notices():
     return {"upgrade": offer, "failing": model_health.alerts_due(), "check_error": upgrade["check_error"]}
 
 
-def handle_local_models_get():
-    available = local_embedder.info() if local_embedder.configured() else None
-    return {"mode": config.local_models_mode(), "modes": list(config.LOCAL_MODEL_MODES),
-            "sidecar": {"configured": local_embedder.configured(), "url": local_embedder.url(),
-                        "embedding_model": (available or {}).get("model")}}
-
-
-def handle_local_models_save(body):
-    if not isinstance(body, dict) or body.get("mode") not in config.LOCAL_MODEL_MODES:
-        raise SetupError("Invalid mode: use fallback, off or prefer.")
+def handle_embedder_get():
+    """The chosen embedder and what the embeddings home answers: its model identity, whether a rerank host is
+    configured in it, or why it cannot be used."""
+    available, problem, base = None, "", None
     try:
-        config.update_config(lambda cfg: cfg.update(local_models=body["mode"]))
+        base = local_embedder.url()
+        available = local_embedder.info()
+    except local_embedder.IdentityError as exc:
+        problem = str(exc)
+    try:
+        choice = config.embedder()
+    except ValueError as exc:
+        choice, problem = None, str(exc)
+    return {"embedder": choice, "embedders": list(config.EMBEDDERS),
+            "home": {"announced": local_embedder.configured(), "announce": local_embedder.ANNOUNCE, "url": base,
+                     "embedding_model": (available or {}).get("model"),
+                     "rerank": bool((available or {}).get("rerank")), "error": problem}}
+
+
+def handle_embedder_save(body):
+    if not isinstance(body, dict) or body.get("embedder") not in config.EMBEDDERS:
+        raise SetupError("Invalid embedder: use home or gateway.")
+
+    def choose(cfg):
+        cfg.pop("local_models", None)
+        cfg["embedder"] = body["embedder"]
+
+    try:
+        config.update_config(choose)
     except config.ConfigCorruptedError as exc:
         raise SetupError(str(exc))
     except OSError as exc:
         raise SetupError(f"Disk error while saving the configuration ({exc}); try again.")
-    return {"ok": True, **handle_local_models_get()}
+    return {"ok": True, **handle_embedder_get()}
 
 
 def handle_integration_get():
@@ -267,6 +306,10 @@ def handle_integration_get():
     except ValueError as exc:
         dependency_mode, dependency_error = "", str(exc)
     try:
+        layer_mode, layer_error = config.layer_mode(), ""
+    except ValueError as exc:
+        layer_mode, layer_error = "", str(exc)
+    try:
         proposals_mode, proposals_error = config.pattern_proposals(), ""
     except ValueError as exc:
         proposals_mode, proposals_error = "", str(exc)
@@ -281,6 +324,7 @@ def handle_integration_get():
             "duplicate_mode_error": duplicate_error, "duplicate_modes": list(config.DUPLICATE_MODES),
             "dependency_mode": dependency_mode, "dependency_mode_error": dependency_error,
             "dependency_modes": list(config.DEPENDENCY_MODES),
+            "layer_mode": layer_mode, "layer_mode_error": layer_error, "layer_modes": list(config.LAYER_MODES),
             "pattern_proposals": proposals_mode, "pattern_proposals_error": proposals_error,
             "block_patterns": {"proposals": stored["proposals"], "accepted": stored["accepted"],
                                "rejected": len(stored["rejected"]), "error": patterns_error},
@@ -299,10 +343,11 @@ def handle_integration_save(body):
         except (OSError, ValueError) as exc:
             raise SetupError(str(exc))
         return handle_integration_get()
-    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "comment_mode", "duplicate_mode", "dependency_mode", "pattern_proposals"):
+    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "comment_mode", "duplicate_mode", "dependency_mode", "layer_mode", "pattern_proposals"):
         action = body["action"]
         allowed = {"hook_mode": config.HOOK_MODES, "doc_mode": config.DOC_MODES, "comment_mode": config.COMMENT_MODES,
                    "duplicate_mode": config.DUPLICATE_MODES, "dependency_mode": config.DEPENDENCY_MODES,
+                   "layer_mode": config.LAYER_MODES,
                    "pattern_proposals": config.PATTERN_PROPOSAL_MODES}[action]
         if body.get("mode") not in allowed:
             raise SetupError(f"Invalid mode: use {', '.join(allowed)}.")
@@ -440,6 +485,25 @@ def handle_language_save(body):
 
 def handle_autostart_get():
     return autostart.status()
+
+
+def handle_updates_get():
+    """The update state for the Startup page: versions, last check, last update, a failed automatic try and the switch."""
+    return update_check.status()
+
+
+def handle_updates_save(body):
+    """{"enabled": bool}: the automatic update switch, the same `auto_update` key as the tray menu. Refused while the
+    environment opt-out is set, as the tray does, because the choice would have no effect."""
+    if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+        raise SetupError("Send {\"enabled\": true or false}.")
+    if update_check.env_opted_out():
+        raise SetupError(f"{update_check.ENV_OPT_OUT}=off is set: automatic updates stay off until it is removed.")
+    try:
+        config.update_config(lambda cfg: cfg.__setitem__("auto_update", body["enabled"]))
+    except (OSError, config.ConfigCorruptedError) as exc:
+        raise SetupError(str(exc))
+    return update_check.status()
 
 
 def handle_autostart_action(body):
@@ -776,6 +840,13 @@ __I18N__
         <div id="health-table"></div>
       </div>
 
+      <div class="card" id="usage-card">
+        <div class="card-head"><h3>Model use (last 30 days)</h3><span class="pill" id="usage-pill" data-tone="busy">Checking</span></div>
+        <p class="lede">Calls, failures and, when the gateway reports them, tokens and cost, per purpose and over every project. A purpose whose calls in one hour pass twice its own busiest hour of the previous week (and at least 100) is flagged here; it never raises a notification.</p>
+        <div id="usage-table"></div>
+        <div class="msg" id="usage-msg" role="status"></div>
+      </div>
+
       <div class="card" id="models-card">
         <div class="card-head"><h3>2. Models</h3><span class="pill" id="models-pill" data-tone="busy">Checking</span></div>
         <p class="lede">Any model id your gateway accepts. The gateway's catalog shows up as suggestions while you type.</p>
@@ -798,17 +869,17 @@ __I18N__
               <div class="field"><label for="num-research-iterations">Maximum research rounds</label><span class="explain">How many search rounds a research may run before answering.</span><input type="number" id="num-research-iterations" step="1"><span class="hint" id="research-iterations-hint"></span></div>
               <div class="field"><label for="num-quick-timeout">Quick search time limit (s)</label><span class="explain">How long a quick web search waits for its sources.</span><input type="number" id="num-quick-timeout" step="1"><span class="hint" id="quick-timeout-hint"></span></div>
             </div>
-            <div class="field"><label for="num-site-memory-threshold">Per-site memory similarity</label><span class="explain">How close a new question must be to a remembered page of the same site to reuse it.</span><input type="number" id="num-site-memory-threshold" step="0.01"><span class="hint" id="site-memory-threshold-hint"></span></div>
+            <div class="field"><label for="num-site-memory-threshold">Per-site memory similarity</label><span class="explain">How close a new question must be to a remembered page of the same site to reuse it, with the gateway embedder; the embeddings home uses 0.62, measured on its model.</span><input type="number" id="num-site-memory-threshold" step="0.01"><span class="hint" id="site-memory-threshold-hint"></span></div>
           </details>
           <div class="actions"><button type="button" class="primary" id="btn-save-models">Save models</button></div>
           <div class="msg" id="models-msg" role="status"></div>
         </div>
       </div>
 
-      <div class="card" id="local-models-card">
-        <div class="card-head"><h3>3. Local models</h3><span class="pill" id="local-pill" data-tone="busy">Checking</span></div>
-        <p class="lede">Embedding from the mcp-memory sidecar on this machine. Switching between gateway and local rebuilds the project indexes; going back to a model used before reuses its vector cache.</p>
-        <fieldset class="choice" id="local-models-choice"><legend>When to use the local model</legend></fieldset>
+      <div class="card" id="embedder-card">
+        <div class="card-head"><h3>3. Embedder</h3><span class="pill" id="embedder-pill" data-tone="busy">Checking</span></div>
+        <p class="lede">The embeddings home (casa-de-embeddings) is the embedding service of this machine, shared with other tools; its rerank connector forwards to the rerank host configured in it. Switching the embedder re-embeds each project in the background: the old index keeps answering until the new one is complete, then the old vectors are deleted.</p>
+        <fieldset class="choice" id="embedder-choice"><legend>Embedder for the project indexes</legend></fieldset>
       </div>
     </section>
 
@@ -819,6 +890,11 @@ __I18N__
         <h3>Providers</h3>
         <p class="lede">A key is tested with a real search before it is saved, and is protected by DPAPI in this Windows profile.</p>
         <div id="provider-list"><p class="lede">Loading…</p></div>
+      </div>
+      <div class="card" id="requesters-card">
+        <h3>Who asked the searches</h3>
+        <p class="lede">The recent web search calls grouped by the client and project folder that made them. The text of a search is never recorded.</p>
+        <div id="requesters-table"></div>
       </div>
       <div class="card">
         <h3>Your contact (optional)</h3>
@@ -865,6 +941,13 @@ __I18N__
         <div class="actions"><button type="button" id="btn-autostart-toggle" disabled>Checking</button></div>
         <div class="msg" id="autostart-msg" role="status"></div>
       </div>
+      <div class="card" id="updates-card">
+        <div class="card-head"><h3>Automatic updates</h3><span class="pill" id="updates-pill" data-tone="busy">Checking</span></div>
+        <p class="lede">Smart Tool checks npm at start and every 24 hours and, when this is on, installs a newer version by itself. The switch is the same as in the tray menu.</p>
+        <div id="updates-body"></div>
+        <div class="actions"><button type="button" id="btn-updates-toggle" disabled>Checking</button></div>
+        <div class="msg" id="updates-msg" role="status"></div>
+      </div>
       <div class="card">
         <h3>This installation</h3>
         <dl class="facts">
@@ -880,7 +963,7 @@ __I18N__
 const TOKEN = __SETUP_TOKEN__;
 let status = __STATUS_JSON__;
 const $ = (id) => document.getElementById(id);
-const loaded = { integration: null, autostart: null, providers: null, audit: null };
+const loaded = { integration: null, autostart: null, updates: null, providers: null, audit: null };
 const failed = {};
 let serviceDown = false;
 
@@ -1220,6 +1303,50 @@ async function loadHealth() {
     $("health-table").textContent = "Could not read the failure log: " + error.message;
   }
 }
+function usageHtml(data) {
+  const num = (value) => (value === null ? "-" : Number(value).toLocaleString());
+  const cost = (value) => (value === null ? "-" : "$" + Number(value).toFixed(4));
+  const rows = data.by_purpose.map((row) => `<tr><td>${esc(PURPOSE_LABELS[row.purpose] || row.purpose)}</td><td>${num(row.attempts)}</td><td>${num(row.errors)}</td><td>${num(row.prompt_tokens)}</td><td>${num(row.output_tokens)}</td><td>${cost(row.reported_usd)}</td></tr>`).join("");
+  const alerts = data.volume.map((row) => `<li><strong>${esc(PURPOSE_LABELS[row.purpose] || row.purpose)}</strong>: ${row.attempts} calls this hour, limit ${row.threshold}`
+    + (row.muted ? " (muted)" : ` <button type="button" class="mute-volume" data-purpose="${esc(row.purpose)}">Mute for 7 days</button>`) + "</li>").join("");
+  return (alerts ? `<h4>Volume alert</h4><ul>${alerts}</ul>` : "")
+    + (rows ? `<table><tr><th>Purpose</th><th>Calls</th><th>Failed</th><th>Prompt tokens</th><th>Output tokens</th><th>Reported cost</th></tr>${rows}</table>` : "<p>No model call in the last 30 days.</p>")
+    + data.notes.map((note) => `<p class="mono">${esc(note)}</p>`).join("");
+}
+async function loadUsage() {
+  try {
+    const data = await getJSON("/setup/usage");
+    const active = data.volume.filter((row) => !row.muted).length;
+    setPill("usage-pill", active ? "bad" : "ok", active ? plural(active, "volume alert") : plural(data.totals.attempts, "call"));
+    $("usage-table").innerHTML = usageHtml(data);
+  } catch (error) {
+    setPill("usage-pill", "bad", "Unavailable");
+    $("usage-table").textContent = "Could not read the usage meter: " + error.message;
+  }
+}
+function requestersHtml(data) {
+  const rows = data.rows.map((row) => `<tr><td>${esc(row.client)}</td><td class="mono">${esc(row.project || "-")}</td><td>${row.sessions}</td><td>${row.calls}</td><td>${row.failed}</td><td>${esc(new Date(row.last_at * 1000).toLocaleString())}</td><td>${esc(row.sources.join(", "))}</td></tr>`).join("");
+  return (rows ? `<table><tr><th>Client</th><th>Project</th><th>Sessions</th><th>Calls</th><th>Failed</th><th>Last</th><th>Attributed by</th></tr>${rows}</table>` : "<p>No web search recorded yet.</p>")
+    + (data.unattributed ? `<p class="mono">${plural(data.unattributed, "call")} came without a requester (a client that sent only its name).</p>` : "");
+}
+async function loadRequesters() {
+  try {
+    $("requesters-table").innerHTML = requestersHtml(await getJSON("/setup/web-search/requesters"));
+  } catch (error) {
+    $("requesters-table").textContent = "Could not read the search log: " + error.message;
+  }
+}
+$("usage-table").addEventListener("click", async (event) => {
+  const button = event.target.closest(".mute-volume");
+  if (!button) return;
+  try {
+    await post("/setup/usage/mute", { purpose: button.dataset.purpose });
+    await loadUsage();
+    setMsg("usage-msg", "ok", "Volume alert muted for 7 days.");
+  } catch (error) {
+    setMsg("usage-msg", "error", error.message);
+  }
+});
 $("btn-save-models").addEventListener("click", async () => {
   if (!modelsLoaded) { setMsg("models-msg", "error", "The catalog has not loaded yet; nothing was saved."); return; }
   setMsg("models-msg", "", "Saving…");
@@ -1277,34 +1404,34 @@ function checkRadio(name, value) {
   for (const radio of document.querySelectorAll(`input[name="${name}"]`)) radio.checked = radio.value === value;
 }
 
-const LOCAL_OPTIONS = [
-  ["fallback", "Only as a fallback", "Use the local model only when the gateway does not have the embedding model.", true],
-  ["prefer", "Prefer local", "Use the local model even when the gateway has it; your code vectors stay on this machine."],
-  ["off", "Never", "Always use the gateway."],
+const EMBEDDER_OPTIONS = [
+  ["home", "Embeddings home", "The embedding service of this machine; your code goes to the address it announces, not to the gateway.", true],
+  ["gateway", "Gateway", "The gateway's embedding_model and rerank_model; your code goes to the gateway."],
 ];
-let localMode = null;
-const localSaved = choiceGroup($("local-models-choice"), "local_models", LOCAL_OPTIONS, null, async (mode) => {
-  setMsg(localSaved, "", "Saving…");
+let embedderChoice = null;
+const embedderSaved = choiceGroup($("embedder-choice"), "embedder", EMBEDDER_OPTIONS, null, async (embedder) => {
+  setMsg(embedderSaved, "", "Saving…");
   try {
-    await post("/setup/local-models", { mode });
-    localMode = mode;
-    setMsg(localSaved, "ok", "Saved. The indexes adjust on the next search or check.");
+    await post("/setup/embedder", { embedder });
+    embedderChoice = embedder;
+    setMsg(embedderSaved, "ok", "Saved. Each project is re-embedded in the background; its old index answers meanwhile.");
   } catch (error) {
-    checkRadio("local_models", localMode);
-    setMsg(localSaved, "error", error.message);
+    checkRadio("embedder", embedderChoice);
+    setMsg(embedderSaved, "error", error.message);
   }
 });
-async function loadLocalModels() {
+async function loadEmbedder() {
   try {
-    const data = await getJSON("/setup/local-models");
-    localMode = data.mode;
-    checkRadio("local_models", data.mode);
-    if (!data.sidecar.configured) setPill("local-pill", "idle", "No sidecar on this machine");
-    else if (data.sidecar.embedding_model) setPill("local-pill", "ok", "Sidecar answering: " + data.sidecar.embedding_model);
-    else setPill("local-pill", "warn", "Sidecar not answering (" + data.sidecar.url + ")");
+    const data = await getJSON("/setup/embedder");
+    embedderChoice = data.embedder;
+    checkRadio("embedder", data.embedder);
+    if (data.home.error) setPill("embedder-pill", "warn", data.home.error);
+    else if (!data.home.announced) setPill("embedder-pill", "idle", "Embeddings home not running");
+    else if (data.home.embedding_model) setPill("embedder-pill", "ok", "Embeddings home answering: " + data.home.embedding_model + (data.home.rerank ? " · rerank host configured" : ""));
+    else setPill("embedder-pill", "warn", "Embeddings home not answering (" + data.home.url + ")");
   } catch (error) {
-    setPill("local-pill", "bad", "Status unavailable");
-    setMsg(localSaved, "error", error.message);
+    setPill("embedder-pill", "bad", "Status unavailable");
+    setMsg(embedderSaved, "error", error.message);
   }
 }
 
@@ -1332,6 +1459,10 @@ const RULES = [
     intro: "Looks up the dependencies an edit of a dependency manifest adds or changes in the OSV advisory database. It never blocks.",
     options: [["warn", "Warn", "The edit runs; the agent is told which added or changed dependencies have known advisories.", true],
               ["off", "Off", "No dependency checks and no network call."]] },
+  { key: "layer_mode", title: "Calls that go up the layers on edit", applies: "Applies on the next edit.",
+    intro: "When the project has confirmed layers (.smart-tool/layers.json), warns about a call an edit adds from a lower layer to a function of a higher one. A project without layers is never checked. It never blocks.",
+    options: [["warn", "Warn", "The edit runs; the agent is told which new calls go up the layers.", true],
+              ["off", "Off", "No layer checks."]] },
   { key: "pattern_proposals", title: "Block patterns proposed by a model", applies: "Applies to the next review.",
     intro: "Afterwards, never delaying a call, the scope model (else the router model) reviews searches the fixed rule let through and may propose block patterns. Nothing blocks until you accept it on the Redirects page.",
     options: [["on", "On", "Review in the background and list proposals for you.", true],
@@ -1747,6 +1878,43 @@ $("btn-autostart-toggle").addEventListener("click", async () => {
   }
 });
 
+function updatesHtml(data) {
+  const when = (at) => esc(new Date(at * 1000).toLocaleString());
+  const lines = [`<p>Installed: ${esc(data.installed)}.</p>`, data.checked_at ? `<p>Last check: ${when(data.checked_at)}.</p>` : "<p>Not checked yet.</p>"];
+  if (data.available) lines.push(`<p>Version ${esc(data.latest)} is available. To update by hand, run <span class="mono">${esc(data.command)}</span></p>`);
+  else if (data.checked_at) lines.push("<p>Smart Tool is up to date.</p>");
+  if (data.updated) lines.push(`<p>Updated from ${esc(data.updated.from)} to ${esc(data.updated.to)} on ${when(data.updated.at)}.</p>`);
+  if (data.failed) lines.push(`<p class="msg error">The last automatic update to ${esc(data.failed)} failed; ${esc(data.installed)} is still installed.</p>`);
+  if (data.env_opt_out) lines.push('<p class="hint">SMART_TOOL_AUTO_UPDATE=off is set in the environment: automatic updates stay off until it is removed.</p>');
+  return lines.join("");
+}
+async function loadUpdates() {
+  try {
+    loaded.updates = await getJSON("/setup/updates");
+    const data = loaded.updates;
+    setPill("updates-pill", data.automatic ? "ok" : "idle", data.automatic ? "On" : "Off");
+    $("updates-body").innerHTML = updatesHtml(data);
+    const toggle = $("btn-updates-toggle");
+    toggle.disabled = data.env_opt_out;
+    toggle.className = data.enabled ? "" : "primary";
+    toggle.textContent = data.enabled ? "Turn off" : "Turn on";
+  } catch (error) {
+    setPill("updates-pill", "bad", "Status unavailable");
+    setMsg("updates-msg", "error", error.message);
+  }
+}
+$("btn-updates-toggle").addEventListener("click", async () => {
+  $("btn-updates-toggle").disabled = true;
+  try {
+    await post("/setup/updates", { enabled: !loaded.updates.enabled });
+    await loadUpdates();
+    setMsg("updates-msg", "ok", loaded.updates.enabled ? "Automatic updates turned on." : "Automatic updates turned off.");
+  } catch (error) {
+    setMsg("updates-msg", "error", error.message);
+    $("btn-updates-toggle").disabled = false;
+  }
+});
+
 const PROVIDER_STATES = { keyless: ["ok", "Free tier, no key"], configured: ["ok", "Your key"], unreadable: ["bad", "Key unreadable"] };
 function providerRow(name, info) {
   const entry = node("div", "provider-row");
@@ -1998,7 +2166,10 @@ renderGateway();
 renderOverview();
 if (status.gateway.status === "ready") { loadModels(); loadUpgrade(); }
 loadHealth();
-loadLocalModels();
+loadUsage();
+loadRequesters();
+loadUpdates();
+loadEmbedder();
 loadIntegration();
 loadAutostart();
 loadProviders();

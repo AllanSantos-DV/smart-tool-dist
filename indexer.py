@@ -226,6 +226,31 @@ def existing_db_path(root):
     return None
 
 
+def partial_index(root, model_id):
+    """`(path, indexed_files)` of the generation being built for `model_id` that already holds chunks: the newest
+    `.building-*` file of the project's current view. `(None, set())` when no build is under way or it holds nothing yet.
+    A search may read it while the build commits file by file."""
+    prefix = os.path.basename(db_path(root))[:-len(".sqlite3")] + ".building-"
+    try:
+        names = [name for name in os.listdir(INDEX_DIR) if name.startswith(prefix) and name.endswith(".sqlite3")]
+    except OSError:
+        return None, set()
+    for path in sorted((os.path.join(INDEX_DIR, name) for name in names), key=os.path.getmtime, reverse=True):
+        try:
+            conn = _readonly(path)
+            try:
+                if _metadata(conn).get("model_id") != model_id:
+                    continue
+                files = {row[0] for row in conn.execute("SELECT DISTINCT path FROM chunks")}
+            finally:
+                conn.close()
+        except (OSError, sqlite3.Error):
+            continue
+        if files:
+            return path, files
+    return None, set()
+
+
 def _readonly(path):
     """Read-only connection to an index. A rollback journal left by a crashed writer (a hot journal) cannot be rolled
     back by a read-only connection, which then fails every read with "attempt to write a readonly database": the
@@ -467,6 +492,30 @@ def chunk_file(root, rel_path, max_lines=CHUNK_LINES, max_chars=CHUNK_MAX_CHARS,
         overlap = min(CHUNK_OVERLAP_LINES, (end - start) // 5)
         start = max(start + 1, end - overlap)
     return chunks
+
+
+def indexed_lines(root, rel_path, start, end):
+    """`[(line_number, text)]` of lines `start..end` of rel_path as the index stored them (the extracted text of a PDF
+    or Office file, whose lines are not lines of the file), or None when the index holds none of them. Reads the chunk
+    rows only: no extraction of the document."""
+    db_file = existing_db_path(root)
+    if not db_file:
+        return None
+    try:
+        conn = _readonly(db_file)
+        try:
+            rows = conn.execute("SELECT start_line,text FROM chunks WHERE path=? AND start_line<=? AND end_line>=? "
+                                "ORDER BY start_line,id", (rel_path, end, start)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    found = {}
+    for first, text in rows:
+        for offset, line in enumerate(text.splitlines()):
+            found.setdefault(first + offset, line)
+    wanted = [(number, found[number]) for number in range(max(1, start), end + 1) if number in found]
+    return wanted or None
 
 
 def _pack_vector(vector):
@@ -795,6 +844,8 @@ def _reindex(root, included_paths, embed_batch, chunk_lines=CHUNK_LINES, on_prog
     check()
     if building and not stats["failed"]:
         atomic_io.atomic_replace(work_path, project_identity.state_path(target, INDEX_DIR))
+        if current.get("model_id") not in (None, model_id):
+            stats["dropped_vectors"] = _drop_other_models(root, model_id, target)
     stats["ready"] = not bool(stats["failed"])
     stats["path"] = target if stats["ready"] else work_path
     if building or total or stats["removed"] or full_check:
@@ -832,6 +883,43 @@ def _trim_other_views(root, target):
             _notice(f"index {name}: other view not trimmed now ({exc}); it is trimmed at the next update")
         finally:
             conn.close()
+
+
+def _project_files(root):
+    """Index files of the project in INDEX_DIR (every Git view, the legacy keys, builds, the vector cache)."""
+    for key in dict.fromkeys([project_identity.project_id(root), *project_identity.legacy_ids(root)]):
+        pattern = re.compile(re.escape(key) + r'((?:\.v-[a-f0-9]{16})?(?:\.previous|\.building-[a-f0-9]+|\.vectors)?\.sqlite3)$')
+        for name in os.listdir(INDEX_DIR):
+            if pattern.fullmatch(name):
+                yield os.path.join(INDEX_DIR, name)
+
+
+def _drop_other_models(root, model_id, target):
+    """After the index of a folder switched to `model_id`, deletes the vectors of the other models: the rows of the
+    vector cache and the other index files of the project (other Git views, legacy keys, unfinished builds) that hold
+    another model, with their saved graph analysis. Returns how many cached vectors were deleted."""
+    dropped = embedding_cache.drop_other_models(root, INDEX_DIR, model_id)
+    for path in list(_project_files(root)):
+        if path.endswith(".vectors.sqlite3") or os.path.normcase(path) == os.path.normcase(target):
+            continue
+        try:
+            conn = _readonly(path)
+            try:
+                model = _metadata(conn).get("model_id")
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            _notice(f"index {os.path.basename(path)}: not checked for vectors of another model ({exc})")
+            continue
+        if model != model_id:
+            for stale in (path, graph_cache_path(path)):
+                try:
+                    os.remove(stale)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    _notice(f"index {os.path.basename(stale)}: vectors of {model} not deleted now ({exc})")
+    return dropped
 
 
 def _compact(conn):
@@ -995,11 +1083,12 @@ def overlay_exact_keys(overlay, query):
             if score == 1.0}
 
 
-def search(root, query_vector=None, top_k=20, query=None, model_id=None, include=None, overlay=None):
+def search(root, query_vector=None, top_k=20, query=None, model_id=None, include=None, overlay=None, path=None):
     """Vector plus lexical retrieval by fusion of relative scores, without network. `overlay` is
     `{"drop": paths, "chunks": overlay_chunks(...)}`: the indexed chunks of the `drop` paths (stale or removed
-    files) are ignored and the overlay chunks, read from disk, take part by keyword instead."""
-    path = existing_db_path(root)
+    files) are ignored and the overlay chunks, read from disk, take part by keyword instead. `path` searches that
+    index file (a `partial_index`) instead of the project's ready one."""
+    path = path or existing_db_path(root)
     if not path:
         if not (overlay and overlay["chunks"] and query):
             return []

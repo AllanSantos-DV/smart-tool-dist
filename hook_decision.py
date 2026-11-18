@@ -19,6 +19,7 @@ import code_graph
 import code_impact
 import comment_check
 import config
+import credential_check
 import dependency_notice
 import doc_check
 import doc_scope
@@ -26,6 +27,7 @@ import duplicates
 import edit_preview
 import index_profile
 import index_scope
+import layer_check
 import endpoint_sync
 import project_admission
 import project_store
@@ -283,7 +285,22 @@ def _duplicate_lines(findings):
             + " If the copy is intentional (moving the function, a deliberate fork), go ahead.")
 
 
-def _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode="off"):
+def _layer_lines(findings):
+    lines = [f"`{item['function']}` ({rel}:{item['line']}) now calls `{item['called']}` ({item['path']}), a function of the "
+             f"higher layer {item['to']}, from layer {item['from']}" for rel, item in findings]
+    return ("Smart Tool layers: " + "; ".join(lines) + ". Calls go down the declared layers (.smart-tool/layers.json); "
+            "if this one is intended, go ahead.")
+
+
+def _credential_lines(findings):
+    lines = [f"{rel}:{item['line']} looks like a {item['kind']}" for rel, item in findings[:MAX_DOC_FINDINGS]]
+    if len(findings) > MAX_DOC_FINDINGS:
+        lines.append(f"{len(findings) - MAX_DOC_FINDINGS} more line(s) in the same situation.")
+    return ("Smart Tool credentials: " + "; ".join(lines) + ". Keep it out of the file: read it from an environment "
+            "variable or a secret store. If it is a fake value for a test, go ahead.")
+
+
+def _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode="off", layer_mode="off"):
     """Checks of an edit before it runs. Docstrings follow doc_mode, in code files of registered projects only (tests,
     docs and files outside a project are left out, as in the docs coverage): missing ones deny the edit in require mode and become a reminder in remind mode; a
     documented function whose signature changed always gets a reminder. Comments the edit adds in the wrong place
@@ -291,7 +308,7 @@ def _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mod
     functions follow duplicate_mode and only add context, never deny. An edit of a package.json, requirements*.txt or go.mod follows dependency_mode: advisories
     of the added or changed dependencies are added as context, never a denial."""
     with code_graph.pending_scope():
-        return _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode)
+        return _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode)
 
 
 def _dependency_part(before, after, ecosystem):
@@ -307,19 +324,25 @@ def _dependency_part(before, after, ecosystem):
         return f"{dependency_notice.PREFIX}dependency check skipped: {exc}"
 
 
-def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode="off"):
-    """`_edit_review` inside one `code_graph.pending_scope`, so the pending-changes scan runs once per review."""
+def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode="off"):
+    """The checks of an edit over (path, before, after) triples: docstrings, comments, documentation anchors, copies and
+    dependency advisories, each following its mode.
+
+    Parameters: changes (iterable of (absolute path, text before or None, text after)); the four modes (`off` skips a check).
+    Returns: tuple (message parts, doc findings, comment findings); the parts are empty when nothing is worth saying.
+    """
     doc_findings, scope_findings, duplicate_findings, failures, dependency_parts = [], [], [], [], []
-    comment_findings = []
-    for path, before, after in edit_preview.preview(payload.get("tool_name"), payload.get("tool_input"), payload.get("cwd")):
+    comment_findings, layer_findings, credential_findings = [], [], []
+    for path, before, after in changes:
+        root = _project_of(path)
+        rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root)).replace(os.sep, "/") if root else os.path.basename(path)
+        credential_findings += [(rel, item) for item in credential_check.review(before, after)]
         ecosystem = dependency_notice.ecosystem_of(path)
         if dependency_mode != "off" and ecosystem:
             dependency_parts += [part for part in (_dependency_part(before, after, ecosystem),) if part]
             continue
         if not doc_check.supported(path):
             continue
-        root = _project_of(path)
-        rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root)).replace(os.sep, "/") if root else os.path.basename(path)
         edited = doc_check.written(path, before, after)
         profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile")) if root else None
         if doc_mode != "off" and root and index_profile.kind(rel, profile) == "code":
@@ -336,10 +359,37 @@ def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comm
                 duplicate_findings += [(rel, item) for item in duplicates.on_write(root, path, before, after, edited)]
             except (ValueError, RuntimeError) as exc:
                 failures.append(f"Smart Tool duplicates check skipped: {exc}")
+        if layer_mode != "off" and root and edited["touched"]:
+            try:
+                layer_findings += [(rel, item) for item in layer_check.review(root, rel, before, after, edited)]
+            except (ValueError, RuntimeError, OSError) as exc:
+                failures.append(f"Smart Tool layers check skipped: {exc}")
     parts = ([_doc_lines(doc_findings)] if doc_findings else []) + \
         ([_comment_lines(comment_findings)] if comment_findings else []) + \
         ([_scope_lines(scope_findings)] if scope_findings else []) + \
-        ([_duplicate_lines(duplicate_findings)] if duplicate_findings else []) + failures + dependency_parts
+        ([_duplicate_lines(duplicate_findings)] if duplicate_findings else []) + \
+        ([_layer_lines(layer_findings)] if layer_findings else []) + \
+        ([_credential_lines(credential_findings)] if credential_findings else []) + failures + dependency_parts
+    return parts, doc_findings, comment_findings
+
+
+def review_diff(changes, cfg):
+    """The notes the edit hook would have added for changes made without it (a commit, a patch applied by hand).
+
+    Parameters: changes (iterable of (absolute path, text before or None, text after)); cfg (dict) the loaded config.
+    Returns: str, the hook's message for the whole set; empty when every check is quiet or off.
+    """
+    modes = (config.doc_mode(cfg), config.duplicate_mode(cfg), config.dependency_mode(cfg), config.comment_mode(cfg),
+             config.layer_mode(cfg))
+    with code_graph.pending_scope():
+        return " ".join(_review_changes(changes, *modes)[0])
+
+
+def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode="off", layer_mode="off"):
+    """`_edit_review` inside one `code_graph.pending_scope`, so the pending-changes scan runs once per review."""
+    parts, doc_findings, comment_findings = _review_changes(
+        edit_preview.preview(payload.get("tool_name"), payload.get("tool_input"), payload.get("cwd")),
+        doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode)
     if not parts:
         return {}
     message = " ".join(parts)
@@ -354,7 +404,7 @@ def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comm
 
 def decide(payload, client, web_route, jobs):
     """Hook output for one PreToolUse payload: edits follow doc_mode (require | remind | off) and duplicate_mode
-    (warn | off) and dependency_mode (warn | off), the other tools follow hook_mode (redirect | advise | off). In redirect mode the Smart Tool call that
+    (warn | off) and dependency_mode (warn | off), and every edit review also notes credentials the edit writes, the other tools follow hook_mode (redirect | advise | off). In redirect mode the Smart Tool call that
     replaces a redirected one starts in `jobs` under the call's tool_use_id (see `_redirect`); only a search whose
     query cannot be built, or a client that sends no tool_use_id, is denied with the exact call to make, and never in a
     subagent whose tool list has no Smart Tool MCP tool: it has nothing to switch to."""
@@ -362,11 +412,12 @@ def decide(payload, client, web_route, jobs):
     if isinstance(payload, dict):
         requester.note_origin(payload.get("session_id"), payload.get("cwd"))
     if isinstance(payload, dict) and payload.get("tool_name") in EDIT_TOOLS:
-        doc_mode, duplicate_mode, dependency_mode, comment_mode = (
-            config.doc_mode(cfg), config.duplicate_mode(cfg), config.dependency_mode(cfg), config.comment_mode(cfg))
-        if "off" == doc_mode == duplicate_mode == dependency_mode == comment_mode:
+        doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode = (
+            config.doc_mode(cfg), config.duplicate_mode(cfg), config.dependency_mode(cfg), config.comment_mode(cfg),
+            config.layer_mode(cfg))
+        if "off" == doc_mode == duplicate_mode == dependency_mode == comment_mode == layer_mode:
             return {}
-        return _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode)
+        return _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode)
     if isinstance(payload, dict) and str(payload.get("tool_name")).startswith(f"mcp__{SMART_TOOL_SERVER}__"):
         if payload["tool_name"] == SMART_SEARCH_TOOL:
             router.CLIENT.set(client)
