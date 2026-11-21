@@ -36,12 +36,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import atomic_io
+import browser_bridge
 import browser_control
 import capabilities
 import client_hooks
 import install_runtime
 import integration_metrics
 import node_locator
+import doc_turn
 import config
 import disk_cleanup
 import project_storage
@@ -58,7 +60,9 @@ import document_text
 import dependency_notice
 import dossier
 import scout
+import scout_access
 import embedding_cache
+import engine_home
 import model_defaults
 import model_health
 import project_admission
@@ -384,10 +388,10 @@ SERVER_INSTRUCTIONS = (
 TOOLS = [
     {
         "name": "project_manage",
-        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project (a project whose folder is gone shows as unavailable with the reason); status shows storage, scope and jobs, and with a path inside a registered project answers for the deepest one that holds it (resolved_from). deps lists the known OSV advisories of every dependency the manifests of the project declare (package.json, requirements*.txt, pyproject.toml, go.mod), not only the ones an edit changed, at the version a package-lock.json beside a package.json resolved when it satisfies the range; only package names and versions leave the machine. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers and the tests that reach them (those no test reaches are listed apart), the documentation entries it leaves out of date, the notes the edit hook would have added to the whole diff (comments, copies, dependency advisories) and the tests to run with their command; it publishes nothing. pr_impact_comment (pr, base required) posts that report as a comment on pull request pr through the gh CLI, from the project folder, and returns the comment URL; a rerun replaces the previous Smart Tool comment (marked by a hidden HTML marker) instead of stacking another, and the body carries no local path; it is a write to GitHub, so it refuses unless the user turned pr_comment on in the setup screen (Agent rules, off by default), and when gh is missing or not logged in; never call it without the user asking for the comment. hotspots (limit) ranks the code files by commits times lines, the riskiest to change; dead_code lists the functions no code calls and those only tests call (static call graph, candidates); import_cycles lists the groups of files that import each other; comments lists comments in the wrong place (commented-out code, history tags, loose docs, long inline blocks) across the code files, not only in an edit. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; each view carries stale (not updated for 30 days, the test of the daily cleanup that removes them) and stale_bytes sums them; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. junk (no project_root) lists the registered projects that were never projects: a personal, system, application-data or build folder, a subfolder of a repository or of another project, a folder of projects, or a folder that no longer exists (on a drive or share that is mounted); with confirm=true it unregisters them and deletes only their index files, and the manifest says what went. A project is the folder where the session started, so smart_search and register refuse a folder that is not a project and index a new one only from the session that started in it. Jobs via smart_search_result.",
+        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project (a project whose folder is gone shows as unavailable with the reason); status shows storage, scope and jobs, and with a path inside a registered project answers for the deepest one that holds it (resolved_from). deps lists the known OSV advisories of every dependency the manifests of the project declare (package.json, requirements*.txt, pyproject.toml, go.mod), not only the ones an edit changed, at the version a package-lock.json beside a package.json resolved when it satisfies the range; only package names and versions leave the machine. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers and the tests that reach them (those no test reaches are listed apart), the documentation entries it leaves out of date, the notes the edit hook would have added to the whole diff (comments, copies, dependency advisories) and the tests to run with their command; it publishes nothing. pr_impact_comment (pr, base required) posts that report as a comment on pull request pr through the gh CLI, from the project folder, and returns the comment URL; a rerun replaces the previous Smart Tool comment (marked by a hidden HTML marker) instead of stacking another, and the body carries no local path; it is a write to GitHub, so it refuses unless the user turned pr_comment on in the setup screen (Agent rules, off by default), and when gh is missing or not logged in; never call it without the user asking for the comment. hotspots (limit) ranks the code files by commits times lines, the riskiest to change; dead_code lists the functions no code calls and those only tests call (static call graph, candidates); import_cycles lists the groups of files that import each other; comments lists comments in the wrong place (commented-out code, history tags, loose docs, long inline blocks) across the code files, not only in an edit; credentials lists, per git-tracked text file (read from disk, so .env files and old commits count), the file and line of each credential shape (provider tokens, AWS keys, private-key headers), never the value, and skips lines that say they are an example; links lists the relative links of the tracked HTML and Markdown files that point to a missing file, plus the links it could not decide (root-relative, template expressions, pages with a base element), reported as unchecked, not broken. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; each view carries stale (not updated for 30 days, the test of the daily cleanup that removes them) and stale_bytes sums them; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. junk (no project_root) lists the registered projects that were never projects: a personal, system, application-data or build folder, a subfolder of a repository or of another project, a folder of projects, or a folder that no longer exists (on a drive or share that is mounted); with confirm=true it unregisters them and deletes only their index files, and the manifest says what went. A project is the folder where the session started, so smart_search and register refuse a folder that is not a project and index a new one only from the session that started in it. Jobs via smart_search_result.",
         "inputSchema": {
             "type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "layers", "affected_tests", "pr_impact", "pr_impact_comment", "hotspots", "dead_code", "import_cycles", "comments", "setup_audit", "redirect_proposals", "redirect_decide", "junk", "deps"]},
+                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "layers", "affected_tests", "pr_impact", "pr_impact_comment", "hotspots", "dead_code", "import_cycles", "comments", "credentials", "links", "setup_audit", "redirect_proposals", "redirect_decide", "junk", "deps"]},
                 "ids": {"type": "array", "items": {"type": "string"}, "description": "redirect_decide: proposal ids from redirect_proposals (accepted ids for remove)"},
                 "decision": {"type": "string", "enum": ["accept", "instruct", "reject", "remove"], "description": "redirect_decide: accept redirects matching calls to smart_search; instruct lets them run with a tip naming smart_search; reject discards; remove deletes an accepted pattern"},
                 "finding_id": {"type": "string"},
@@ -1321,8 +1325,29 @@ def _grouped_yaml(profile, blocks, warning):
     return "\n".join(lines) + "\n"
 
 
-HOME_DOWN_WARNING = ("The embeddings home is not running: index and search are lexical only until it answers (start or "
-                     "reinstall casa-de-embeddings; it announces itself in ~/.casa-de-embeddings/run/daemon.json).")
+HOME_DOWN_WARNING = ("The embeddings home is not running: index and search are lexical only until it answers; Smart Tool "
+                     "installs, updates and starts it through the engine registry.")
+
+
+def _home_down_warning():
+    """The lexical-only warning with the reason the last attempt to bring the embeddings home up gave."""
+    return f"{HOME_DOWN_WARNING} {engine_home.explain(engine_home.ENGINES[0])}"
+
+
+def _maintain_engine_homes():
+    """One pass over the engines Smart Tool consumes: the embeddings home is installed, updated and started when it is the
+    chosen embedder. A failure is logged and shows in the search warnings; it never stops the loop."""
+    try:
+        if config.embedder() == "home":
+            engine_home.ensure_when_due(engine_home.ENGINES[0])
+    except Exception as exc:
+        _log(f"engine home maintenance failed: {type(exc).__name__}: {exc}")
+
+
+def _engine_homes_loop():
+    while True:
+        _maintain_engine_homes()
+        time.sleep(engine_home.RETRY_AFTER_S)
 RERANK_MISSING_WARNING = {
     "gateway": "Rerank not configured: hybrid lexical/vector order, less precise at the top. Configure a rerank_model.",
     "home": ("Rerank not configured: hybrid lexical/vector order, less precise at the top. Configure a rerank host in the "
@@ -1450,7 +1475,7 @@ def _perform_smart_search_isolated(arguments, job_id):
         source = "index+disk" if overlay else source
         warnings.append(notice)
     elif model == indexer.LEXICAL_MODEL:
-        warnings.append(HOME_DOWN_WARNING if config.embedder(cfg) == "home" else LEXICAL_WARNING)
+        warnings.append(_home_down_warning() if config.embedder(cfg) == "home" else LEXICAL_WARNING)
         try:
             if not arguments.get("_existing_index_only"):
                 _prepare_project_index(arguments, job_id, cfg, token, model=model)
@@ -2508,7 +2533,7 @@ def _project_action(arguments):
     action = arguments.get("action", "list")
     if action == "probe":
         return _probe_index_models()
-    if action in ('graph','compare','duplicates','duplicates_dismiss','duplicates_restore','docs','layers','affected_tests','pr_impact','pr_impact_comment','hotspots','dead_code','import_cycles','comments'):
+    if action in ('graph','compare','duplicates','duplicates_dismiss','duplicates_restore','docs','layers','affected_tests','pr_impact','pr_impact_comment','hotspots','dead_code','import_cycles','comments','credentials','links'):
         # Análise somente leitura pode demorar; não prende o lock global de ações.
         key=arguments.get('project_id')
         if not isinstance(key,str) or not re.fullmatch(r'[a-f0-9]{16}',key):
@@ -2549,9 +2574,12 @@ def _project_action(arguments):
         if action=='layers':
             import layers
             return layers.report(project['root'],arguments.get('layers'),arguments.get('confirm',False),arguments.get('view_id'))
-        if action in ('hotspots','dead_code','import_cycles','comments'):
+        if action in ('hotspots','dead_code','import_cycles','comments','credentials','links'):
             import code_health
+            import project_scan
             limit=_parse_bounded_int(arguments.get('limit'),default=25,min_v=1,max_v=200,field_name='limit')
+            if action in ('credentials','links'):
+                return getattr(project_scan,action)(project['root'],limit)
             return getattr(code_health,action)(project['root'],arguments.get('view_id'),limit)
         if action=='pr_impact':
             import pr_impact
@@ -2625,7 +2653,7 @@ def _probe_index_models():
                     result[kind] = {"status": "not_configured"}
                     continue
                 if kind == "embedding" and home_down:
-                    result[kind] = {"status": "error", "error": HOME_DOWN_WARNING, "elapsed_s": 0.0}
+                    result[kind] = {"status": "error", "error": _home_down_warning(), "elapsed_s": 0.0}
                     continue
                 start = time.monotonic()
                 try:
@@ -4501,7 +4529,7 @@ def _posttool_hook(handler):
 
 
 def _pretool_hook(handler):
-    """PreToolUse decision for the hook (Claude Code `type: "http"`, Codex via the thin command). Always 200 with `{}`,
+    """PreToolUse decision for the hook (Claude Code and Codex, through the thin command). Always 200 with `{}`,
     `updatedInput`, `deny`, or `allow` only for the command the hook wrote to print a Smart Tool answer in Codex: a
     non-2xx answer would show as a hook error on every tool call, and any other `allow` would skip the user's
     permission prompt."""
@@ -4512,6 +4540,10 @@ def _pretool_hook(handler):
             _note_edit(payload)
         except Exception as exc:
             _log(f"edit index update skipped: {type(exc).__name__}: {exc}")
+        try:
+            doc_turn.note_tool(payload)
+        except Exception as exc:
+            _log(f"documentation registry note failed: {type(exc).__name__}: {exc}")
         output = _decide_within_budget(payload, client or None)
     except Exception as exc:
         _log(f"PreToolUse hook without a decision: {type(exc).__name__}: {exc}")
@@ -4525,6 +4557,38 @@ def _pretool_hook(handler):
     if decision != "deny":
         return {}
     return output
+
+
+SUBAGENT_SCOUT_CONTEXT = ("Smart Tool is installed: for a question that spans several files, your first tool call is "
+                          "mcp__smart-tool__smart_scout(project_root, question) (project_root is your working directory); it "
+                          "returns the lines that answer, so do not Grep or Read before it. To find where a name is defined or used, call "
+                          "mcp__smart-tool__smart_search. Read only a file you already know.")
+
+
+def _subagent_start_hook(handler):
+    """SubagentStart output: one sentence of context so every subagent knows smart_scout, in redirect and advise mode, and
+    nothing in off mode or where smart_scout needs a permission prompt (the subagent would wait on it). It never denies:
+    SubagentStart cannot block a launch."""
+    try:
+        payload = json.loads(handler._read_body(HOOK_MAX_BODY_BYTES) or b"{}")
+        if config.hook_mode() == "off" or not scout_access.callable_in(payload):
+            return {}
+    except Exception as exc:
+        _log(f"SubagentStart hook without context: {type(exc).__name__}: {exc}")
+        return {}
+    return {"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": SUBAGENT_SCOUT_CONTEXT}}
+
+
+def _stop_hook(handler):
+    """Stop output of the end-of-turn documentation step (doc_turn.on_stop), run in this request thread and never in
+    the search executor; a failure reaches the user as a systemMessage naming the hook's origin, never silently."""
+    try:
+        payload = json.loads(handler._read_body(HOOK_MAX_BODY_BYTES) or b"{}")
+        return doc_turn.on_stop(payload if isinstance(payload, dict) else {})
+    except Exception as exc:
+        _log(f"Stop hook failed: {type(exc).__name__}: {exc}")
+        return {"systemMessage": f"[hook-origin=smart-tool] the end-of-turn documentation step failed: "
+                                 f"{type(exc).__name__}: {_sanitize_text(str(exc))}"}
 
 
 def _session_audit_hook(handler):
@@ -4811,17 +4875,47 @@ class MCPHandler(BaseHTTPRequestHandler):
             raise RequestTooLarge(f"Request body over {max_bytes} bytes")
         return self.rfile.read(length) if length else b""
 
-    def _mcp_method_not_allowed(self):
-        """405 for GET and DELETE on /mcp: no server-initiated stream and no client-ended sessions. The spec's answer for
-        both; the MCP SDK client treats any other status, 404 included, as a broken connection."""
-        self.send_response(405)
-        self.send_header("Allow", "POST")
+    def _write_empty(self, status, allow=None):
+        self.send_response(status)
+        if allow:
+            self.send_header("Allow", allow)
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _mcp_method_not_allowed(self, allow="POST"):
+        """405 for GET (and DELETE on /mcp): no server-initiated stream and, on /mcp, no client-ended sessions. The
+        spec's answer for both; the MCP SDK client treats any other status, 404 included, as a broken connection."""
+        self._write_empty(405, allow)
+
+    def _read_mcp_request(self):
+        """The JSON-RPC object a POST to an MCP endpoint carries; None after answering the request itself when it is not
+        one (not JSON by Content-Type, too large, not parseable, not an object)."""
+        # A cross-origin <form> cannot send JSON and skips preflight, so requiring JSON shuts that path even without Origin.
+        if "application/json" not in (self.headers.get("Content-Type") or "").lower():
+            self._write_json(415, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Content-Type must be application/json"}})
+            return None
+        try:
+            raw = self._read_body(MCP_MAX_REQUEST_BYTES)
+        except ValueError as exc:
+            status = 413 if isinstance(exc, RequestTooLarge) else 400
+            self._write_json(status, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": str(exc)}})
+            return None
+        try:
+            request = json.loads(raw or b"{}")
+        except json.JSONDecodeError:
+            self._write_json(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}})
+            return None
+        if not isinstance(request, dict):
+            self._write_json(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request: expected a JSON object"}})
+            return None
+        return request
+
     def do_DELETE(self):
-        """Routes a DELETE: 405 on /mcp, 404 elsewhere."""
+        """Routes a DELETE: ends a Playwright bridge session, 405 on /mcp, 404 elsewhere."""
         if self._reject_foreign_origin():
+            return
+        if self.path == browser_bridge.PATH:
+            self._write_empty(browser_bridge.BRIDGE.delete(self.headers.get("Mcp-Session-Id")))
             return
         if self.path == "/mcp":
             self._mcp_method_not_allowed()
@@ -4829,9 +4923,12 @@ class MCPHandler(BaseHTTPRequestHandler):
         self._write_json(404, {"error": "not found"})
 
     def do_GET(self):
-        """Routes a GET: 405 on /mcp, the health and status probes, the setup and project pages and their data; 404
-        elsewhere."""
+        """Routes a GET: 405 on the MCP endpoints, the health and status probes, the setup and project pages and their
+        data; 404 elsewhere."""
         if self._reject_foreign_origin():
+            return
+        if self.path == browser_bridge.PATH:
+            self._mcp_method_not_allowed("POST, DELETE")
             return
         if self.path == "/mcp":
             self._mcp_method_not_allowed()
@@ -4938,9 +5035,18 @@ class MCPHandler(BaseHTTPRequestHandler):
         self._write_json(200, result)
 
     def do_POST(self):
-        """Routes a POST: setup actions, the hook routes (/hooks/pretool, /hooks/posttool, /hooks/session-audit) and
-        the MCP endpoint (/mcp); anything else is 404."""
+        """Routes a POST: the Playwright bridge, setup actions, the hook routes (/hooks/pretool, /hooks/posttool,
+        /hooks/session-audit) and the MCP endpoint (/mcp); anything else is 404."""
         if self._reject_foreign_origin():
+            return
+        if self.path == browser_bridge.PATH:
+            request = self._read_mcp_request()
+            if request is not None:
+                status, headers, payload = browser_bridge.BRIDGE.post(self.headers.get("Mcp-Session-Id"), request)
+                if payload is None:
+                    self._write_empty(status)
+                else:
+                    self._write_json(status, payload, headers)
             return
         if self.path == "/setup/projects":
             try:
@@ -4965,6 +5071,12 @@ class MCPHandler(BaseHTTPRequestHandler):
         if urllib.parse.urlsplit(self.path).path == "/hooks/session-audit":
             self._write_json(200, _session_audit_hook(self))
             return
+        if urllib.parse.urlsplit(self.path).path == "/hooks/subagent-start":
+            self._write_json(200, _subagent_start_hook(self))
+            return
+        if urllib.parse.urlsplit(self.path).path == "/hooks/stop":
+            self._write_json(200, _stop_hook(self))
+            return
         if self.path == "/setup/notices":
             try:
                 self._write_json(200, setup_ui.handle_notices())
@@ -4978,25 +5090,8 @@ class MCPHandler(BaseHTTPRequestHandler):
         if self.path != "/mcp":
             self._write_json(404, {"error": "not found"})
             return
-        # `<form>` de outra origem só consegue enviar urlencoded/multipart/text-plain e
-        # não é barrado por preflight: exigir JSON deixa esse caminho inutilizável mesmo
-        # que algum navegador entregue a requisição sem `Origin`.
-        if "application/json" not in (self.headers.get("Content-Type") or "").lower():
-            self._write_json(415, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Content-Type must be application/json"}})
-            return
-        try:
-            raw = self._read_body(MCP_MAX_REQUEST_BYTES)
-        except ValueError as exc:
-            status = 413 if isinstance(exc, RequestTooLarge) else 400
-            self._write_json(status, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": str(exc)}})
-            return
-        try:
-            request = json.loads(raw or b"{}")
-        except json.JSONDecodeError:
-            self._write_json(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}})
-            return
-        if not isinstance(request, dict):
-            self._write_json(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request: expected a JSON object"}})
+        request = self._read_mcp_request()
+        if request is None:
             return
 
         method = request.get("method")
@@ -5110,7 +5205,7 @@ def _probe_capabilities():
 
 
 def _heal_browser_control():
-    """Re-registers the Playwright MCP server when the Node it was registered with is gone (Node moved or reinstalled)."""
+    """Re-registers the Playwright MCP server when its registration no longer works (browser_control.heal)."""
     try:
         browser_control.heal(_log)
     except Exception as exc:
@@ -5167,15 +5262,19 @@ def main():
         _log(f"running version not recorded: {type(exc).__name__}: {exc}")
     _write_registry(_BOUND_PORT)
     atexit.register(_remove_registry)
+    _log(f"daemon started (pid {os.getpid()}, port {_BOUND_PORT})")
     try:
         for path in endpoint_sync.sync(f"http://127.0.0.1:{_BOUND_PORT}"):
             _log(f"port {_BOUND_PORT} written to {path}")
     except (OSError, ValueError) as exc:
         _log(f"clients not pointed to port {_BOUND_PORT}: {type(exc).__name__}: {exc}")
     atexit.register(BROWSER_SERVICE.close)
+    atexit.register(browser_bridge.BRIDGE.stop)
     threading.Thread(target=_heal_browser_control, daemon=True).start()
+    threading.Thread(target=_engine_homes_loop, daemon=True).start()
     try:
         recovered = project_store.recover_interrupted()
+        _log(f"documentation registry: {doc_turn.resume_all()} interrupted function(s) back to pending")
         disk_cleanup.sweep([WEB_FETCH_VECTOR_ROOT], _log)
         project_store.import_known_legacy(indexer.INDEX_DIR)
         _PROJECT_MONITOR = project_monitor.ProjectMonitor(_enqueue_monitored_project)
@@ -5186,10 +5285,16 @@ def main():
         _log(f"project monitor unavailable: {_project_error(exc)}")
     audit = setup_audit.Scheduler(_audited_roots, _log)
     audit.start()
+    reason = "the server loop returned"
     try:
         server.serve_forever()
+    except BaseException as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+        raise
     finally:
+        _log(f"daemon stopping (pid {os.getpid()}): {reason}")
         audit.stop()
+        browser_bridge.BRIDGE.stop()
         if _PROJECT_MONITOR:
             _PROJECT_MONITOR.stop()
         with _JOBS_LOCK:

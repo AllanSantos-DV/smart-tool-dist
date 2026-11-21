@@ -19,8 +19,14 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import venv_launch
+
 RUN_DIR = paths.DATA_DIR
 REGISTRY_PATH = os.path.join(RUN_DIR, "daemon.json")
+LOG_PATH = os.path.join(RUN_DIR, "daemon.log")
+SYNCHRONIZE = 0x00100000
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+INFINITE = 0xFFFFFFFF
 LOCK_PATH = os.path.join(RUN_DIR, "daemon.lock")
 LOCK_STALE_SECONDS = 30
 UPDATE_MARKER = os.path.join(RUN_DIR, "updating")
@@ -85,12 +91,8 @@ def _spawn_daemon():
             executable = executable.with_name("python.exe")
         fd, launcher = tempfile.mkstemp(prefix="smart-tool-hidden-", suffix=".vbs")
         try:
-            command = (f'Chr(34) & "{executable}" & Chr(34) & " " & '
-                       f'Chr(34) & "{DAEMON_SCRIPT}" & Chr(34)')
             with os.fdopen(fd, "w", encoding="utf-16") as stream:
-                stream.write('Set sh = CreateObject("WScript.Shell")\n')
-                stream.write(f'sh.CurrentDirectory = "{Path(DAEMON_SCRIPT).parent}"\n')
-                stream.write(f'sh.Run {command}, 0, False\n')
+                stream.write(venv_launch.hidden_run_vbs(executable, DAEMON_SCRIPT, Path(DAEMON_SCRIPT).parent))
             result = subprocess.run(
                 ["wscript.exe", "//B", "//NoLogo", launcher],
                 stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
@@ -168,6 +170,36 @@ def start_daemon_if_down():
         # False), então soltar o lock não acrescentaria segurança nenhuma.
         _spawn_daemon()
     return False
+
+
+def note_stop(message):
+    """Appends a stop line to the daemon log, for stops the daemon cannot write itself: the installer closing it and
+    the supervisor seeing it end without a word (killed, crashed)."""
+    os.makedirs(RUN_DIR, exist_ok=True)
+    with open(LOG_PATH, "a", encoding="utf-8") as stream:
+        stream.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+
+
+def wait_for_exit(pid):
+    """Blocks until process `pid` ends and returns its exit code; None when it cannot be watched (already gone, not
+    ours to open, or not Windows), so the caller falls back to polling."""
+    if os.name != "nt" or not pid:
+        return None
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not handle:
+        return None
+    try:
+        kernel32.WaitForSingleObject(wintypes.HANDLE(handle), INFINITE)
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(wintypes.HANDLE(handle), ctypes.byref(code)):
+            return None
+        return code.value
+    finally:
+        kernel32.CloseHandle(wintypes.HANDLE(handle))
 
 
 def _wait_for_daemon(wait_seconds, poll_interval=0.1):

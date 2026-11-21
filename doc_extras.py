@@ -439,7 +439,7 @@ def _flows(model, entries):
         function = model.function_of[anchor]
         diagram, left, drawn = _sequence(model, anchor)
         lines += [f'<a id="{doc_scope._escape(anchor)}"></a>', f"## {doc_scope.entry_title(model, anchor, entries)}", "",
-                  f'<!-- smart-tool:symbol id="{doc_scope._escape(anchor)}" signature="{doc_scope.signature_hash(function["signature"])}" -->',
+                  doc_scope.symbol_marker(anchor, model.stamps(anchor)),
                   "", f"Entry point in `{function['path']}`: {doc_scope.entry_link(model, anchor, entries, '../functional.md')}.", ""]
         lines += diagram if drawn else ["No call from this entry point reaches another code function."]
         if left > 0:
@@ -459,8 +459,7 @@ def _features_tests(model, covering, entries):
     for anchor, tests in covering:
         function = model.function_of[anchor]
         shown = ", ".join(f"`{model.function_of[t]['name']}`" for t in tests[:3]) + (f" (+{len(tests) - 3} more)" if len(tests) > 3 else "")
-        marker = (f'<a id="{doc_scope._escape(anchor)}"></a><!-- smart-tool:symbol id="{doc_scope._escape(anchor)}" '
-                  f'signature="{doc_scope.signature_hash(function["signature"])}" -->')
+        marker = f'<a id="{doc_scope._escape(anchor)}"></a>' + doc_scope.symbol_marker(anchor, model.stamps(anchor))
         lines.append(f"| {marker}{doc_scope.entry_link(model, anchor, entries, '../functional.md')} | {len(tests)} | "
                      f"{shown or 'no test reaches it'} |")
     bare = [a for a, tests in covering if not tests]

@@ -29,6 +29,7 @@ import code_graph
 import config
 import doc_check
 import doc_cli
+import doc_registry
 import index_profile
 import index_scope
 import layers
@@ -46,7 +47,10 @@ MIN_ROOT_FLOW = 3
 MAX_ROOTS = 40
 PROSE = re.compile(r'<!-- smart-tool:prose (.+?)(?: code="[0-9a-f]{12}")? -->\n(.*?)<!-- /smart-tool:prose -->', re.S)
 STAMPED_PROSE = re.compile(r'<!-- smart-tool:prose (.+?)(?: code="([0-9a-f]{12})")? -->\n(.*?)<!-- /smart-tool:prose -->', re.S)
-MARKER = re.compile(r'<!-- smart-tool:symbol id="([^"]+)" signature="([0-9a-f]{12})" -->')
+MARKER = re.compile(r'<!-- smart-tool:symbol id="([^"]+)" signature="([0-9a-f]{12})" body="([0-9a-f]{12})" '
+                    r'docstring="([0-9a-f]{12})" -->')
+ANY_MARKER = re.compile(r"<!-- smart-tool:symbol .*?-->")
+STAMPS = ("signature", "body", "docstring")
 LINK = re.compile(r"\]\(<([^>#]*)#([^>]+)>\)")
 ANCHOR = re.compile(r'<a id="([^"]+)"></a>')
 _SPACE = re.compile(r"\s+")
@@ -72,17 +76,65 @@ def code_stamp(source, function):
     return signature_hash("\n".join(source.split("\n")[function["start"] - 1:function["end"]]))
 
 
+def function_stamps(source, function):
+    """Signature, body and docstring stamps of a function: what a technical entry records it was written from.
+
+    Parameters: source (str) text of the function's file; function (dict) doc_check function with 'start', 'end',
+    'signature', 'docstring' and, for Python, 'doc_lines' (the docstring's lines, left out of the body stamp).
+    Returns: dict signature/body/docstring -> str of 12 hex digits.
+    """
+    first, last = function.get("doc_lines") or (0, -1)
+    body = [line for number, line in enumerate(source.split("\n")[function["start"] - 1:function["end"]], function["start"])
+            if not first <= number <= last]
+    return {"signature": signature_hash(function["signature"]), "body": signature_hash("\n".join(body)),
+            "docstring": signature_hash(function.get("docstring") or "")}
+
+
+def symbol_marker(anchor, stamps):
+    """The symbol marker of an anchor with the stamps of the code it was generated from."""
+    return (f'<!-- smart-tool:symbol id="{_escape(anchor)}" signature="{stamps["signature"]}" body="{stamps["body"]}" '
+            f'docstring="{stamps["docstring"]}" -->')
+
+
+def changed_parts(recorded, now):
+    """The stamps (signature, body, docstring) that differ between a marker and the code now, in that order."""
+    return [part for part in STAMPS if recorded.get(part) != now.get(part)]
+
+
+def drift_issue(parts):
+    """The issue name of a marker whose stamps differ: signature_changed before body_changed before docstring_changed."""
+    return f"{parts[0]}_changed"
+
+
+def flow_stamp(model, anchor):
+    """Stamp of a feature's prose: the code of the entry point and of every function its flow reaches, so a paragraph
+    goes stale when a function deep in the flow changes, not only when the entry point's own body does.
+
+    Parameters: model (_Model); anchor (str) entry point. Returns: str of 12 hex digits.
+    """
+    stamps = []
+    for reached in [anchor] + sorted(model.flow(anchor)):
+        function = model.function_of[reached]
+        stamps.append(f"{reached}={code_stamp(model.read(function['path']) or '', function)}")
+    return signature_hash("\n".join(stamps))
+
+
+def prose_stamps(model):
+    """Flow stamp of every entry point: the `current` argument of stale_prose."""
+    return {anchor: flow_stamp(model, anchor) for anchor in model.entry_points()}
+
+
 def prose_open(key, stamp=None):
     """Opening marker of the prose block `key`, with the code stamp it was written for when there is one."""
     return f"<!-- smart-tool:prose {key}" + (f' code="{stamp}"' if stamp else "") + " -->"
 
 
 def stale_prose(pages, current):
-    """Written entry-point prose of functional.md and simple.md whose code stamp is not the code of its function now,
-    a block without a stamp included: the paragraph may describe behavior the function no longer has.
+    """Written entry-point prose of functional.md and simple.md whose stamp is not the flow stamp of its entry point
+    now, a block without a stamp included: the paragraph may describe behavior the feature no longer has.
 
-    Parameters: pages (dict) relative file -> text; current (dict) anchor -> code_stamp of the function now (a function
-    gone is left out, its signature marker already reports it).
+    Parameters: pages (dict) relative file -> text; current (dict) anchor -> flow_stamp of the entry point now (an
+    entry point gone is left out, its signature marker already reports it).
     Returns: list of dicts with file, line and id.
     """
     found = []
@@ -180,6 +232,7 @@ class _Model:
         self._command_lines = None
         self._flows = {}
         self._runners = {}
+        self._possible = None
         self.roots_hidden = 0
         self.graph = code_graph.build_current(root, view_id, shared=True)
         self.scope = index_scope.load_scope(root) or {}
@@ -209,17 +262,39 @@ class _Model:
                     self.function_of[anchor] = {**function, "path": path, "id": anchor}
                     self.symbol_of[anchor] = symbol
         self.callers, self.callees = defaultdict(set), defaultdict(set)
-        self.used_by_module = set()
+        self.used_by_module, self.declared = set(), set()
         for call in self.graph.get("calls") or []:
             source, target = self.anchor_of.get(call["source"]), self.anchor_of.get(call["target"])
             if source and target and source != target:
                 self.callers[target].add(source)
                 self.callees[source].add(target)
+                if call.get("resolution") == "declared":
+                    self.declared.add((source, target))
             elif target and not source and self.kind.get(call["source"].rpartition("::")[0]) == "code":
                 self.used_by_module.add(target)
         annotated = bool(self.rule) and any(layer["annotations"] for layer in self.rule.layers)
         self.layer_of = {path: self.rule.assign(path, self.read(path) if annotated else None) if self.rule else None
                          for path in by_path}
+
+    def possible(self):
+        """Embedder candidates recorded in the registry that still apply (a public function with no path from any entry
+        point, a feature that still exists): (by function {anchor: [(entry, score)]}, by feature {entry: [(anchor,
+        score)]}). Read once; never a confirmed link."""
+        if self._possible is None:
+            entries, reached = set(self.entry_points()), features(self)
+            by_function, by_feature = defaultdict(list), defaultdict(list)
+            for row in sorted(doc_registry.candidates(self.root), key=lambda r: (-r["score"], r["feature_id"], r["fn_id"])):
+                anchor, entry = row["fn_id"], row["feature_id"]
+                if anchor in self.function_of and anchor not in reached and entry in entries:
+                    by_function[anchor].append((entry, row["score"]))
+                    by_feature[entry].append((anchor, row["score"]))
+            self._possible = (dict(by_function), dict(by_feature))
+        return self._possible
+
+    def stamps(self, anchor):
+        """Signature, body and docstring stamps of a function as it is now (see function_stamps)."""
+        function = self.function_of[anchor]
+        return function_stamps(self.read(function["path"]), function)
 
     def read(self, path):
         """Text of a project file, read once; None when it cannot be read as UTF-8."""
@@ -389,14 +464,60 @@ def _generated_files(root):
     return sorted(found)
 
 
-def _links(model, anchors, page_of, from_page):
+def features(model):
+    """Features each function belongs to: the entry points whose flow reaches it, and the entry point itself.
+
+    Returns: dict anchor -> list of (entry anchor, hops, origin), origin 'declared' when a call on the path goes through
+    an interface the project declares, else 'graph'.
+    """
+    found = defaultdict(list)
+    for entry in model.entry_points():
+        hops, origin = {entry: 0}, {entry: "graph"}
+        found[entry].append((entry, 0, "graph"))
+        for caller, callee in model.flow_edges(entry):
+            hops[callee] = hops[caller] + 1
+            origin[callee] = "declared" if (caller, callee) in model.declared or origin[caller] == "declared" else "graph"
+            found[callee].append((entry, hops[callee], origin[callee]))
+    return found
+
+
+def feature_links(model):
+    """Rows of the feature link table: one per (feature, function) pair the graph confirms."""
+    return [{"feature_id": entry, "fn_id": anchor, "layer": model.layer_of.get(model.function_of[anchor]["path"]),
+             "hops": hops, "origin": origin, "score": None, "status": "confirmed"}
+            for anchor, items in sorted(features(model).items()) for entry, hops, origin in items]
+
+
+def _feature_line(model, anchor, belongs, entries, page):
+    """The technical entry's '- Feature:' line: a link per feature its function belongs to, or 'none'."""
+    if not belongs:
+        return "- Feature: none"
+    target = posixpath.relpath("functional.md", posixpath.dirname(page) or ".")
+    return "- Feature: " + ", ".join(entry_link(model, entry, entries, target) for entry, _h, _o in belongs)
+
+
+def _possible_score(score):
+    return f"(embedder score {score:.2f}, not confirmed)"
+
+
+def _possible_feature_line(model, anchor, entries, page):
+    """The technical entry's '- Possible feature:' line from the embedder candidates, or None without any."""
+    found = model.possible()[0].get(anchor)
+    if not found:
+        return None
+    target = posixpath.relpath("functional.md", posixpath.dirname(page) or ".")
+    return "- Possible feature: " + ", ".join(f"{entry_link(model, entry, entries, target)} {_possible_score(score)}"
+                                              for entry, score in found)
+
+
+def _links(model, anchors, page_of, from_page, limit=MAX_LINKS):
     shown = []
-    for anchor in sorted(anchors)[:MAX_LINKS]:
+    for anchor in sorted(anchors)[:limit]:
         name = model.function_of[anchor]["name"]
         target = page_of.get(anchor)
         shown.append(_link(name, posixpath.relpath(target, posixpath.dirname(from_page) or "."), anchor) if target
                      else f"`{name}` ({model.function_of[anchor]['path']})")
-    more = len(anchors) - MAX_LINKS
+    more = len(anchors) - limit
     return ", ".join(shown) + (f" (+{more} more)" if more > 0 else "")
 
 
@@ -406,6 +527,7 @@ def _technical(model, kept):
     page_of, titles = _pages(model, public)
     truncated = TRUNCATED if model.graph.get("truncated") else ""
     pages, by_page = {}, defaultdict(list)
+    belongs, entries = features(model), model.entry_points()
     for anchor in public:
         by_page[page_of[anchor]].append(anchor)
     for page, anchors in sorted(by_page.items()):
@@ -425,9 +547,13 @@ def _technical(model, kept):
                 function = model.function_of[anchor]
                 tests = model.tests_of(anchor)
                 lines += [f'<a id="{_escape(anchor)}"></a>', f"### `{function['name']}`", "",
-                          f'<!-- smart-tool:symbol id="{_escape(anchor)}" signature="{signature_hash(function["signature"])}" -->',
+                          symbol_marker(anchor, model.stamps(anchor)),
                           "", f"`{function['signature'] or function['name']}` (line {function['start']})", "",
-                          function["doc"] or "*No docstring yet.*", ""]
+                          function["doc"] or "*No docstring yet.*", "",
+                          _feature_line(model, anchor, belongs.get(anchor), entries, page)]
+                possible = _possible_feature_line(model, anchor, entries, page)
+                if possible:
+                    lines.append(possible)
                 callers = {c for c in model.callers[anchor] if model.kind[model.function_of[c]["path"]] == "code"}
                 if callers:
                     lines.append(f"- Called by: {_links(model, callers, page_of, page)}")
@@ -589,16 +715,20 @@ def _functional(model, kept, page_of):
     for anchor in entries:
         function = model.function_of[anchor]
         lines += [f'<a id="{_escape(anchor)}"></a>', f"## {entry_title(model, anchor, entries)}", "",
-                  f'<!-- smart-tool:symbol id="{_escape(anchor)}" signature="{signature_hash(function["signature"])}" -->',
+                  symbol_marker(anchor, model.stamps(anchor)),
                   "", f"Entry point in `{function['path']}` (line {function['start']})."
                   + (f" Technical entry: {_link(function['name'], page_of[anchor], anchor)}." if anchor in page_of else ""),
-                  "", _prose(anchor, own, code_stamp(model.read(function["path"]), function)).rstrip("\n"), ""]
+                  "", _prose(anchor, own, flow_stamp(model, anchor)).rstrip("\n"), ""]
         groups = defaultdict(list)
         for reached in model.flow(anchor):
             groups[model.layer_of.get(model.function_of[reached]["path"]) or "other"].append(reached)
         for layer in order + ["other"]:
             if groups.get(layer):
-                lines.append(f"- {layer}: {_links(model, groups[layer], page_of, 'functional.md')}")
+                lines.append(f"- {layer}: {_links(model, groups[layer], page_of, 'functional.md', MAX_FLOW)}")
+        possible = [(a, s) for a, s in model.possible()[1].get(anchor, ()) if a in page_of]
+        if possible:
+            lines.append("- possible: " + ", ".join(f"{_link(model.function_of[a]['name'], page_of[a], a)} "
+                                                    f"{_possible_score(s)}" for a, s in possible))
         lines.append("")
     lines += _command_lines(model, entries)
     return "\n".join(lines).rstrip("\n") + "\n", entries
@@ -614,7 +744,7 @@ def _simple(model, kept, entries, vocabulary=()):
     for anchor in entries:
         function = model.function_of[anchor]
         lines += [f"### {entry_title(model, anchor, entries)}", "",
-                  _prose(anchor, own, code_stamp(model.read(function["path"]), function)).rstrip("\n"),
+                  _prose(anchor, own, flow_stamp(model, anchor)).rstrip("\n"),
                   f"[Details](<functional.md#{_escape(anchor)}>)", ""]
     return "\n".join(lines).rstrip("\n") + "\n"
 
@@ -670,6 +800,8 @@ def generate(root, view_id=None, limit=30, model=None):
             raise ValueError(f"{full} exists and was not written by Smart Tool; move it before generating.")
     for rel, text in files.items():
         full = os.path.join(folder, rel)
+        if rel in owned and _same_text(full, text):
+            continue
         os.makedirs(os.path.dirname(full), exist_ok=True)
         atomic_io.write_text(full, text)
     import doc_validate
@@ -702,6 +834,12 @@ def generate(root, view_id=None, limit=30, model=None):
                         "every claim again, the prose included."}
 
 
+def _same_text(path, text):
+    """True when the file at path already holds text, so a regeneration leaves it untouched."""
+    with open(path, encoding="utf-8", newline="") as stream:
+        return stream.read() == text
+
+
 def _scan(root):
     """Anchors, signature markers and links of the generated documents: (markers, anchors per file, links)."""
     markers, anchors, links = [], defaultdict(set), []
@@ -709,17 +847,21 @@ def _scan(root):
     for rel in _generated_files(root):
         with open(os.path.join(folder, rel), encoding="utf-8") as stream:
             for number, line in enumerate(stream, 1):
-                for anchor, digest in MARKER.findall(line):
-                    markers.append({"file": rel, "line": number, "id": html.unescape(anchor), "signature": digest})
+                found = MARKER.findall(line)
+                if len(found) != len(ANY_MARKER.findall(line)):
+                    raise ValueError(f"{DOCS_DIR}/{rel}:{number} has a symbol marker in an older format (without the body "
+                                     "and docstring stamps); regenerate the documents with project_manage action=docs "
+                                     "generate=true, which keeps the written prose.")
+                for anchor, *digests in found:
+                    markers.append({"file": rel, "line": number, "id": html.unescape(anchor), **dict(zip(STAMPS, digests))})
                 anchors[rel].update(html.unescape(a) for a in ANCHOR.findall(line))
                 links += [{"file": rel, "line": number, "target": target, "anchor": html.unescape(anchor)}
                           for target, anchor in LINK.findall(line)]
     return markers, anchors, links
 
 
-def _current_code(root, paths, symbols_by_path):
-    """Signature hash and code stamp of the functions in paths as they are on disk now: two dicts by anchor id."""
-    current, stamps = {}, {}
+def disk_functions(root, paths, symbols_by_path):
+    """Yields (path, source, function, anchor_id) for each function or method of paths as it is on disk now."""
     for path in paths:
         try:
             with open(os.path.join(root, path), encoding="utf-8") as stream:
@@ -729,33 +871,41 @@ def _current_code(root, paths, symbols_by_path):
         found = [f for f in doc_check.functions(path, source, symbols_by_path.get(path))
                  if f.get("kind", "function") in ("function", "method")]
         ids = anchor_ids(found, path)
-        current.update({ids[f["start"]]: signature_hash(f["signature"]) for f in found})
-        stamps.update({ids[f["start"]]: code_stamp(source, f) for f in found})
-    return current, stamps
+        for function in found:
+            yield path, source, function, ids[function["start"]]
+
+
+def _current_code(root, paths, symbols_by_path):
+    """Stamps (function_stamps) of the functions in paths as they are on disk now, by anchor id."""
+    return {fn_id: function_stamps(source, function)
+            for _path, source, function, fn_id in disk_functions(root, paths, symbols_by_path)}
 
 
 def check(root, view_id=None, limit=30):
-    """Drift of the generated documents: anchors whose function is gone or changed its signature since generation, and
-    links whose target anchor does not exist.
+    """Drift of the generated documents: anchors whose function is gone or changed its signature, body or docstring
+    since generation, and links whose target anchor does not exist.
 
     Parameters: root (str) project folder; view_id (str or None) index view; limit (int) findings listed.
-    Returns: dict with 'ok', 'findings' (file, line, id, issue: missing | signature_changed | broken_link) and counts.
+    Returns: dict with 'ok', 'findings' (file, line, id, issue: missing | signature_changed | body_changed |
+    docstring_changed | broken_link | prose_stale, and 'changed' for a drifted anchor) and counts.
     """
     if not os.path.isdir(os.path.join(root, DOCS_DIR)):
         raise ValueError(f"No {DOCS_DIR} in the project yet: generate it with project_manage action=docs generate=true.")
     markers, anchors, links = _scan(root)
-    graph = code_graph.build_current(root, view_id, shared=True)
+    model = _Model(root, view_id)
     by_path = defaultdict(list)
-    for symbol in graph.get("symbols") or []:
+    for symbol in model.graph.get("symbols") or []:
         by_path[symbol["path"]].append(symbol)
     paths = {m["id"].rpartition("::")[0] for m in markers}
-    current, stamps = _current_code(root, paths, by_path)
+    current = _current_code(root, paths, by_path)
     findings = []
     for marker in markers:
         now = current.get(marker["id"])
-        if now != marker["signature"]:
+        parts = changed_parts(marker, now) if now else []
+        if now is None or parts:
             findings.append({"file": f"{DOCS_DIR}/{marker['file']}", "line": marker["line"], "id": marker["id"],
-                             "issue": "missing" if now is None else "signature_changed"})
+                             "issue": "missing" if now is None else drift_issue(parts),
+                             **({"changed": parts} if parts else {})})
     for link in links:
         target = posixpath.normpath(posixpath.join(posixpath.dirname(link["file"]), link["target"])) \
             if link["target"] else link["file"]
@@ -767,14 +917,15 @@ def check(root, view_id=None, limit=30):
         links.append(link)
         if link["anchor"] not in anchors.get(link["target"], ()):
             findings.append({"file": link["file"], "line": link["line"], "id": link["anchor"], "issue": "broken_link"})
-    stale = stale_prose(_read_pages(root, ("functional.md", "simple.md")), stamps)
+    stale = stale_prose(_read_pages(root, ("functional.md", "simple.md")), prose_stamps(model))
     findings += [{**item, "file": f"{DOCS_DIR}/{item['file']}", "issue": "prose_stale"} for item in stale]
     guidance = []
     if len(stale) < len(findings):
         guidance.append("Regenerate with project_manage action=docs generate=true: the skeleton follows the code and "
                         "the prose is kept; review the prose of the entries listed.")
     if stale:
-        guidance.append("prose_stale: the code of the entry changed after its paragraph was written. Empty the block and "
+        guidance.append("prose_stale: the code of the feature (its entry point or a function its flow reaches) changed "
+                        "after its paragraph was written. Empty the block and "
                         "run docs write_prose=true, or rewrite it by hand and delete its code=\"...\" stamp, then "
                         "regenerate so the block records the code it now describes.")
     return {"ok": not findings, "anchors": len(markers), "links": len(links), "findings_total": len(findings),
@@ -820,11 +971,11 @@ def anchors(root, symbol, view_id=None):
     by_path = defaultdict(list)
     for item in graph.get("symbols") or []:
         by_path[item["path"]].append(item)
-    current, _stamps = _current_code(root, {m["id"].rpartition("::")[0] for m in found}, by_path)
+    current = _current_code(root, {m["id"].rpartition("::")[0] for m in found}, by_path)
     return {"symbol": symbol.strip(),
             "anchors": [{"file": f"{DOCS_DIR}/{m['file']}", "line": m["line"], "id": m["id"],
                          "level": "technical" if m["file"].startswith("technical/") else m["file"][:-3],
-                         "current": current.get(m["id"]) == m["signature"]} for m in found]}
+                         "current": not changed_parts(m, current.get(m["id"]) or {})} for m in found]}
 
 
 _MARKERS_CACHE = {}
@@ -859,11 +1010,26 @@ def on_edit(root, rel, before, after_functions):
         if before else []
     new = [f for f in after_functions if f.get("kind", "function") in ("function", "method")]
     old_ids, new_ids = anchor_ids(old, rel), anchor_ids(new, rel)
-    then = {old_ids[f["start"]]: signature_hash(f["signature"]) for f in old}
-    now = {new_ids[f["start"]]: signature_hash(f["signature"]) for f in new}
+    source_before, source_after = before or "", _source_of(after_functions, absolute)
+    then = {old_ids[f["start"]]: function_stamps(source_before, f) for f in old}
+    now = {new_ids[f["start"]]: function_stamps(source_after, f) for f in new} if source_after is not None else {}
     stale = []
     for marker in markers:
-        if then.get(marker["id"]) == marker["signature"] and now.get(marker["id"]) != marker["signature"]:
+        if marker["id"] not in then or changed_parts(marker, then[marker["id"]]):
+            continue
+        parts = changed_parts(marker, now[marker["id"]]) if marker["id"] in now else []
+        if marker["id"] not in now or parts:
             stale.append({"file": f"{DOCS_DIR}/{marker['file']}", "id": marker["id"],
-                          "issue": "missing" if marker["id"] not in now else "signature_changed"})
+                          "issue": "missing" if marker["id"] not in now else drift_issue(parts),
+                          **({"changed": parts} if parts else {})})
     return stale
+
+
+def _source_of(functions, absolute):
+    """Text of the edited file after the edit (the edit hook runs once it is on disk); None when it cannot be read and
+    the file still has functions, so their stamps cannot be compared."""
+    try:
+        with open(absolute, encoding="utf-8") as stream:
+            return stream.read()
+    except (OSError, UnicodeDecodeError):
+        return "" if not functions else None

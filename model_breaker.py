@@ -13,7 +13,7 @@ import urllib.error
 FAILURES_TO_OPEN = 3
 PAUSE_S = 30
 MAX_IN_FLIGHT = 6
-_BUSY_CODES = (429, 503)
+BUSY_CODES = (429, 503)
 _lock = threading.Lock()
 _failures = {}
 _open_until = {}
@@ -35,12 +35,13 @@ def guard(model):
                           "HTTP 429/503 answers from the gateway; no request was sent.")
 
 
-def note(model, failure=None):
-    """Records the outcome of a request: a success closes the circuit, a 429/503 counts toward opening it, any other
-    failure changes nothing. After the pause the first failure opens it again."""
+def note(model, failure=None, codes=BUSY_CODES):
+    """Records the outcome of a request: a success closes the circuit, an HTTP status in `codes` counts toward opening
+    it, any other failure changes nothing. After the pause the first failure opens it again. `codes` is the gateway's
+    busy answers by default; the embeddings home adds its 500, an inference that fails until the home recovers."""
     if not model:
         return
-    busy = isinstance(failure, urllib.error.HTTPError) and failure.code in _BUSY_CODES
+    busy = isinstance(failure, urllib.error.HTTPError) and failure.code in codes
     with _lock:
         if failure is None:
             _failures[model] = 0

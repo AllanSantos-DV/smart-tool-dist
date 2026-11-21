@@ -73,6 +73,11 @@ def _validated(key):
     return old[1] if time.monotonic()-old[0] < 1 else None
 
 
+def cached_view(root):
+    """The view `describe` holds for `root` while it is still the current one, else None; checks by stat and never runs git."""
+    return _validated(project_identity.canonical_root(project_identity.display_root(root)))
+
+
 def describe(root, fresh=False):
     """Git view of `root`. `fresh` asks for a check, not for a new resolution: a cached Git view whose stamp (HEAD, index,
     logs/HEAD, packed-refs, the ref file) did not move is still the current one and costs no git process. Concurrent

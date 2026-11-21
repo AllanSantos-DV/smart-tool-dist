@@ -122,7 +122,7 @@ def _function_line(model, function, number):
     """True when the project file's line holds the function's own name (its definition line)."""
     text = model.read(function["path"])
     lines = text.split("\n") if text else []
-    name = function["name"].split(".")[-1].split("@")[0]
+    name = function["name"].split("(", 1)[0].split(".")[-1].split("@")[0]
     return 0 < number <= len(lines) and re.search(rf"\b{re.escape(name)}\b", lines[number - 1]) is not None
 
 
@@ -198,15 +198,55 @@ class _Validation:
         by_path = defaultdict(list)
         for symbol in self.model.graph.get("symbols") or []:
             by_path[symbol["path"]].append(symbol)
-        current, stamps = doc_scope._current_code(self.root, {m["id"].rpartition("::")[0] for m in markers}, by_path)
+        current = doc_scope._current_code(self.root, {m["id"].rpartition("::")[0] for m in markers}, by_path)
         for marker in markers:
             now = current.get(marker["id"])
-            check.verify(now == marker["signature"], f"{marker['file']}:{marker['line']}",
-                         f"`{marker['id']}` ({marker['file']}:{marker['line']}) has the signature of the code",
-                         f"`{marker['id']}` " + ("no longer exists in the code" if now is None else "changed its signature"))
-        for item in doc_scope.stale_prose(self.pages, stamps):
+            parts = doc_scope.changed_parts(marker, now) if now else []
+            check.verify(now is not None and not parts, f"{marker['file']}:{marker['line']}",
+                         f"`{marker['id']}` ({marker['file']}:{marker['line']}) has the signature, body and docstring of "
+                         "the code", f"`{marker['id']}` " + ("no longer exists in the code" if now is None
+                                                             else f"changed its {' and '.join(parts)} since generation"))
+        for item in doc_scope.stale_prose(self.pages, doc_scope.prose_stamps(self.model)):
             check.fail(f"{item['file']}:{item['line']}", f"the paragraph of `{item['id']}` was written for other code of "
-                       "the function: its body changed since")
+                       "the feature: its entry point or a function its flow reaches changed since")
+
+    def chain(self):
+        check = self.check("chain", "Every feature a technical entry names lists that entry in its section of the "
+                                    "functional overview, and the other way round")
+        technical, functional = {"": set(), "possible ": set()}, {"": set(), "possible ": set()}
+        for rel, found in self.sections.items():
+            if not rel.startswith("technical/"):
+                continue
+            for anchor, section in found.items():
+                if anchor not in self.model.function_of:
+                    continue
+                if not any(l.startswith("- Feature: ") for _n, l in section["body"]):
+                    check.fail(f"{rel}:{section['line']}", f"`{anchor}` has no Feature line")
+                for number, line in section["body"]:
+                    kind = "" if line.startswith("- Feature: ") else "possible " if line.startswith(
+                        "- Possible feature: ") else None
+                    for _label, target in _ANY_LINK.findall(line) if kind is not None else ():
+                        path, _sep, feature = target.strip("<>").partition("#")
+                        if _resolve(rel, path) == "functional.md":
+                            technical[kind].add((html.unescape(feature), anchor, f"{rel}:{number}"))
+        for feature, section in self.sections.get("functional.md", {}).items():
+            if section["heading"] is None or feature.startswith("cli:"):
+                continue
+            for number, line in section["body"]:
+                kind = "possible " if line.startswith("- possible: ") else ""
+                for _label, target in _ANY_LINK.findall(line):
+                    path, _sep, anchor = target.strip("<>").partition("#")
+                    if _resolve("functional.md", path).startswith("technical/"):
+                        functional[kind].add((feature, html.unescape(anchor), f"functional.md:{number}"))
+        for kind in technical:
+            written = {(f, a) for f, a, _w in functional[kind]}
+            named = {(f, a) for f, a, _w in technical[kind]}
+            for feature, anchor, where in sorted(technical[kind]):
+                check.verify((feature, anchor) in written, where, f"`{anchor}` and feature `{feature}` link each other",
+                             f"`{anchor}` names {kind}feature `{feature}`, whose section does not list it")
+            for feature, anchor, where in sorted(functional[kind]):
+                check.verify((feature, anchor) in named, where, f"`{anchor}` and feature `{feature}` link each other",
+                             f"{kind}feature `{feature}` lists `{anchor}`, whose technical entry does not name it")
 
     def links(self):
         check = self.check("links", "Every link resolves to an existing page, file and anchor")
@@ -274,7 +314,7 @@ class _Validation:
                 for path, at in _PATH_LINE.findall(line):
                     source = self.model.read(path)
                     rows = source.split("\n") if source else []
-                    word = name.group(1).split(".")[-1]
+                    word = name.group(1).split("(", 1)[0].split(".")[-1]
                     held = 0 < int(at) <= len(rows) and word in rows[int(at) - 1]
                     check.verify(held, f"{rel}:{number}", f"`{name.group(1)}` is at {path}:{at}",
                                  f"line {at} of `{path}` does not hold `{name.group(1)}`")
@@ -500,6 +540,9 @@ class _Validation:
             tests = self.model.tests_of(anchor) if anchor in self.model.function_of else []
             check.verify(count == len(tests), f"extras/features-tests.md:{number}", f"`{anchor}`: {count} test(s)",
                          f"`{anchor}` shows {count} test(s), the graph reaches {len(tests)}")
+        if not rows and not self.entries and "No entry point found" in text:
+            check.ok("extras/features-tests.md says no entry point was found")
+            return
         bare = sum(1 for a in self.entries[:rows] if not self.model.tests_of(a))
         found = re.search(r"^(\d+) of (\d+) entry point", text, re.M)
         check.verify(found and [int(found.group(1)), int(found.group(2))] == [bare, rows], "extras/features-tests.md",
@@ -636,7 +679,7 @@ class _Validation:
                 check.fail(f"extras/dependencies.md ({path})", f"`{key[0]}` is not declared in {path}")
 
     def run(self):
-        for step in (self.markers, self.links, self.lines, self.relations, self.coverage, self.entry_points,
+        for step in (self.markers, self.chain, self.links, self.lines, self.relations, self.coverage, self.entry_points,
                      self.features, self.command_lines, self.prose, self.entry_tests, self.labels, self.counts,
                      self.glossary, self.navigation, self.versions):
             step()

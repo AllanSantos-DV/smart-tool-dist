@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Autostart do Smart Tool no logon do Windows — Tarefa Agendada por usuário (sem
-admin), com política `RestartOnFailure` cobrindo o SO reiniciar o processo se ele
-morrer. `schtasks /Create` pode ser bloqueado por política de grupo corporativa
-(máquina AD-joined); nesse caso cai automaticamente para um atalho na pasta Startup
-do usuário — sem a política de restart do Task Scheduler, mas o loop de polling do
-próprio `tray.py` já cobre "se cair, sobe de novo" independente do mecanismo de boot.
+admin). `schtasks /Create` pode ser bloqueado por política de grupo corporativa
+(máquina AD-joined); nesse caso cai automaticamente para um script na pasta Startup
+do usuário. Os dois rodam o mesmo VBScript, que sobe o `tray.py` no Python base com
+a venv (`venv_launch`): a Tarefa Agendada não passa variável de ambiente, e o
+redirecionador da venv deixaria dois processos por bandeja. O loop de polling do
+próprio `tray.py` cobre "se o daemon cair, sobe de novo".
 """
 import os
 import subprocess
 import sys
 import tempfile
 
+import paths
 import toast_notice
+import venv_launch
 
 TASK_NAME = os.environ.get("SMART_TOOL_TASK_NAME", "SmartTool-Tray")
 # The tray runs under pythonw (no console): schtasks without this flag flashed a console each time its menu was drawn.
@@ -52,8 +55,8 @@ def _current_user_id():
 
 def _task_xml():
     user_id = _xml_escape(_current_user_id())
-    pythonw = _xml_escape(_pythonw_path())
-    tray = _xml_escape(_tray_path())
+    wscript = _xml_escape(_wscript_path())
+    script = _xml_escape(_write_launch_script(_task_script_path()))
     workdir = _xml_escape(_tool_dir())
     return (
         '<?xml version="1.0" encoding="UTF-16"?>\r\n'
@@ -84,15 +87,11 @@ def _task_xml():
         '    <Enabled>true</Enabled>\r\n'
         '    <Hidden>false</Hidden>\r\n'
         '    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\r\n'
-        '    <RestartOnFailure>\r\n'
-        '      <Interval>PT1M</Interval>\r\n'
-        '      <Count>999</Count>\r\n'
-        '    </RestartOnFailure>\r\n'
         '  </Settings>\r\n'
         '  <Actions Context="Author">\r\n'
         '    <Exec>\r\n'
-        f'      <Command>{pythonw}</Command>\r\n'
-        f'      <Arguments>"{tray}"</Arguments>\r\n'
+        f'      <Command>{wscript}</Command>\r\n'
+        f'      <Arguments>//B //NoLogo "{script}"</Arguments>\r\n'
         f'      <WorkingDirectory>{workdir}</WorkingDirectory>\r\n'
         '    </Exec>\r\n'
         '  </Actions>\r\n'
@@ -111,20 +110,24 @@ def _startup_script_path():
     return os.path.join(_startup_dir(), "SmartTool-Tray.vbs")
 
 
-def _vbs_quoted_run(pythonw, tray):
-    # WshShell.Run monta a linha de comando com Chr(34) em vez de aspas literais —
-    # evita ter que escapar aspas dentro de aspas tanto em Python quanto em VBScript.
-    return f'Chr(34) & "{pythonw}" & Chr(34) & " " & Chr(34) & "{tray}" & Chr(34)'
+def _task_script_path():
+    return os.path.join(paths.DATA_DIR, "tray-start.vbs")
+
+
+def _wscript_path():
+    return os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "wscript.exe")
+
+
+def _write_launch_script(path):
+    """Writes the VBScript that starts the tray hidden in one process and returns its path."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-16") as f:
+        f.write(venv_launch.hidden_run_vbs(_pythonw_path(), _tray_path(), _tool_dir()))
+    return path
 
 
 def _install_startup_shortcut():
-    os.makedirs(_startup_dir(), exist_ok=True)
-    vbs = (
-        'Set shell = CreateObject("WScript.Shell")\r\n'
-        f'shell.Run {_vbs_quoted_run(_pythonw_path(), _tray_path())}, 0, False\r\n'
-    )
-    with open(_startup_script_path(), "w", encoding="utf-8") as f:
-        f.write(vbs)
+    _write_launch_script(_startup_script_path())
     return {"ok": True, "method": "startup_folder"}
 
 
@@ -148,7 +151,7 @@ def _task_installed():
 
 
 def install():
-    """Tenta a Tarefa Agendada primeiro (cobre restart automático pelo SO); se
+    """Tenta a Tarefa Agendada primeiro; se
     `schtasks /Create` falhar por qualquer motivo (ex.: bloqueado por politica de
     grupo corporativa, `schtasks` fora do PATH, timeout), cai para o atalho de
     Startup em vez de propagar o erro."""
@@ -192,6 +195,10 @@ def remove():
         pass
     if _remove_startup_shortcut():
         removed.append("startup_folder")
+    try:
+        os.remove(_task_script_path())
+    except FileNotFoundError:
+        pass
     if sys.platform == "win32" and toast_notice.unregister():
         removed.append("toast_registry")
     return {"ok": True, "removed": removed}

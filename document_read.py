@@ -35,7 +35,8 @@ class NoTextLayer(document_text.DocumentError):
     """A PDF whose pages carry no text: `pages` is its page count."""
 
     def __init__(self, pages):
-        super().__init__(f'PDF of {pages} pages has no text layer (scanned pages are not read; there is no OCR).')
+        super().__init__(f'PDF of {pages} pages has no text layer (scanned pages are not read; set `document_converter` '
+                         f'to auto, kreuzberg or docling in config.json, with the engine installed, to read them).')
         self.pages = pages
 
 
@@ -214,7 +215,8 @@ def load(path):
     converted = extension not in KINDS and extension in document_converter.EXTENSIONS and document_converter.enabled()
     if extension not in KINDS and not converted:
         raise ValueError(f"read_document reads {', '.join(KINDS)} files; {extension or 'this file'} is not supported "
-                         '(use the normal Read for plain text; legacy .doc, .xls, .xlsb and .ppt and macro files other than .xlsm are not read)')
+                         '(use the normal Read for plain text; images, legacy .doc, .xls and .ppt, OpenDocument and .rtf are read '
+                         'when `document_converter` is set to auto, kreuzberg or docling in config.json with the engine installed; .xlsb and macro files other than .xlsm are never read)')
     try:
         info = os.stat(path)
     except OSError as exc:

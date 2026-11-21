@@ -1,8 +1,10 @@
 """Identidade única de raízes e contenção de caminhos, inclusive junctions Windows."""
 import hashlib
 import os
+import stat
 import time
 
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 RESOLVED_TTL_S = 3
 RESOLVED_MAX = 4096
 _resolved = {}
@@ -43,10 +45,26 @@ def legacy_ids(root):
                               for path in variants))
 
 
+def _canonical_file(candidate):
+    """canonical_root of a file inside a folder: the folder's resolution (cached like a root) plus the file name, when
+    one lstat shows the file itself is no symlink or junction. Every file of an index pass was resolved on its own,
+    the costliest call of a pass (one handle per file); this keeps one resolution per folder. A path that cannot be
+    read is resolved as before."""
+    absolute = os.path.abspath(os.path.expanduser(os.fspath(candidate)))
+    folder, name = os.path.split(absolute)
+    try:
+        leaf = os.lstat(absolute)
+    except OSError:
+        return canonical_root(absolute)
+    if not name or stat.S_ISLNK(leaf.st_mode) or getattr(leaf, "st_file_attributes", 0) & _REPARSE_POINT:
+        return canonical_root(absolute)
+    return os.path.normcase(os.path.join(display_root(folder), name))
+
+
 def within_root(root, candidate):
     try:
         base = canonical_root(root)
-        resolved = canonical_root(candidate)
+        resolved = _canonical_file(candidate)
         return os.path.commonpath([base, resolved]) == base
     except (OSError, ValueError, TypeError):
         return False

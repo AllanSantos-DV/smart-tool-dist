@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.9.82 - beta
+
+- The edit hook adds two lines to its note, both read from what is already cached and silent otherwise (no analysis is
+  started, no `git` runs): the import cycle a Python import the edit adds at module level closes in the indexed import
+  graph, named with its chain of files, and the hotspot (top ten by commits times lines, ten commits or more) or the file
+  that usually changes with an edited one and is not in the edit. Context only, never a denial. `import_cycles`,
+  `hotspots` and `coupled_with` keep their answers; `code_graph.cached_graph` and `doc_insights.cached_history` are the new
+  cache-only readers.
+- The Claude Code hooks (PreToolUse, PostToolUse, SubagentStart, Stop) are command hooks now, like Codex's, instead of
+  `http` hooks with the daemon port written into `settings.json`. The hook reads the daemon's run file on every call and
+  waits out a restart with backoff (up to 10 s), so a restart or an install prints nothing; a daemon that stays
+  unreachable lets the call through with one plain message naming the hook, its owner, the cause and what happened to the
+  call, and the next calls stay silent until the daemon answers. Claude Code's own `hook failed: read ECONNRESET` and
+  `connect ECONNREFUSED` lines came from the http transport and could not be changed. The cost is one short process per
+  hooked call (about 0.2 s on this machine against 11 ms). `settings.json` holds no port, so a port change rewrites no
+  hook; an older entry shows as outdated until the hook is installed again (Agent rules). Codex entries pass `--route`
+  instead of `--post`.
+- Claude Code subagents now start knowing about the Smart Tool: a SubagentStart hook (`/hooks/subagent-start`, installed
+  with the other hooks and removed by uninstall) tells each one that, for a question across several files, its first call
+  is `smart_scout`, before Grep or Read. It adds context only and never denies; `hook_mode` off says nothing. Measured in
+  isolation: 8 of 8 subagents used the Smart Tool with it against 4 of 8 without.
+- The PreToolUse hook also covers subagent launches (`Agent`, `Task`): an Explore launch with a short, targeted prompt
+  carries a tip with the `smart_scout` call to make, in redirect and advise modes; the launch is never denied, and every
+  other launch (coding, whole-product or broad reviews, web research, other agent types) gets nothing. Off mode says
+  nothing, and so does a session where `smart_scout` cannot be called without a permission prompt (a mode that allows
+  every tool, or an allow rule for the tool, its server or `mcp__smart-tool__*`, and no deny rule).
+- A third source file read through the shell (`cat`, `head`, `sed -n`) in ten minutes carries a tip to call `smart_scout`
+  (redirect and advise modes, no blocking; off says nothing, and only where `smart_scout` is callable). A single read is
+  never touched: the shell is what a known file needs and `smart_search` cannot return its exact lines. The subagent start
+  sentence also names `smart_search`.
+- **The generated documentation format changes; regenerate `docs/scope` once.** The symbol marker of each entry now
+  carries body and docstring stamps next to the signature (`signature="…" body="…" docstring="…"`), so
+  `action=docs check=true`, the edit hook, `docs symbol=` and validation also catch a body or docstring changed under
+  the same signature (`body_changed`, `docstring_changed`). A page in the older format fails loud and asks to
+  regenerate (`action=docs generate=true`, which keeps the written prose); there is no compatibility mode. The
+  `code="…"` stamp of a feature's paragraph now covers the entry point and every function its flow reaches, so a
+  change deep in the flow marks the paragraph stale: paragraphs written before this version are reported stale once.
+- Each technical entry names the features whose flow reaches it (`- Feature: [name](functional.md#…)` or
+  `- Feature: none`); feature sections list their functions without the old cut at 12; a new `chain` check of validation
+  fails when one side names a link the other does not.
+- **A Claude Code hook is added**: installing the hook now also writes a `Stop` entry of type `command`
+  (`hooks/turn_end.py … --hook-origin=smart-tool`), which reads the daemon address from its run file on every call and
+  fails loud with its origin when the daemon is down. At the end of a turn in a project with a generated `docs/scope`,
+  the daemon rewrites without a model only the pages of the functions the turn changed (at most 20 functions and 60
+  chain nodes per turn, 2 attempts per function), rewrites with the docs model only the stale paragraphs of the
+  features they belong to (a rejected paragraph keeps its old text and is reported), proposes up to two "possible"
+  features from the embeddings home for a public function no entry point reaches (status candidate, never confirmed by
+  the embedder), and blocks the turn once with the docstrings to check against a new body. A continuation of the
+  session (`stop_hook_active`) exits at once. Uninstalling removes the entry.
+- **A database is added**: `~/.smart-tool/data/doc_registry.db`, a per-function registry in its own SQLite file (WAL,
+  `synchronous=FULL`) with the stamps of the code and of its documentation, the dates, a status and the feature links.
+  The stamps in the pages stay the truth, so a lost registry is rebuilt from them; work a crash interrupted resumes at
+  daemon start, at the next end of turn and at a session's first call.
+- Java: the line checks of validation take the bare method name, so Java methods (with or without parameters,
+  overloads included) no longer fail them, and a call through a field typed by an interface the project declares
+  becomes an edge to the declared method (methods inherited from a library stay unresolved).
+- Tests: `tests/test_doc_chain.py`, `tests/test_code_graph_java.py`, Java cases in `tests/test_doc_validate.py`.
+- `project_manage action=credentials` scans every git-tracked text file from disk and lists the file and line of each
+  credential shape (never the value), so a token committed earlier or sitting in a `.env` file is reported, which the
+  edit hook and the index (it skips `.env`, `.pem`, `.key`) cannot do. `action=links` lists the relative links in the
+  tracked HTML and Markdown files that point to a missing file, and the links it could not decide (root-relative,
+  template expressions, pages with a `<base>` element) as unchecked, not broken. Both take `limit` and write nothing.
+  Tests: `tests/test_project_scan.py`.
+
 ## 0.9.81 - beta
 
 - `pr_impact` lists the functions the diff adds that no function and no test calls (the candidates `dead_code` finds, which

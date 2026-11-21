@@ -10,13 +10,15 @@ import tomllib
 
 import atomic_io
 import codex_config
-import daemon_launcher
 import endpoint_sync
+import hook_call
 
 HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "pretool_router.py")
 MARKER = "pretool_router.py"
 AUDIT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "session_audit.py")
 AUDIT_MARKER = "session_audit.py"
+TURN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "turn_end.py")
+TURN_MARKER = "turn_end.py"
 # Hook origin convention shared by every project that installs hooks: a failed command hook names its owner.
 HOOK_ORIGIN = "--hook-origin=smart-tool"
 AUDIT_MATCHER = "startup|resume|clear|compact|fork"
@@ -27,17 +29,14 @@ AUDIT_WAITING = "waiting_approval"
 OWNER = "smart-tool"
 MANAGER_TIMEOUT_S = 5
 MANAGER_HELD = ("quarantined", "held")
-HTTP_PATH = "/hooks/pretool"
-POST_PATH = "/hooks/posttool"
-# A redirected shell search waits for its answer in the PreToolUse (smart_tool_daemon.HOOK_SHELL_BUDGET_S).
-HTTP_TIMEOUT_S = 15
-# The PostToolUse waits for the Smart Tool answer of a redirected call (web_fetch reads a whole page).
-POST_TIMEOUT_S = 60
+LEGACY_URL_PATHS = ("/hooks/pretool", "/hooks/posttool", "/hooks/subagent-start")
+# Each entry's timeout covers the restart wait of `hook_call` plus the longest answer the daemon takes on that route
+# (a redirected shell search in the PreToolUse, a whole page in the PostToolUse of web_fetch).
 HOME = os.path.expanduser("~")
 PREVIEW_TTL_S = 600
 CLIENTS = {
     "claude": {"label": "Claude Code", "names": {"claude-code"}, "files": [os.path.join(endpoint_sync.claude_dir(), "settings.json")],
-               "docs": "https://code.claude.com/docs/en/hooks", "event": "PreToolUse", "matcher": "Grep|Glob|Read|Bash|PowerShell|WebSearch|WebFetch|Edit|MultiEdit|Write|mcp__smart-tool__smart_search|mcp__smart-tool__web_search|mcp__smart-tool__web_fetch", "http": True,
+               "docs": "https://code.claude.com/docs/en/hooks", "event": "PreToolUse", "matcher": "Agent|Task|Grep|Glob|Read|Bash|PowerShell|WebSearch|WebFetch|Edit|MultiEdit|Write|mcp__smart-tool__smart_search|mcp__smart-tool__web_search|mcp__smart-tool__web_fetch",
                "post_matcher": "Grep|Bash|PowerShell|WebFetch|WebSearch"},
     "codex": {"label": "Codex", "prefix": "codex", "files": [os.path.join(endpoint_sync.codex_dir(), "hooks.json"), os.path.join(endpoint_sync.codex_dir(), "config.toml")],
               "docs": "https://learn.chatgpt.com/docs/hooks", "event": "PreToolUse", "matcher": "Bash|apply_patch", "post_matcher": "Bash",
@@ -58,17 +57,30 @@ def identify(client_info):
 
 
 def _our_hook(hook):
-    return isinstance(hook, dict) and (MARKER in str(hook.get("command", "")) or
-                                       any(path in str(hook.get("url", "")) for path in (HTTP_PATH, POST_PATH)))
+    return isinstance(hook, dict) and (MARKER in str(hook.get("command", "")) or TURN_MARKER in str(hook.get("command", "")) or
+                                       any(path in str(hook.get("url", "")) for path in LEGACY_URL_PATHS))
+
+
+def _events(client):
+    """Events install writes an entry of ours under for the client, known without the daemon (removal needs no URL)."""
+    spec = CLIENTS[client]
+    return [spec["event"], *(["PostToolUse"] if spec.get("post_matcher") else []), *(["SubagentStart", "Stop"] if client == "claude" else [])]
 
 
 def _entries(client):
     """{event: (matcher, handler)} of our hook entries for the client: the PreToolUse, plus the PostToolUse that returns
-    the Smart Tool answer of a redirected call and the review of the files a shell call wrote."""
+    the Smart Tool answer of a redirected call and the review of the files a shell call wrote, plus, in Claude Code, the
+    Stop command of the end-of-turn documentation step (matcher None: Stop takes none), plus the SubagentStart that tells
+    every subagent about smart_scout (no matcher: it reaches every agent type)."""
     spec = CLIENTS[client]
     entries = {spec["event"]: (spec["matcher"], _handler(client))}
     if spec.get("post_matcher"):
-        entries["PostToolUse"] = (spec["post_matcher"], _handler(client, POST_PATH, POST_TIMEOUT_S))
+        entries["PostToolUse"] = (spec["post_matcher"], _handler(client, "posttool"))
+    if "SubagentStart" in _events(client):
+        entries["SubagentStart"] = (None, _handler(client, "subagent-start"))
+    if "Stop" in _events(client):
+        entries["Stop"] = (None, {"type": "command", "timeout": _timeout("stop"),
+                                  "command": f"{_shell_safe(sys.executable)} {_shell_safe(TURN_SCRIPT)} {HOOK_ORIGIN}"})
     return entries
 
 
@@ -141,7 +153,7 @@ def inspect(client, trust=True, manager=True):
                 text = stream.read()
         except FileNotFoundError:
             continue
-        if MARKER not in text and HTTP_PATH not in text:
+        if MARKER not in text and not any(path in text for path in LEGACY_URL_PATHS):
             continue
         if not path.endswith(".json"):
             return {"state": "current", "changes": []}
@@ -167,7 +179,7 @@ def _entry_changes(event, matcher, expected, groups):
     group = ours[0]
     changes = []
     covered = str(group.get("matcher") or "").split("|")
-    left_out = [tool for tool in matcher.split("|") if tool not in covered]
+    left_out = [tool for tool in (matcher or "").split("|") if tool not in covered]
     if left_out:
         changes.append(f"Its {event} entry does not cover {', '.join(left_out)}.")
     found = next(hook for hook in group["hooks"] if _our_hook(hook))
@@ -237,32 +249,20 @@ def _shell_safe(path):
     return path.replace("\\", "/")
 
 
-def _command(client, route=HTTP_PATH):
-    """The command of a client without HTTP hooks for the PreToolUse route (default) or the PostToolUse one, signed with
-    HOOK_ORIGIN at the end."""
-    after = " --post" if route == POST_PATH else ""
-    return f"{_shell_safe(sys.executable)} {_shell_safe(HOOK_SCRIPT)} --client {client}{after} {HOOK_ORIGIN}"
+def _timeout(route):
+    """The entry timeout of a route: the restart wait plus the longest answer, with a second to spare."""
+    return hook_call.ROUTE_TIMEOUT_S[route] + 1 + hook_call.RESTART_WINDOW_S
 
 
-def _port_file():
-    """The daemon's announcement file as `~/<path>`, the form the hook audit reads to know the URL port is managed."""
-    relative = os.path.relpath(daemon_launcher.REGISTRY_PATH, os.path.expanduser("~")).replace("\\", "/")
-    if relative.startswith(".."):
-        raise ValueError(f"The daemon announcement ({daemon_launcher.REGISTRY_PATH}) is outside the home folder; "
-                         "the hook cannot name it as its port file.")
-    return f"~/{relative}"
+def _command(client, route):
+    """The command of a client for a route (`pretool`, `posttool`, `subagent-start`), signed with HOOK_ORIGIN at the
+    end; it finds the daemon through its run file on every call."""
+    return f"{_shell_safe(sys.executable)} {_shell_safe(HOOK_SCRIPT)} --client {client} --route {route} {HOOK_ORIGIN}"
 
 
-def _handler(client, route=HTTP_PATH, timeout=HTTP_TIMEOUT_S):
-    """Claude Code posts the payload straight to the warm daemon (`type: "http"`, no process per tool call); other
-    clients run the thin command that forwards to the route."""
-    if CLIENTS[client].get("http"):
-        registry = daemon_launcher.read_registry()
-        if not registry or not registry.get("url"):
-            raise ValueError("Smart Tool daemon has no registered URL; start the daemon before installing the hook.")
-        query = f"client={client}&hook-origin={OWNER}&port-file={_port_file()}"
-        return {"type": "http", "url": f"{registry['url']}{route}?{query}", "timeout": timeout}
-    return {"type": "command", "command": _command(client, route), "timeout": timeout}
+def _handler(client, route="pretool"):
+    """The command handler of a client's entry for a route."""
+    return {"type": "command", "command": _command(client, route), "timeout": _timeout(route)}
 
 
 def _slot(groups, is_ours):
@@ -301,7 +301,8 @@ def _plan(client_info):
             raise ValueError(f"{path}: hooks.{event} is not a list; nothing was changed.")
         before, slot = list(groups), _slot(groups, _our_hook)
         groups[:] = _without_ours(groups)
-        changes[event] = (groups, {"matcher": matcher, "hooks": [handler]}, slot, before)
+        changes[event] = (groups, {"hooks": [handler]} if matcher is None else {"matcher": matcher, "hooks": [handler]},
+                          slot, before)
     return client, spec, path, data, changes
 
 
@@ -342,9 +343,8 @@ def install(client_info, token, confirm):
 
 
 def remove(client):
-    """Takes every redirect hook entry of ours (PreToolUse and PostToolUse) out of the client's hooks
-    file after a backup; other hooks stay, in Codex at the approval of their new index. Returns {client, changed, file,
-    backup}."""
+    """Takes every hook entry install wrote (each event of `_entries`) out of the client's hooks file after a backup;
+    other hooks stay, in Codex at the approval of their new index. Returns {client, changed, file, backup}."""
     path = os.path.realpath(CLIENTS[client]["files"][0])
     try:
         with open(path, encoding="utf-8") as stream:
@@ -355,8 +355,7 @@ def remove(client):
     if not isinstance(hooks, dict):
         raise ValueError(f"{path} does not have the expected format (object with 'hooks'); nothing was changed.")
     moved = {}
-    spec = CLIENTS[client]
-    for event in (spec["event"], *(["PostToolUse"] if spec.get("post_matcher") else [])):
+    for event in _events(client):
         groups = hooks.get(event)
         if not isinstance(groups, list) or not any(_ours(group) for group in groups):
             continue

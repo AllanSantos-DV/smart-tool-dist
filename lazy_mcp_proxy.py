@@ -37,6 +37,15 @@ def load_handshake(path):
     return data
 
 
+def local_initialize(handshake, params):
+    """The cached initialize result, speaking the protocol version the client asked for when it is a known one."""
+    result = dict(handshake["initialize"])
+    asked = (params or {}).get("protocolVersion")
+    if asked in KNOWN_PROTOCOLS:
+        result["protocolVersion"] = asked
+    return result
+
+
 class Proxy:
     """One client conversation: local answers until a request needs the real server, then a pass-through."""
 
@@ -57,14 +66,6 @@ class Proxy:
 
     def answer(self, request_id, result):
         self.send({"jsonrpc": "2.0", "id": request_id, "result": result})
-
-    def local_initialize(self, params):
-        """The cached initialize result, speaking the protocol version the client asked for when it is a known one."""
-        result = dict(self.handshake["initialize"])
-        asked = (params or {}).get("protocolVersion")
-        if asked in KNOWN_PROTOCOLS:
-            result["protocolVersion"] = asked
-        return result
 
     def start_child(self):
         """Starts the real server and replays the client's initialize to it; its answer is not forwarded (the client
@@ -141,7 +142,7 @@ class Proxy:
         if method == "initialize":
             self.client_init = message.get("params")
         if self.child is None and request_id is not None and method == "initialize":
-            return self.answer(request_id, self.local_initialize(message.get("params")))
+            return self.answer(request_id, local_initialize(self.handshake, message.get("params")))
         if self.child is None and request_id is not None and method == "ping":
             return self.answer(request_id, {})
         if self.child is None and request_id is not None and method == "tools/list":

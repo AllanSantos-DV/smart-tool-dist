@@ -96,13 +96,7 @@ class BrowserService:
     def _bind_to_daemon(self, proc):
         # Kill-on-close job: the browser tree dies with the daemon even when the daemon is killed hard.
         try:
-            if self.job is None:
-                self.job = process_limits.kill_on_close_job()
-            kernel32, job = self.job
-            import ctypes
-            from ctypes import wintypes
-            if not kernel32.AssignProcessToJobObject(wintypes.HANDLE(job), wintypes.HANDLE(proc._handle)):
-                raise ctypes.WinError(ctypes.get_last_error())
+            self.job = process_limits.bind_to_kill_on_close_job(self.job, proc)
         except OSError as exc:
             self.stderr_tail += f"\nprocess outside the job object: {exc}\n"
 

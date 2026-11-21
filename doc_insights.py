@@ -74,6 +74,20 @@ def history(root):
     return result
 
 
+def cached_history(root):
+    """The commits `history` keeps in memory, only while the Git view it was read for still holds.
+
+    Parameters: root (str) project folder.
+    Returns: the commits list, or None when none was read yet, the view moved or the folder is not a Git repository. It
+    checks the view by a stat of its files and never starts a process, so it never runs `git log`.
+    """
+    view = index_views.cached_view(root)
+    saved = _histories.get(project_identity.canonical_root(root))
+    if view and view.get("git") and saved and saved[0] == view["stamp"] and not saved[1][1]:
+        return saved[1][0]
+    return None
+
+
 def _read_history(root):
     try:
         raw = affected_tests._git(root, "-c", "core.quotepath=false", "log", "--no-merges", f"-n{MAX_COMMITS}", "--relative",
@@ -108,13 +122,23 @@ def _lines(model, path):
 def hotspots(model, commits):
     """Rows (path, commits, lines, last change) of the code files ranked by commits times lines, highest first."""
     code = {p for p in model.files() if model.kind_of(p) == "code"}
+    return ranked_hotspots(commits, code.__contains__, lambda path: _lines(model, path))
+
+
+def ranked_hotspots(commits, is_code, lines_of):
+    """The ranking `hotspots` returns, for callers that know the code files and their sizes without a document model.
+
+    Parameters: commits (list) as `history` returns; is_code (callable) tells whether a path is a code file; lines_of
+    (callable) the line count of a code file that appears in the history.
+    Returns: rows (path, commits, lines, last change), highest commits times lines first; files with no lines are left out.
+    """
     churn, last = Counter(), {}
     for commit in commits:
         for path in commit["files"]:
-            if path in code:
+            if is_code(path):
                 churn[path] += 1
                 last.setdefault(path, commit["time"])
-    rows = [(path, count, _lines(model, path), last[path]) for path, count in churn.items()]
+    rows = [(path, count, lines_of(path), last[path]) for path, count in churn.items()]
     return sorted((r for r in rows if r[2]), key=lambda r: (-r[1] * r[2], r[0]))
 
 

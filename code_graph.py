@@ -97,6 +97,28 @@ def _snapshot(path):
         conn.close()
 
 
+def python_import_targets(path,node,known):
+    """The files of `known` that an import statement of the Python file `path` names.
+
+    Parameters: path (str) project-relative path of the importing file; node (ast.Import or ast.ImportFrom); known
+    (container of str) the project's files.
+    Returns: list of (alias, target, base): `target` is the file the alias resolves to or None; `base` is the module file of
+    a `from` import (None for a plain import and when the module is not a project file).
+    """
+    def resolve_file(spec):
+        spec=posixpath.normpath(spec)
+        return next((p for p in (spec+'.py',spec+'/__init__.py','src/'+spec+'.py','src/'+spec+'/__init__.py') if p in known), None)
+    if isinstance(node,ast.Import):
+        return [(item,resolve_file(item.name.replace('.','/')),None) for item in node.names]
+    prefix=posixpath.dirname(path)
+    if node.level:
+        for _ in range(node.level-1):prefix=posixpath.dirname(prefix)
+        spec=posixpath.join(prefix,(node.module or '').replace('.','/'))
+    else:spec=(node.module or '').replace('.','/')
+    base=resolve_file(spec)
+    return [(item,(resolve_file(spec+'/'+item.name) if item.name!='*' else None) or base,base) for item in node.names]
+
+
 def _python_graph(sources):
     trees, symbols, dependencies, calls, unresolved, diagnostics = {}, [], [], [], [], []
     decls, aliases, scopes, classes, owners, shadow_scopes, node_symbols = {}, {}, {}, {}, {}, {}, {}
@@ -104,9 +126,6 @@ def _python_graph(sources):
     def bind_import(path,scope,name,binding):
         table=aliases[path].setdefault(scope,{})
         table[name]=binding if name not in table or table[name]==binding else None
-    def resolve_file(spec):
-        spec=posixpath.normpath(spec)
-        return next((p for p in (spec+'.py',spec+'/__init__.py','src/'+spec+'.py','src/'+spec+'/__init__.py') if p in sources), None)
     for path, text in sources.items():
         if not path.endswith('.py'):
             continue
@@ -132,20 +151,11 @@ def _python_graph(sources):
         collect(tree)
         for node in ast.walk(tree):
             if isinstance(node,ast.Import):
-                for item in node.names:
-                    spec=item.name.replace('.','/');target=resolve_file(spec)
+                for item,target,_base in python_import_targets(path,node,sources):
                     bind_import(path,owners[id(node)],item.asname or item.name,(target,None))
                     dependencies.append({'source':path,'target':target,'specifier':item.name,'line':node.lineno,'kind':'import','resolution':'resolved' if target else 'external'})
             elif isinstance(node,ast.ImportFrom):
-                prefix=posixpath.dirname(path)
-                if node.level:
-                    for _ in range(node.level-1):prefix=posixpath.dirname(prefix)
-                    spec=posixpath.join(prefix,(node.module or '').replace('.','/'))
-                else:spec=(node.module or '').replace('.','/')
-                base=resolve_file(spec)
-                for item in node.names:
-                    target=resolve_file(spec+'/'+item.name) if item.name!='*' else None
-                    target=target or base
+                for item,target,base in python_import_targets(path,node,sources):
                     bind_import(path,owners[id(node)],item.asname or item.name,(target,None if target and target!=base else item.name))
                     dependencies.append({'source':path,'target':target,'specifier':('.'*node.level)+(node.module or '')+'.'+item.name,'line':node.lineno,'kind':'import','resolution':'resolved' if target else 'unresolved' if node.level else 'external'})
     def chain(expr):
@@ -418,7 +428,9 @@ def _disk_save(key,data):
     return None
 
 
-def cached_symbols(root):
+def _cached_analysis(root):
+    """(key, analysis) of the project's current index when memory or disk holds it; (key, None) when it does not and (None,
+    None) when the project has no index. Starts nothing."""
     path=indexer.existing_db_path(root)
     if not path:
         return None,None
@@ -433,6 +445,35 @@ def cached_symbols(root):
             with _LOCK:
                 _CACHE[key]=data
                 while len(_CACHE)>3:_CACHE.popitem(last=False)
+    return key,data
+
+
+def cached_graph(root):
+    """The analysis of the project's current index when memory or disk already holds it, else None: it never analyzes and
+    never starts the background warm-up. The caller must only read it."""
+    return _cached_analysis(root)[1]
+
+
+def import_edges(data):
+    """Resolved import edges of an analysis: dict file -> set of project files it imports, every file of an edge a key."""
+    edges={}
+    for dependency in data.get('dependencies') or []:
+        if dependency.get('kind')=='import' and dependency.get('resolution')=='resolved' and dependency.get('target'):
+            edges.setdefault(dependency['source'],set()).add(dependency['target'])
+            edges.setdefault(dependency['target'],set())
+    return edges
+
+
+def cached_symbols(root):
+    """Symbols by file of the project's current index when its analysis is cached, starting the background analysis when it
+    is not (the caller never waits for it).
+
+    Parameters: root (str) project folder.
+    Returns: tuple (dict {"symbols", "parsed", "note"} or None while no analysis is ready; str note or None).
+    """
+    key,data=_cached_analysis(root)
+    if key is None:
+        return None,None
     with _LOCK:
         state=_WARM_STATE.get(root)
         if data is None and state and state['key']==key and (state['result'] or time.time()-state['at']<WARM_RETRY_S):

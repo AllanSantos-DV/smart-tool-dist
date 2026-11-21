@@ -73,15 +73,25 @@ def coupled_with(root, paths, view_id=None, limit=DEFAULT_LIMIT):
     commits, note = doc_insights.history(root)
     if note:
         return {"files": [], "note": note}
-    changed, rows, seen = set(paths), [], set()
-    for first, second, shared, degree, linked in doc_insights.coupling(model, commits):
+    return {"files": partners(doc_insights.coupling(model, commits), set(paths))[:limit], "note": ""}
+
+
+def partners(pairs, changed):
+    """The files that change with the changed ones, from the pairs `doc_insights.coupling` returns.
+
+    Parameters: pairs (list) rows (a, b, shared, degree, linked), strongest first; changed (set of str) the changed files.
+    Returns: list of {"path", "with", "shared", "degree"}, strongest first, one row per partner outside `changed`; a pair
+    where one file imports the other is skipped.
+    """
+    rows, seen = [], set()
+    for first, second, shared, degree, linked in pairs:
         if linked or (first in changed) == (second in changed):
             continue
         partner, anchor = (second, first) if first in changed else (first, second)
         if partner not in seen:
             seen.add(partner)
             rows.append({"path": partner, "with": anchor, "shared": shared, "degree": int(degree * 100)})
-    return {"files": rows[:limit], "note": ""}
+    return rows
 
 
 def _pop_component(stack, on_stack, node):
@@ -146,12 +156,7 @@ def import_cycles(root, view_id=None, limit=DEFAULT_LIMIT):
     data = code_graph.build_current(root, view_id, shared=True)
     if not data.get("symbols") and not data.get("dependencies"):
         raise ValueError(f"The code graph of {root} is empty: index the project first (project_manage action=index).")
-    edges = {}
-    for dependency in data.get("dependencies") or []:
-        if dependency.get("kind") == "import" and dependency.get("resolution") == "resolved" and dependency.get("target"):
-            edges.setdefault(dependency["source"], set()).add(dependency["target"])
-            edges.setdefault(dependency["target"], set())
-    cycles = sorted(_components(edges), key=lambda files: (-len(files), files))
+    cycles = sorted(_components(code_graph.import_edges(data)), key=lambda files: (-len(files), files))
     note = code_graph.left_out_sentence(data) if data.get("truncated") else ""
     return {"cycles": [{"files": files, "size": len(files)} for files in cycles[:limit]], "total": len(cycles),
             "files_in_cycles": sum(len(files) for files in cycles), "note": note}

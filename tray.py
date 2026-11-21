@@ -31,6 +31,7 @@ import update_check
 import version
 
 POLL_INTERVAL_S = 45
+SUPERVISE_RETRY_S = 2
 UPDATE_CHECK_INTERVAL_S = 24 * 3600
 NOTICE_INTERVAL_S = 600
 NOTICE_RETRY_S = 15
@@ -146,6 +147,35 @@ def _poll_loop(icon):
             _set_state("down", icon)
         _follow_language(icon)
         time.sleep(POLL_INTERVAL_S)
+
+
+def _supervise_daemon():
+    """Starts the daemon again as soon as it ends. Claude Code posts its hooks straight to the daemon's port, so every
+    tool call fails while nothing listens there, and the 45 s poll left that gap open. The process handle is waited on
+    (no polling while it runs); its end goes to the daemon log with the exit code, since a killed or crashed daemon
+    writes nothing itself. While the installer's marker is up it starts nothing: the installer starts the new build."""
+    while True:
+        try:
+            info = daemon_launcher.read_registry()
+            if not (info and daemon_launcher.health(info["url"], timeout=3)):
+                if daemon_launcher.updating():
+                    time.sleep(SUPERVISE_RETRY_S)
+                    continue
+                daemon_launcher.ensure_daemon_running()
+                info = daemon_launcher.read_registry()
+            pid = info.get("pid")
+            code = daemon_launcher.wait_for_exit(pid)
+            if code is None:
+                time.sleep(SUPERVISE_RETRY_S)
+                continue
+            if daemon_launcher.updating():
+                daemon_launcher.note_stop(f"daemon pid {pid} ended (exit code {code:#x}); the installer starts the new one")
+                time.sleep(SUPERVISE_RETRY_S)
+                continue
+            daemon_launcher.note_stop(f"daemon pid {pid} ended (exit code {code:#x}); the tray starts it again")
+        except Exception as exc:
+            _log(f"daemon supervision: {type(exc).__name__}: {exc}")
+            time.sleep(POLL_INTERVAL_S)
 
 
 def _toast(icon, title, lines, buttons, tag):
@@ -473,6 +503,7 @@ def main():
         ),
     )
     threading.Thread(target=_poll_loop, args=(icon,), daemon=True).start()
+    threading.Thread(target=_supervise_daemon, daemon=True).start()
     threading.Thread(target=_update_loop, args=(icon,), daemon=True).start()
     threading.Thread(target=_notice_loop, args=(icon,), daemon=True).start()
     try:

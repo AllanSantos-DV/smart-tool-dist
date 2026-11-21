@@ -54,9 +54,12 @@ def _python_functions(source):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 doc = ast.get_docstring(child)
+                first = child.body[0] if child.body else None
+                doc_lines = (first.lineno, first.end_lineno) if doc is not None else None
                 returns = f" -> {ast.unparse(child.returns)}" if child.returns else ""
                 found.append({"name": f"{owner}{child.name}", "start": child.lineno, "end": child.end_lineno,
                               "documented": doc is not None, "doc": _first_line(doc or ""),
+                              "docstring": doc or "", "doc_lines": doc_lines,
                               "decorators": [ast.unparse(d) for d in child.decorator_list], "bases": list(bases),
                               "signature": f"{child.name}({ast.unparse(child.args)}){returns}",
                               "required": public and not nested and _public_name(child.name)
@@ -174,7 +177,8 @@ def _braced_functions(path, source, symbols):
         annotations, first_line = _annotations(lines, start, end)
         required = _required(path, symbol, by_id.get(symbol.get("parent")), first_line, annotations)
         found.append({"name": symbol["name"], "start": start, "end": end, "documented": block is not None,
-                      "doc": _first_line(block or ""), "signature": _SPACE.sub(" ", header.split("{")[0]).strip(),
+                      "doc": _first_line(block or ""), "docstring": block or "",
+                      "signature": _SPACE.sub(" ", header.split("{")[0]).strip(),
                       "required": required})
     return found
 
@@ -206,7 +210,8 @@ def _go_functions(path, source):
     def add(decl, name, short, required, doc, articles=False):
         documented = bool(doc) and _go_form(doc, short, articles)
         found.append({"name": name, "start": decl["start"], "end": decl["end"], "documented": documented,
-                      "doc": _first_line(doc or ""), "signature": decl["signature"], "required": required,
+                      "doc": _first_line(doc or ""), "docstring": doc or "", "signature": decl["signature"],
+                      "required": required,
                       "kind": decl["kind"], "convention": "go", "malformed": bool(doc) and not documented})
 
     for decl in decls:
@@ -227,7 +232,8 @@ def _go_functions(path, source):
                 if decl["block"] not in reported_blocks:
                     reported_blocks.add(decl["block"])
                     found.append({"name": exported, "start": decl["start"], "end": decl["end"], "documented": True,
-                                  "doc": _first_line(decl["group_doc"]), "signature": "", "required": importable,
+                                  "doc": _first_line(decl["group_doc"]), "docstring": decl["group_doc"], "signature": "",
+                                  "required": importable,
                                   "kind": decl["kind"], "convention": "go", "malformed": False})
                 continue
             if decl["grouped"] and not decl["doc"]:

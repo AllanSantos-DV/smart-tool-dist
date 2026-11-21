@@ -6,6 +6,7 @@
   "dependencies": {
     "@angular/compiler": "20.3.0",
     "@playwright/mcp": "0.0.83",
+    "engine-kit": "0.2.16",
     "java-parser": "3.0.1",
     "open-websearch": "2.1.11",
     "typescript": "5.9.3"

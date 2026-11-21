@@ -1,8 +1,8 @@
 """Aponta os clientes para a porta em que o daemon subiu, só quando ela muda.
 
 O daemon é dono da porta: depois do bind, reescreve apenas as URLs do smart-tool que os clientes guardam (MCP do
-Claude Code em ~/.claude.json, hook HTTP em ~/.claude/settings.json, MCP do Codex em ~/.codex/config.toml). Nada roda
-por prompt ou por sessão; o Claude Code relê hooks editados pelo file watcher, o MCP já conectado precisa de /mcp.
+Claude Code em ~/.claude.json, MCP do Codex em ~/.codex/config.toml). Os hooks não guardam porta: leem o arquivo de
+execução do daemon a cada chamada. Nada roda por prompt ou por sessão; o MCP já conectado precisa de /mcp.
 Cada arquivo é relido logo antes da gravação atômica: o Claude Code reescreve o ~/.claude.json com frequência.
 """
 import json
@@ -16,8 +16,6 @@ import codex_config
 import node_locator
 
 SERVER = "smart-tool"
-HOOK_PATH = "/hooks/pretool"
-POST_HOOK_PATH = "/hooks/posttool"
 _CODEX_URL_RE = re.compile(r'(\[mcp_servers\.smart-tool\][^\[]*?\burl\s*=\s*")http://127\.0\.0\.1:\d+(/mcp")')
 
 
@@ -60,21 +58,6 @@ def _claude_mcp(text, base):
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 
-def _claude_hook(text, base):
-    """settings.json text with our PreToolUse and PostToolUse hook URLs moved to base, or None when none changed."""
-    data = json.loads(text)
-    changed = False
-    hooks = (data.get("hooks") or {}) if isinstance(data, dict) else {}
-    for event, path in (("PreToolUse", HOOK_PATH), ("PostToolUse", POST_HOOK_PATH)):
-        groups = (hooks.get(event) or []) if isinstance(hooks, dict) else []
-        for group in groups if isinstance(groups, list) else []:
-            for hook in (group.get("hooks") or []) if isinstance(group, dict) else []:
-                if isinstance(hook, dict) and path in str(hook.get("url", "")):
-                    new = _rebase(hook["url"], base)
-                    changed, hook["url"] = changed or new != hook["url"], new
-    return json.dumps(data, indent=2, ensure_ascii=False) if changed else None
-
-
 def _codex_mcp(text, base):
     port = urllib.parse.urlsplit(base).port
     new = _CODEX_URL_RE.sub(lambda m: f"{m.group(1)}http://127.0.0.1:{port}{m.group(2)}", text, count=1)
@@ -82,8 +65,7 @@ def _codex_mcp(text, base):
 
 
 def targets():
-    return ((claude_json(), _claude_mcp), (os.path.join(claude_dir(), "settings.json"), _claude_hook),
-            (os.path.join(codex_dir(), "config.toml"), _codex_mcp))
+    return ((claude_json(), _claude_mcp), (os.path.join(codex_dir(), "config.toml"), _codex_mcp))
 
 
 _CODEX_ANY_URL_RE = re.compile(r'\[mcp_servers\.smart-tool\][^\[]*?\burl\s*=\s*"([^"]+)"')

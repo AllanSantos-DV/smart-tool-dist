@@ -57,6 +57,9 @@ def _value(value):
             .replace("\t", "\\t") + '"'
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{key if _BARE_KEY.match(key) else _value(key)} = {_value(item)}"
+                                for key, item in value.items()) + " }"
     raise TypeError(f"Unsupported value for config.toml: {value!r}")
 
 

@@ -7,9 +7,11 @@ as the agent would: machines whose policy forbids it (corporate IT blocking remo
 keep today's read-only behavior, and the reason is shown in the setup screen instead of an error. A server named
 `playwright` the user already registered is left untouched.
 
-The registered command is lazy_mcp_proxy.py around the real server: every session starts the registered servers, and
-a Node process kept idle in each session that never opens a browser cost about 97 MB of commit each. The proxy answers
-the handshake from the cache the probe writes (HANDSHAKE_PATH) and starts the real server on the first tool call.
+Claude Code gets lazy_mcp_proxy.py around the real server as a stdio command: every session starts the registered
+servers, and a Node process kept idle in each session that never opens a browser cost about 97 MB of commit each. The
+proxy answers the handshake from the cache the probe writes (HANDSHAKE_PATH) and starts the real server on the first
+tool call. Codex keeps one stdio server set per conversation thread, so it gets a URL instead: the daemon serves the
+same tools at BRIDGE_PATH (browser_bridge.py) from one shared, lazily started server.
 
 Pages the agent opens are untrusted input. The server never exposes tools a page registers (WebMCP); the User-Agent of
 every request the browser makes ends with AGENT_UA_MARK, which the daemon refuses, so a page cannot steer the agent
@@ -27,6 +29,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import urllib.parse
 
 import atomic_io
 import chromium_flags
@@ -36,6 +39,7 @@ import install_runtime
 import lazy_mcp_proxy
 import node_locator
 import paths
+import venv_launch
 
 SERVER = "playwright"
 CLI = install_runtime.PLAYWRIGHT_MCP_CLI
@@ -49,6 +53,7 @@ MCP_PLAYWRIGHT_BUNDLE = install_runtime.NODE_DIR / "node_modules" / "playwright-
 OUTPUT_MAX_BYTES = 100 * 1024 * 1024
 PROBE_TIMEOUT_S = 60
 DENIED_TOOLS = ("browser_run_code_unsafe",)
+BRIDGE_PATH = "/playwright/mcp"
 _CODEX_TABLE_RE = re.compile(rf"^\[mcp_servers\.{SERVER}\][ \t]*\r?\n", re.M)
 _CHROMIUM_PROBE = ("import sys\n"
                    f"sys.path.insert(0, {os.path.dirname(os.path.abspath(__file__))!r})\n"
@@ -86,13 +91,23 @@ def server_command():
             "--executable-path", executable, "--output-dir", OUTPUT_DIR, "--output-max-size", str(OUTPUT_MAX_BYTES)]
 
 
-def lazy_command(command):
-    """The command registered in the clients: lazy_mcp_proxy.py (console Python of this installation) around command,
-    the real server line, answering from HANDSHAKE_PATH until a tool call needs the real one."""
+def _console_python():
     python = sys.executable
     if os.path.basename(python).lower() == "pythonw.exe":
         python = os.path.join(os.path.dirname(python), "python.exe")
-    return [python, PROXY, "--handshake", HANDSHAKE_PATH, "--", *command]
+    return python
+
+
+def lazy_command(command):
+    """The command registered in the clients: lazy_mcp_proxy.py around command, the real server line, answering from
+    HANDSHAKE_PATH until a tool call needs the real one. It runs on the base interpreter of this installation's venv,
+    which `lazy_environment` points at the venv, so each client session holds one proxy process instead of two."""
+    return [venv_launch.direct(_console_python())[0], PROXY, "--handshake", HANDSHAKE_PATH, "--", *command]
+
+
+def lazy_environment():
+    """Environment variables registered with `lazy_command` (empty outside a Windows venv)."""
+    return venv_launch.direct(_console_python())[1]
 
 
 def is_agent_browser(headers):
@@ -201,9 +216,8 @@ def registered():
     return found
 
 
-def registered_executables(client):
-    """Executables the client's `playwright` server needs: the registered command and, behind lazy_mcp_proxy, the real
-    server's too; an empty list when it is not registered."""
+def _entry(client):
+    """The client's `playwright` server entry as a dict; None when absent or when the client's file cannot be read."""
     try:
         if client == "claude":
             with open(endpoint_sync.claude_json(), encoding="utf-8") as stream:
@@ -212,8 +226,26 @@ def registered_executables(client):
             with open(_codex_config(), encoding="utf-8") as stream:
                 entry = (tomllib.loads(stream.read()).get("mcp_servers") or {}).get(SERVER)
     except (OSError, ValueError, AttributeError):
-        return []
-    command = entry.get("command") if isinstance(entry, dict) else None
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
+def bridge_url():
+    """URL of the daemon's Playwright MCP endpoint, on the address of the smart-tool entry Codex already holds (the
+    daemon keeps that one current at every start). RuntimeError when Codex holds no smart-tool entry."""
+    held = endpoint_sync.registrations().get("codex")
+    if not held:
+        raise RuntimeError(f"Codex has no {endpoint_sync.SERVER} MCP entry to take the daemon's address from; "
+                           f"register {endpoint_sync.SERVER} in Codex first.")
+    parts = urllib.parse.urlsplit(held)
+    return f"{parts.scheme}://{parts.netloc}{BRIDGE_PATH}"
+
+
+def registered_executables(client):
+    """Executables the client's `playwright` server needs: the registered command and, behind lazy_mcp_proxy, the real
+    server's too; an empty list when it is not registered or is a URL (served by the daemon, nothing to launch)."""
+    entry = _entry(client)
+    command = entry.get("command") if entry else None
     if not isinstance(command, str):
         return []
     args = entry.get("args") if isinstance(entry.get("args"), list) else []
@@ -221,35 +253,36 @@ def registered_executables(client):
     return [command] + ([real] if isinstance(real, str) else [])
 
 
-def _lazy_registration_usable(client):
-    """Whether the client's registration goes through lazy_mcp_proxy and the handshake cache it answers from is
-    readable: a registration of an older version (the Node server directly) or a lost cache both need ensure."""
+def _registration_usable(client):
+    """Whether the client's registration is the current kind and the handshake cache it needs is readable. Claude Code:
+    through lazy_mcp_proxy, which answers from that cache. Codex: the URL of the daemon now running, whose bridge
+    answers from it. A registration of an older version (the Node server directly, a Codex stdio command) or a lost
+    cache both need ensure."""
+    entry = _entry(client) or {}
     try:
-        if client == "claude":
-            with open(endpoint_sync.claude_json(), encoding="utf-8") as stream:
-                entry = (json.load(stream).get("mcpServers") or {}).get(SERVER)
-        else:
-            with open(_codex_config(), encoding="utf-8") as stream:
-                entry = (tomllib.loads(stream.read()).get("mcp_servers") or {}).get(SERVER)
-        args = entry.get("args") or []
-        if PROXY not in args:
+        if client == "codex":
+            if entry.get("url") != bridge_url():
+                return False
+        elif PROXY not in (entry.get("args") or []):
             return False
         lazy_mcp_proxy.load_handshake(HANDSHAKE_PATH)
-    except (OSError, ValueError, AttributeError, RuntimeError):
+    except RuntimeError:
         return False
     return True
 
 
 def heal(log=None):
-    """Registers again, through ensure, each registration of ours whose executable no longer exists: the Node path is
-    written into the client's configuration, which a moved or reinstalled Node leaves pointing nowhere. Returns
-    {client: ensure's outcome} for the clients refreshed."""
+    """Registers again, through ensure, each registration of ours that no longer works: an executable that is gone
+    (a moved or reinstalled Node is written into the client's configuration), a lost handshake cache, a registration
+    of an older kind, or a Codex URL that is not the daemon's now (its port changed). Returns {client: ensure's
+    outcome} for the clients refreshed."""
     refreshed = {}
     for client in ("claude", "codex"):
-        executables = registered_executables(client)
+        entry = _entry(client) or {}
+        managed = isinstance(entry.get("command"), str) or (client == "codex" and isinstance(entry.get("url"), str))
         ours = status().get(client, {}).get("state") in ("registered", "undenied")
-        if ours and executables and not (all(node_locator.exists(path) for path in executables)
-                                         and _lazy_registration_usable(client)):
+        if ours and managed and not (all(node_locator.exists(path) for path in registered_executables(client))
+                                     and _registration_usable(client)):
             refreshed[client] = ensure(client, log)
     return refreshed
 
@@ -331,12 +364,15 @@ def deny_unsafe_tools(client):
         raise ValueError(f"Client without MCP registration: {client!r}")
 
 
-def register_command(client, command):
-    """Official CLI command that registers a stdio server (Claude Code: user scope, every project)."""
+def register_command(client, command, env=None):
+    """Official CLI command that registers a stdio server (Claude Code: user scope, every project) with env. The server
+    name goes before `--env`, whose values Claude Code reads up to the next option, so a name after it was taken for a
+    variable."""
+    variables = [part for name, value in (env or {}).items() for part in ("--env", f"{name}={value}")]
     if client == "claude":
-        return ["claude", "mcp", "add", "--scope", "user", SERVER, "--", *command]
+        return ["claude", "mcp", "add", "--scope", "user", SERVER, *variables, "--", *command]
     if client == "codex":
-        return ["codex", "mcp", "add", SERVER, "--", *command]
+        return ["codex", "mcp", "add", SERVER, *variables, "--", *command]
     raise ValueError(f"Client without MCP registration: {client!r}")
 
 
@@ -369,12 +405,13 @@ def _clip(text, limit=300):
 
 
 def _add(client, command):
-    """Registers the stdio server: Codex's config.toml is edited in place (its CLI rewrites the whole file and drops
-    other tools' comments), Claude Code goes through its CLI."""
+    """Registers the server whose real command line is command: Codex by the URL of the daemon's bridge, its
+    config.toml edited in place (its CLI rewrites the whole file and drops other tools' comments); Claude Code as a
+    stdio lazy_command through its CLI."""
     if client == "codex":
-        codex_config.set_server(_codex_config(), SERVER, {"command": command[0], "args": command[1:]})
+        codex_config.set_server(_codex_config(), SERVER, {"url": bridge_url()})
     else:
-        endpoint_sync.run_cli(register_command(client, command))
+        endpoint_sync.run_cli(register_command(client, lazy_command(command), lazy_environment()))
 
 
 def _remove(client):
@@ -423,7 +460,7 @@ def ensure(client, log=None):
             if ours and client == "claude":
                 set_claude_deny(False)
             return _record(client, "unavailable", problem[:300], log)
-        _add(client, lazy_command(command))
+        _add(client, command)
         if not registered().get(client):
             return _record(client, "unavailable", "the registration finished, but the server did not appear in the "
                            "client's configuration", log)

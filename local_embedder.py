@@ -25,6 +25,7 @@ MIN_API_VERSION = 1
 BATCH = 16
 INFO_TTL_S = 60
 MAX_ATTEMPTS = 3
+HOME_FAILURE_CODES = (*model_breaker.BUSY_CODES, 500)
 REQUEST_TIMEOUT_S = 60
 RERANK_TIMEOUT_S = 15
 _lock = threading.Lock()
@@ -189,6 +190,11 @@ def _retry_delay(failure, attempt):
 
 
 def embed(model, texts, deadline=None, cancel_check=None, on_retry=None):
+    """Vectors of `texts` from the embeddings home, in batches of BATCH, each tried up to MAX_ATTEMPTS times.
+
+    Returns the vectors in input order. Raises IndexCompatibilityError when the home serves another model,
+    model_breaker.CircuitOpen once repeated busy or failing answers opened the circuit (no request is sent while it is
+    open), RuntimeError when the home is not running or a batch fails every attempt."""
     base = url()
     if not base:
         raise RuntimeError(f"The embeddings home is not running (no announce file at {ANNOUNCE}).")
@@ -217,8 +223,9 @@ def embed(model, texts, deadline=None, cancel_check=None, on_retry=None):
                     with model_breaker.slot(model):
                         got = _request(conn, "POST", "/embed", {"inputs": part})
                 except (OSError, http.client.HTTPException) as exc:
-                    model_breaker.note(model, exc)
+                    model_breaker.note(model, exc, HOME_FAILURE_CODES)
                     model_health.record("/v1/embeddings", {"model": model}, exc)
+                    model_breaker.guard(model)
                     conn.close()
                     conn = _connection(base, _left(deadline))
                     if attempt == MAX_ATTEMPTS:

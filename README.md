@@ -17,7 +17,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.81 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.82 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -84,7 +84,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.81 install
+npx @allansantos-dev/smart-tool@0.9.82 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -172,10 +172,13 @@ Redirects) and Maintenance (Setup audit, Startup).
    `browser_run_code_unsafe`, which runs arbitrary JavaScript in the server process, is denied in the client
    (`permissions.deny` in `~/.claude/settings.json`, `disabled_tools` in `~/.codex/config.toml`); if it cannot be
    denied, the server is not registered. A `playwright` server you registered yourself is never touched. Remove it with
-   `claude mcp remove playwright -s user` / `codex mcp remove playwright`. The registered command is a small stdio
-   proxy (`lazy_mcp_proxy.py`, standard library only) that answers the handshake and the tool list from a cache the
-   probe writes and starts the Node server on the first tool call, so a session that never opens a browser does not
-   keep a 97 MB Node process; it ends with the session.
+   `claude mcp remove playwright -s user` / `codex mcp remove playwright`. Claude Code's registered command is a small
+   stdio proxy (`lazy_mcp_proxy.py`, standard library only) that answers the handshake and the tool list from a cache
+   the probe writes and starts the Node server on the first tool call, so a session that never opens a browser does
+   not keep a 97 MB Node process; it ends with the session. The browser tools reach Codex through the daemon URL
+   (`url = "<daemon>/playwright/mcp"` in `~/.codex/config.toml`, next to the smart-tool entry) instead of one proxy per
+   conversation thread: the daemon answers the handshake from the same cache and starts one shared Node server on the
+   first tool call, with a browser context of its own for each Codex thread, and stops it after an hour without calls.
 
    **Who asked for a web search**: every provider call in `~/.smart-tool/data/web-search-health.jsonl` and every
    record of `research-metrics.jsonl` made for a `web_search` carries `requester`: `client`, `mcp_session` (first 12
@@ -254,10 +257,17 @@ Redirects) and Maintenance (Setup audit, Startup).
    context read from the code, and a paragraph is written only when every name, option and version it cites exists in
    the code and it is in English; a rejected one is asked again once with the reason, then reported with its fix. A call stops after about
    40 s and says how many blocks are left. The prose can also be written by hand between the markers; regenerating keeps it, reports blocks whose module
-   or entry point is gone, and never overwrites a file that Smart Tool did not write. Each anchor records the signature
-   it was generated from: `action=docs check=true` lists anchors whose function changed signature or is gone, links
-   to missing anchors and entry paragraphs written for an older body of their function (the `code="..."` stamp of the
-   block; delete it after rewriting the paragraph by hand), `action=docs validate=true` checks every claim of `docs/scope` against the code and writes `docs/scope/validation.md`, `action=docs symbol=NAME` tells where a function is documented, and the documentation hook warns
+   or entry point is gone, and never overwrites a file that Smart Tool did not write. Each anchor records the signature,
+   body and docstring it was generated from: `action=docs check=true` lists anchors whose function changed any of the
+   three or is gone, links to missing anchors and entry paragraphs written for older code of their feature (the
+   `code="..."` stamp of the block covers the entry point and every function its flow reaches; delete it after
+   rewriting the paragraph by hand). Each technical entry names the features it belongs to (`Feature: ...` or
+   `Feature: none`) and each feature lists its functions, and validation checks that both sides agree. With the Claude
+   Code hook installed, a Stop hook runs the end-of-turn step: the pages of the functions the turn changed are rewritten
+   without a model, the stale paragraphs of their features are rewritten by the docs model, a public function no entry
+   point reaches gets up to two "possible" features from the embeddings home (never confirmed by it), and the agent is
+   asked once to check a docstring whose function body changed; a per-function registry
+   (`~/.smart-tool/data/doc_registry.db`) keeps that work across crashes. `action=docs validate=true` checks every claim of `docs/scope` against the code and writes `docs/scope/validation.md`, `action=docs symbol=NAME` tells where a function is documented, and the documentation hook warns
    when an edit makes a documented entry out of date. The link lives in the documents, never inside docstrings.
    The same run writes fifteen optional documents under `docs/scope/extras`, all from the graph and the git log: folder
    structure, docstring coverage per folder, module Mermaid, tests README, configuration read by the code, dependencies
@@ -288,7 +298,11 @@ Redirects) and Maintenance (Setup audit, Startup).
    riskiest to change), `dead_code` lists the functions no code calls and those only tests call (static call graph,
    candidates to read before deleting), `import_cycles` lists the groups of files that import each other, and
    `comments` lists comments in the wrong place across the code files (commented-out code, history tags, loose docs,
-   long inline blocks), for code written before the edit hook existed. Each takes `limit` and writes nothing.
+   long inline blocks), for code written before the edit hook existed. `credentials` lists, per git-tracked text file
+   (read from disk, so `.env` files and old commits count), the file and line of each credential shape and never the
+   value; `links` lists the relative links in tracked HTML and Markdown files that point to a missing file, and the ones
+   it could not decide (root-relative, template expressions, pages with a `<base>` element) as unchecked, not broken.
+   Each takes `limit` and writes nothing.
 
    **Layers on edit**: when the project has confirmed layers (`.smart-tool/layers.json`), an edit that adds a call from
    a lower layer to a function of a higher one is flagged to the agent; it never blocks. `layer_mode` in
@@ -314,6 +328,16 @@ Redirects) and Maintenance (Setup audit, Startup).
    anything else (GitHub, Slack, Stripe live, Anthropic and npm tokens, Google API keys, AWS access key ids and secret key lines, a
    private-key header at the start of a line); the note names the file and line, never repeats the value and never blocks, and a
    line that says it is an example is skipped.
+
+   **Import cycles and history on edit**: two more lines of the edit note, read only from what is already cached (the
+   code graph analysis and the git history the daemon holds in memory), so the hook never waits for an analysis and never
+   runs `git`; with nothing cached they say nothing. A Python import the edit adds at module level (an import inside a
+   function is the usual way to break a cycle and is skipped) that names a project file with a way back to the edited
+   file in the indexed import graph is flagged with the chain (`a.py -> b.py -> c.py -> a.py`). A code file in the ten
+   riskiest by commits times lines (the `hotspots` ranking) with at least ten commits is named a hotspot, and a file
+   outside the edit that usually changes in the same commits as an edited one (the `coupled_with` rule: hidden coupling
+   without an import between them) is named as its partner. They add context only, never block, and follow the modes of
+   the other edit notes (all of them `off` silences the review).
 
    **Dependency check on edit**: an edit of `package.json`, `requirements*.txt`, `pyproject.toml` (`project.dependencies` and `project.optional-dependencies`; Poetry tables are not read), `go.mod`, `Cargo.toml` (crates.io registry dependencies) or `pom.xml` (Maven, plain or property-resolved versions) that adds or changes a dependency lists the OSV advisory IDs of up to 5 of them (exact version, or the lower bound of `^`, `~`, `~=` and `>=`), answered from a 6 h disk cache or one 2.5 s batch call that sends only package names and versions; when OSV cannot answer, the reminder says the check was skipped and the edit goes on. `dependency_mode` in `config.json`: `warn` (default) or `off`.
 
@@ -391,7 +415,11 @@ Redirects) and Maintenance (Setup audit, Startup).
    (`hooks/session_audit.py`) only asks the running service and prints nothing when the service is down.
 4. **Embedder**: the embeddings home (casa-de-embeddings, the embedding service of this machine, found through
    `~/.casa-de-embeddings/run/daemon.json`) is the default; the gateway's `embedding_model` and `rerank_model` are used
-   only when you choose **Gateway** here, never in place of a stopped home. The home's embedder is identified by the
+   only when you choose **Gateway** here, never in place of a stopped home. With the home chosen, the service installs
+   it when it is missing, brings it to the registry's version when it is older (the engine registry's kit checks the
+   SHA-256 and the Ed25519 signature of the asset) and starts it, looking again once a day and ten minutes after a
+   failure; a home that already answers at the registry's version or newer is left alone, and when it cannot be brought
+   up, searches stay lexical and the warning names the reason. The home's embedder is identified by the
    `model_sha256` and `dimension` of its `/info`; a home that answers without them is reported as an error, never
    replaced silently by lexical search. Rerank goes through the home's connector to the rerank host configured in it;
    without one, results keep the hybrid order and say so. Switching the embedder re-embeds each project in the
@@ -454,7 +482,7 @@ fails to load is listed in the setup screen with its error and does not affect t
 ## Uninstall
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.81 uninstall [--target DIR] [--keep-data]
+npx @allansantos-dev/smart-tool@0.9.82 uninstall [--target DIR] [--keep-data]
 ```
 
 It asks nothing and opens no window. It stops the tray and the daemon, removes the logon task, the hook entries of Smart

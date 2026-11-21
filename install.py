@@ -16,8 +16,10 @@ from pathlib import Path
 import atomic_io
 import client_hooks
 import config
+import daemon_launcher
 import i18n
 import paths
+import venv_launch
 import version
 
 SOURCE = Path(__file__).resolve().parent
@@ -27,6 +29,7 @@ ENTRY_SCRIPTS = ("tray.py", "smart_tool_daemon.py", "pretool_router.py", "sessio
 HOOK_SCRIPTS = ("pretool_router.py", "session_audit.py")
 STARTUP_SCRIPT = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "Microsoft" / "Windows" / \
     "Start Menu" / "Programs" / "Startup" / "SmartTool-Tray.vbs"
+TASK_SCRIPT = Path(paths.DATA_DIR) / "tray-start.vbs"
 MANIFEST = ".install-manifest.json"
 DEPENDENCY_INPUTS = ("requirements.txt", "install_runtime.py", "node_locator.py", "web_adapters/node/package.json",
                      "web_adapters/node/package-lock.json", "web_adapters/browser/requirements.txt",
@@ -113,11 +116,15 @@ def _same_folder(path, folder):
 
 
 def stop_processes(target):
+    """Closes every process running a script of the installation in `target` (daemon, tray, browser proxies); a closed
+    daemon gets its reason in the daemon log, since a forced stop leaves it no chance to write one."""
     def running():
-        return [pid for pid, line in _processes() for script in _script_paths(line)
+        return [(pid, Path(script).name) for pid, line in _processes() for script in _script_paths(line)
                 if Path(script).name not in HOOK_SCRIPTS and _same_folder(_script_folder(script), target)]
 
-    for pid in running():
+    for pid, script in running():
+        if script == Path(daemon_launcher.DAEMON_SCRIPT).name:
+            daemon_launcher.note_stop(f"daemon pid {pid} closed by the installer to update {target}")
         powershell(f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue")
     deadline = time.monotonic() + 10
     while True:
@@ -192,12 +199,19 @@ def _task_definition():
     return result.stdout if result.returncode == 0 else ""
 
 
+def _script_text(path):
+    """Text of a launch script or hook file, "" when absent: VBScript files are written in UTF-16, the rest in UTF-8."""
+    if not path.is_file():
+        return ""
+    data = path.read_bytes()
+    return data.decode("utf-16") if data[:2] in (b"\xff\xfe", b"\xfe\xff") else data.decode("utf-8", errors="replace")
+
+
 def other_installs(target):
     """Installer-made Smart Tool folders other than target, found through what still runs or points at them: tray and
-    daemon processes, the logon task or Startup script, and agent hook commands."""
+    daemon processes, the logon task and the script it runs, the Startup script, and agent hook commands."""
     texts = [line for _pid, line in _processes()] + [_task_definition()]
-    texts += [path.read_text(encoding="utf-8", errors="replace") for path in (STARTUP_SCRIPT, *hook_files())
-              if path.is_file()]
+    texts += [_script_text(path) for path in (TASK_SCRIPT, STARTUP_SCRIPT, *hook_files())]
     folders = {_install_folder(script) for text in texts for script in _script_paths(text)}
     return sorted(folder for folder in folders
                   if folder and not _same_folder(folder, target) and not _same_folder(folder, SOURCE))
@@ -231,9 +245,9 @@ def remove_other_installs(target):
                 path.write_text(text, encoding="utf-8")
                 client_hooks.record_codex_trust(trust, str(path.with_name("config.toml")))
                 print(t("Hooks in {path} now point to {target}.", path=path, target=target))
-        startup = STARTUP_SCRIPT.read_text(encoding="utf-8", errors="replace") if STARTUP_SCRIPT.is_file() else ""
-        if any(_same_folder(_script_folder(script), folder) for script in _script_paths(startup)):
-            STARTUP_SCRIPT.unlink()
+        for script_path in (TASK_SCRIPT, STARTUP_SCRIPT):
+            if any(_same_folder(_script_folder(script), folder) for script in _script_paths(_script_text(script_path))):
+                script_path.unlink()
         shutil.rmtree(folder)
         removed.append(folder)
     return removed
@@ -368,7 +382,8 @@ def install_dependencies(target, python):
 def start(target, python, pythonw):
     subprocess.run([str(python), "-c", "import autostart, json; print(json.dumps(autostart.install()))"],
                    cwd=target, check=True, capture_output=True, text=True, timeout=60)
-    subprocess.Popen([str(pythonw if pythonw.exists() else python), str(target / "tray.py")], cwd=target,
+    interpreter, additions = venv_launch.direct(pythonw if pythonw.exists() else python)
+    subprocess.Popen([interpreter, str(target / "tray.py")], cwd=target, env=venv_launch.environment(additions),
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      creationflags=getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0))
 

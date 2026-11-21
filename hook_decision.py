@@ -1,7 +1,8 @@
 """Decisão do PreToolUse e do PostToolUse do Smart Tool, tomada dentro do daemon já aquecido.
 
-O Claude Code chama as rotas POST /hooks/pretool e /hooks/posttool como hooks `type: "http"` (sem processo por
-chamada); o Codex usa o hook de comando `hooks/pretool_router.py`, que só repassa o payload para /hooks/pretool.
+O Claude Code e o Codex chamam as rotas POST /hooks/pretool, /hooks/posttool e /hooks/subagent-start pelo hook de
+comando `hooks/pretool_router.py`, que lê o endereço do daemon no arquivo de execução a cada chamada, espera um
+reinício e só repassa o payload (`hook_call`).
 
 Uma busca nativa que a regra redireciona, e WebFetch/WebSearch, não são negadas: o Smart Tool responde no lugar e o
 texto volta como saída da própria chamada (`tool_redirect`). INVARIANTE: a saída do PreToolUse é `{}`, `updatedInput`
@@ -17,6 +18,7 @@ import time
 import uuid
 
 import affected_tests
+import agent_redirect
 import code_graph
 import code_impact
 import comment_check
@@ -28,6 +30,7 @@ import doc_scope
 import dossier
 import duplicates
 import edit_preview
+import edit_shape
 import index_profile
 import index_scope
 import layer_check
@@ -39,6 +42,8 @@ import redirect_rule
 import removed_callers
 import requester
 import router
+import scout_access
+import shell_reads
 import tool_redirect
 
 WEB_TOOLS = ("WebSearch", "WebFetch")
@@ -332,6 +337,35 @@ def _credential_lines(findings):
             "variable or a secret store. If it is a fake value for a test, go ahead.")
 
 
+def _cycle_lines(findings):
+    """The note that names the import cycles an edit's added imports close.
+
+    Parameters: findings (list of (rel, item)) the `edit_shape.added_cycles` items with the file that was edited.
+    Returns: str, one sentence per import, cut at MAX_DOC_FINDINGS.
+    """
+    lines = [f"{rel}:{item['line']} now imports `{item['imports']}`, which already leads back to it "
+             f"({' -> '.join([rel, *item['chain']])}): the import closes a cycle" for rel, item in findings[:MAX_DOC_FINDINGS]]
+    if len(findings) > MAX_DOC_FINDINGS:
+        lines.append(f"{len(findings) - MAX_DOC_FINDINGS} more import(s) in the same situation")
+    return ("Smart Tool cycles: " + "; ".join(lines) + ". Move what both files need into a third module, or import it where "
+            "it is used; if the cycle is intended, go ahead.")
+
+
+def _history_lines(hotspots, coupled):
+    """The note that names the hotspots among the edited files and the files that usually change with them.
+
+    Parameters: hotspots, coupled (lists) the two lists of `edit_shape.history_findings`.
+    Returns: str, one sentence per file, cut at MAX_DOC_FINDINGS.
+    """
+    lines = [f"`{item['path']}` is a hotspot of the project (rank {item['rank']}, {item['commits']} commits): keep the edit "
+             "small and run its tests" for item in hotspots]
+    lines += [f"`{item['path']}` usually changes with `{item['with']}` ({item['shared']} shared commits, {item['degree']}%) "
+              "and is not in this edit: check whether it needs the same change" for item in coupled]
+    if len(lines) > MAX_DOC_FINDINGS:
+        lines[MAX_DOC_FINDINGS:] = [f"{len(lines) - MAX_DOC_FINDINGS} more file(s) in the same situation"]
+    return "Smart Tool history: " + "; ".join(lines) + "."
+
+
 def _link_lines(broken, unchecked):
     """The link notes: the links that point to nothing, and the ones that could not be checked with the reason."""
     parts = []
@@ -418,21 +452,47 @@ def _dependency_part(before, after, ecosystem):
         return f"{dependency_notice.PREFIX}dependency check skipped: {exc}"
 
 
+def _history_findings(edited, failures):
+    """The hotspot and change-partner facts of the edited files, per project, from the cached history only.
+
+    Parameters: edited (dict) project folder -> project-relative paths of the edit; failures (list) where a failed lookup
+    adds its line.
+    Returns: tuple (hotspots, coupled) as `edit_shape.history_findings` lists, over every project of the edit.
+    """
+    hotspots, coupled = [], []
+    for root, rels in edited.items():
+        try:
+            found = edit_shape.history_findings(root, rels)
+        except (ValueError, RuntimeError, OSError) as exc:
+            failures.append(f"Smart Tool history check skipped: {exc}")
+            continue
+        hotspots += found["hotspots"]
+        coupled += found["coupled"]
+    return hotspots, coupled
+
+
 def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode="off", link_mode="off",
-                    decision_mode="off"):
+                    decision_mode="off", shape=False):
     """The checks of an edit over (path, before, after) triples: docstrings, comments, documentation anchors, copies,
     dependency advisories, local links, layers and the decisions recorded about the touched functions, each following its mode.
+    With `shape`, two more notes read only the cached code graph and history: the import cycle an added Python import
+    closes and the hotspots or usual change partners among the edited files.
 
-    Parameters: changes (iterable of (absolute path, text before or None, text after)); the modes (`off` skips a check).
+    Parameters: changes (iterable of (absolute path, text before or None, text after)); the modes (`off` skips a check);
+    shape (bool) whether the cycle and history notes run: the edit hook asks for them, a review of a finished diff does not
+    (`pr_impact` reports both from the whole graph and history).
     Returns: tuple (message parts, doc findings, comment findings); the parts are empty when nothing is worth saying.
     """
     doc_findings, scope_findings, duplicate_findings, failures, dependency_parts = [], [], [], [], []
     comment_findings, layer_findings, credential_findings, caller_answers = [], [], [], []
     broken_links, unchecked_links = [], []
     decision_findings, decisions_asked = [], 0
+    cycle_findings, edited_files = [], {}
     for path, before, after in changes:
         root = _project_of(path)
         rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root)).replace(os.sep, "/") if root else os.path.basename(path)
+        if shape and root:
+            edited_files.setdefault(root, []).append(rel)
         credential_findings += [(rel, item) for item in credential_check.review(before, after)]
         if link_mode != "off":
             try:
@@ -447,6 +507,11 @@ def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_
             continue
         if not doc_check.supported(path):
             continue
+        if shape and root:
+            try:
+                cycle_findings += [(rel, item) for item in edit_shape.added_cycles(root, rel, before, after)]
+            except (ValueError, RuntimeError, OSError) as exc:
+                failures.append(f"Smart Tool cycles check skipped: {exc}")
         edited = doc_check.written(path, before, after)
         profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile")) if root else None
         if doc_mode != "off" and root and index_profile.kind(rel, profile) == "code":
@@ -480,14 +545,17 @@ def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_
                         caller_answers.append(answer)
             except (ValueError, RuntimeError, OSError) as exc:
                 failures.append(f"Smart Tool callers check skipped: {exc}")
+    hotspots, coupled = _history_findings(edited_files, failures)
     parts = ([_doc_lines(doc_findings)] if doc_findings else []) + \
         ([_comment_lines(comment_findings)] if comment_findings else []) + \
         ([_scope_lines(scope_findings)] if scope_findings else []) + \
         ([_duplicate_lines(duplicate_findings)] if duplicate_findings else []) + \
         ([_layer_lines(layer_findings)] if layer_findings else []) + \
+        ([_cycle_lines(cycle_findings)] if cycle_findings else []) + \
         ([_decision_lines(decision_findings)] if decision_findings else []) + \
         ([_callers_lines(caller_answers)] if caller_answers else []) + \
         ([_credential_lines(credential_findings)] if credential_findings else []) + \
+        ([_history_lines(hotspots, coupled)] if hotspots or coupled else []) + \
         _link_lines(broken_links, unchecked_links) + failures + dependency_parts
     return parts, doc_findings, comment_findings
 
@@ -607,7 +675,7 @@ def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comm
     """`_edit_review` inside one `code_graph.pending_scope`, so the pending-changes scan runs once per review."""
     parts, doc_findings, comment_findings = _review_changes(
         edit_preview.preview(payload.get("tool_name"), payload.get("tool_input"), payload.get("cwd")),
-        doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode, link_mode, decision_mode)
+        doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode, link_mode, decision_mode, shape=True)
     if not parts:
         return {}
     message = " ".join(parts)
@@ -646,12 +714,14 @@ def decide(payload, client, web_route, jobs):
         requester.note_hook(payload["tool_name"].removeprefix(f"mcp__{SMART_TOOL_SERVER}__"), payload.get("tool_input"),
                             payload.get("session_id"), payload.get("cwd"))
         return {}
+    if isinstance(payload, dict) and payload.get("tool_name") in agent_redirect.LAUNCH_TOOLS:
+        return _launch_decision(payload, config.hook_mode(cfg))
     mode = config.hook_mode(cfg)
     if mode == "off" or not isinstance(payload, dict):
         return {}
     plan = _route(payload, client, web_route, cfg)
     if "kind" not in plan:
-        return plan
+        return plan or _shell_read_tip(payload)
     if mode == "advise":
         return advise(plan["message"])
     if plan["kind"] and payload.get("tool_use_id"):
@@ -659,6 +729,30 @@ def decide(payload, client, web_route, jobs):
     if not agent_has_smart_tool(payload.get("agent_type") if payload.get("agent_id") else None, payload.get("cwd")):
         return {}
     return _answer_in_place(payload, client, plan, jobs)
+
+
+def _shell_read_tip(payload):
+    """The tip that goes with the third source file read through the shell in a session (`shell_reads`), `{}` otherwise
+    and where smart_scout is not callable."""
+    if payload.get("tool_name") != "Bash":
+        return {}
+    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    message = shell_reads.note(payload.get("session_id"), tool_input.get("command"), payload.get("cwd"))
+    if message is None or not agent_has_smart_tool(payload.get("agent_type") if payload.get("agent_id") else None,
+                                                    payload.get("cwd")) or not scout_access.callable_in(payload):
+        return {}
+    return advise(message)
+
+
+def _launch_decision(payload, mode):
+    """A subagent launch that `agent_redirect` matches carries the smart_scout call to make as a tip in redirect and
+    advise modes (the launch always runs); nothing in off mode, where the launching agent has no Smart Tool and where
+    smart_scout is not callable without a permission prompt (see `scout_access`)."""
+    message = agent_redirect.reason(payload) if mode != "off" else None
+    if message is None or not agent_has_smart_tool(payload.get("agent_type") if payload.get("agent_id") else None,
+                                                    payload.get("cwd")) or not scout_access.callable_in(payload):
+        return {}
+    return advise(message)
 
 
 def _start_job(payload, client, plan, jobs, key):

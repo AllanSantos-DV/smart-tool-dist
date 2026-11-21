@@ -47,11 +47,25 @@ def kill_on_close_job(job_memory_bytes=None):
     return kernel32, job
 
 
-def _stderr_tail(path):
+def file_tail(path, limit=STDERR_TAIL_BYTES):
+    """The last `limit` bytes of the file at `path`, decoded and stripped. Raises OSError when it cannot be read."""
     with open(path, "rb") as stream:
         stream.seek(0, os.SEEK_END)
-        stream.seek(max(0, stream.tell() - STDERR_TAIL_BYTES))
+        stream.seek(max(0, stream.tell() - limit))
         return stream.read().decode("utf-8", "replace").strip()
+
+
+def bind_to_kill_on_close_job(job, proc):
+    """Puts `proc` in the kill-on-close job `job` ((kernel32, handle) from `kill_on_close_job`; created when None) and
+    returns the job. Raises OSError when the system refuses: an unbound child would outlive its owner."""
+    import ctypes
+    from ctypes import wintypes
+    if job is None:
+        job = kill_on_close_job()
+    kernel32, handle = job
+    if not kernel32.AssignProcessToJobObject(wintypes.HANDLE(handle), wintypes.HANDLE(proc._handle)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return job
 
 
 def run_capped(argv, workdir, timeout, memory_bytes):
@@ -68,7 +82,7 @@ def run_capped(argv, workdir, timeout, memory_bytes):
             returncode = _run_in_job(argv, workdir, timeout, memory_bytes, errors)
         else:
             returncode = _run_in_group(argv, workdir, timeout, memory_bytes, errors)
-    return returncode, _stderr_tail(error_path)
+    return returncode, file_tail(error_path)
 
 
 def _run_in_job(argv, workdir, timeout, memory_bytes, errors):

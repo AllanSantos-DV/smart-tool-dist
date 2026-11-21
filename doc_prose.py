@@ -208,18 +208,66 @@ def pending(root, model):
     for rel in doc_scope._generated_files(root):
         with open(os.path.join(root, doc_scope.DOCS_DIR, rel), encoding="utf-8") as stream:
             text = stream.read()
-        for key, body in doc_scope.PROSE.findall(text):
-            if body.strip():
-                continue
-            kind = kind_of(rel, key)
-            context = (_module_context(model, key) if kind == "module" else _overview_context(model, entries)
-                       if kind == "overview" else _entry_context(model, key, entries, kind == "simple_entry"))
-            stamp = None
-            if kind in ("entry", "simple_entry"):
-                function = model.function_of[key]
-                stamp = doc_scope.code_stamp(model.read(function["path"]), function)
-            found.append({"file": rel, "block": key, "kind": kind, "context": context, "stamp": stamp})
+        found += [_task(model, entries, rel, key) for key, body in doc_scope.PROSE.findall(text) if not body.strip()]
     return found
+
+
+def _task(model, entries, rel, key):
+    """One prose task: the block's kind, the code context of its instruction and, for an entry point, the flow stamp
+    the paragraph will be written for."""
+    kind = kind_of(rel, key)
+    context = (_module_context(model, key) if kind == "module" else _overview_context(model, entries)
+               if kind == "overview" else _entry_context(model, key, entries, kind == "simple_entry"))
+    stamp = doc_scope.flow_stamp(model, key) if kind in ("entry", "simple_entry") else None
+    return {"file": rel, "block": key, "kind": kind, "context": context, "stamp": stamp}
+
+
+def rewrite_stale(root, model, features, budget_s=BUDGET_S, call=None):
+    """Rewrite with the docs_model the written functional.md and simple.md paragraphs of `features` whose stamp is not
+    the feature's flow stamp now. A block is replaced only by a paragraph that passes the same checks as a new one; a
+    rejected or failed one keeps its old text and stays stale, reported with the reason.
+
+    Parameters: root (str); model (doc_scope._Model) of the current code; features (iterable of entry anchors);
+    budget_s (float); call (callable like model_client.structured) for tests.
+    Returns: dict with 'written' and 'failed' ({file, block, problem}) lists.
+    Raises ValueError when no docs_model is configured.
+    """
+    model_id = config.load_config().get(ROLE)
+    if not model_id:
+        raise ValueError(f"No {ROLE} configured: choose the writing model (Docs model) in the Smart Tool setup screen; "
+                         "the stale paragraphs were left as they are.")
+    started, entries = time.monotonic(), model.entry_points()
+    current = {anchor: doc_scope.flow_stamp(model, anchor) for anchor in features if anchor in model.function_of}
+    pages = doc_scope._read_pages(root, ("functional.md", "simple.md"))
+    tasks = [_task(model, entries, item["file"], item["id"]) for item in doc_scope.stale_prose(pages, current)]
+    corpus = doc_validate.Corpus(model)
+    with usage_meter.job(root, index_views.describe(root), "docs"), ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        usage_meter.phase("docs")
+        contexts = [contextvars.copy_context() for _task_item in tasks]
+        results = list(pool.map(lambda pair: pair[0].run(write_one, model_id, pair[1], corpus, started + budget_s, call),
+                                zip(contexts, tasks)))
+    written = [(task, result["text"]) for task, result in zip(tasks, results) if result["text"]]
+    _replace(root, written)
+    return {"written": [f"{doc_scope.DOCS_DIR}/{t['file']} {t['block']}" for t, _text in written],
+            "failed": [{"file": f"{doc_scope.DOCS_DIR}/{t['file']}", "block": t["block"], "problem": r["problem"]}
+                       for t, r in zip(tasks, results) if not r["text"]]}
+
+
+def _replace(root, written):
+    """Put each accepted paragraph in place of its stale block, stamped with the flow it was written for."""
+    by_file = {}
+    for task, text in written:
+        by_file.setdefault(task["file"], []).append((task["block"], text, task["stamp"]))
+    for rel, blocks in by_file.items():
+        path = os.path.join(root, doc_scope.DOCS_DIR, rel)
+        with open(path, encoding="utf-8") as stream:
+            page = stream.read()
+        for key, text, stamp in blocks:
+            block = re.compile(re.escape(f"<!-- smart-tool:prose {key}") + r'(?: code="[0-9a-f]{12}")? -->\n.*?'
+                               + re.escape("<!-- /smart-tool:prose -->"), re.S)
+            page = block.sub(lambda _m: f"{doc_scope.prose_open(key, stamp)}\n{text}\n<!-- /smart-tool:prose -->",
+                             page, count=1)
+        atomic_io.write_text(path, page)
 
 
 def problems(kind, text, corpus):
