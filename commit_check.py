@@ -25,6 +25,9 @@ HOOK_ORIGIN = client_hooks.HOOK_ORIGIN
 PUSH_MARKER = "# smart-tool-pre-push"
 PUSH_HOOK_NAME = "pre-push"
 PUSH_HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "pre_push.py")
+PUSH_DOCS_FLAG = "--docs"
+PUSH_DOCS_NOTE = (" With docs=true it also lists the public functions of the pushed range that lack a docstring or the "
+                  "Feature line.")
 DEFAULT_HOOK = HOOK_NAME
 MAX_FILES = 50
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -101,14 +104,19 @@ def _hook_text():
             "exit 0\n")
 
 
-def _push_hook_text():
+def _push_hook_text(docs=False):
     """The `pre-push` script: it passes git's arguments and, through the inherited stdin, the pushed ranges to the review
     client; the command line ends with the hook origin, the failure line is printed, and the exit status stays 0 (a git
-    hook that exits non-zero blocks the push)."""
+    hook that exits non-zero blocks the push).
+
+    Parameters: docs (bool) write the `--docs` flag into the command line, which asks the review for the documentation
+    section; without it the text is the one every earlier install wrote.
+    """
     command = f"{shlex.quote(hook_python())} {shlex.quote(client_hooks._shell_safe(PUSH_HOOK_SCRIPT))}"
+    flag = f" {PUSH_DOCS_FLAG}" if docs else ""
     return (f"#!/bin/sh\n{PUSH_MARKER}: written by Smart Tool (project_manage action=commit_hook_install hook=pre-push); "
             f"commit_hook_uninstall hook=pre-push removes it\n"
-            f'{command} "$@" {HOOK_ORIGIN}\n'
+            f'{command} "$@"{flag} {HOOK_ORIGIN}\n'
             "status=$?\n"
             '[ "$status" -eq 0 ] || echo "Smart Tool push review could not run (exit $status), push not reviewed" >&2\n'
             "exit 0\n")
@@ -178,24 +186,35 @@ def _blockers(root, hook, marker=MARKER):
     return found
 
 
-def install_hook(root, hook=DEFAULT_HOOK):
+def install_hook(root, hook=DEFAULT_HOOK, docs=False):
     """Writes the opt-in git hook `hook` of the repository at `root`, after a backup of an older hook of ours.
 
-    Parameters: root (str) project folder, inside a git repository; hook (str) `pre-commit` or `pre-push`.
-    Returns: dict with `installed`, `changed`, `file` and `backup` (path of the copy of our older hook, None when new).
-    Raises: ValueError, naming everything found and changing nothing, when `hook` is unknown, core.hooksPath is set,
-    husky is used or a hook of that name that is not ours exists.
+    Parameters: root (str) project folder, inside a git repository; hook (str) `pre-commit` or `pre-push`; docs (bool)
+    for `pre-push`, also list the public functions of the pushed range that lack a docstring or the Feature line; the
+    option is the `--docs` flag of the written command, so installing again without it writes the plain hook.
+    Returns: dict with `installed`, `changed`, `file` and `backup` (path of the copy of our older hook, None when new), and
+    `docs` true when the option was written.
+    Raises: ValueError, naming everything found and changing nothing, when `hook` is unknown, `docs` is not a boolean or
+    is asked for a hook other than `pre-push`, core.hooksPath is set, husky is used or a hook of that name that is not
+    ours exists.
     """
     spec = _spec(hook)
+    if type(docs) is not bool:
+        raise ValueError("docs must be true or false.")
+    if docs and hook != PUSH_HOOK_NAME:
+        raise ValueError(f"docs=true applies to hook={PUSH_HOOK_NAME} only, not {hook}.")
     path = os.path.join(_hooks_dir(root), hook)
     found = _blockers(root, path, spec["marker"])
     if found:
         raise ValueError(f"The {spec['label']} hook was not installed and nothing was changed: " + "; ".join(found) + ".")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     backup = atomic_io.backup_file(path)
-    atomic_io.write_text(path, spec["text"]())
+    atomic_io.write_text(path, spec["text"](docs=True) if docs else spec["text"]())
     os.chmod(path, 0o755)
-    return {"installed": True, "changed": True, "file": path, "backup": backup, "note": spec["note"]}
+    answer = {"installed": True, "changed": True, "file": path, "backup": backup, "note": spec["note"]}
+    if docs:
+        answer.update(docs=True, note=spec["note"] + PUSH_DOCS_NOTE)
+    return answer
 
 
 def uninstall_hook(root, hook=DEFAULT_HOOK):

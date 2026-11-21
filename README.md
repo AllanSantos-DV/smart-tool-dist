@@ -4,12 +4,13 @@ A local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharpe
 
 | Tool | What it does |
 |---|---|
-| `smart_search` / `smart_search_result` | Semantic + lexical search over an indexed project, results split into code, tests and docs, with the likeliest functions per chunk |
+| `smart_search` / `smart_search_result` | Semantic + lexical search over an indexed project, results split into code, tests and docs, with the likeliest functions per chunk; `queries` (up to 5 objects with their own `query_identifiers`, `query_comments`, `doc_query` and `folder`, the other arguments shared) runs several searches in one call, one after the other, one section per query, an `ERROR` line for one that fails; without `queries` the answer is unchanged |
 | `smart_scout` | Answers a question about the code with the lines that answer it: reads the candidate files inside Smart Tool and returns `path:lines` with the literal text, so the files never enter the agent's context; with a `scout_model`, a small model also writes a short answer and keeps only the lines that support it; a question about why something is as it is (why, reason, decided) also lists up to three decision notes from the notes the project keeps about its intent, as ids with one excerpt each |
 | `web_search` / `web_search_result` | Web search across several sources in parallel, in the query language and in English, with a cache shared across sessions; `depth="research"` runs a multi-round research loop; with `fetch_top` (1 to 8) and `fetch_prompt`, `depth="quick"` also reads the first results the way `web_fetch_many` does and appends the pages after the unchanged results (a page that fails shows its `ERROR` line; off by default) |
 | `web_fetch` | Reads a known URL and returns only the answer to your prompt, written by a small model; pages are cached for 24 h. Pages over 60,000 characters are not cut: the model reads the parts closest to the prompt (needs an `embedding_model`) |
 | `web_fetch_many` | Reads up to 8 known URLs in one call with the same prompt, 4 at a time, each exactly as `web_fetch` reads it (24 h cache, browser for JavaScript pages, public addresses only). One block per URL in the order given: the answer, or an `ERROR` line with the reason, so a URL that fails never hides the others; a repeated URL is read once |
 | `read_document` | Reads a PDF, Word, PowerPoint, Excel, HTML, CSV or EPUB file as compact text, a range at a time: type, size, page/slide/sheet/part/chapter count and estimated tokens first, then only the units asked for (`range="3-5"`), so the file never enters the agent's context whole. The path can also be an `http(s)` URL of a PDF, Word, PowerPoint, Excel, CSV or EPUB file: it is downloaded the way `web_fetch` downloads (public addresses only, 5 MB cap), kept for 24 hours and read with the same ranges and token estimate; a URL of a web page fails and points to `web_fetch`. Opt-in: the native Read is not redirected. Scanned PDFs fail with that reason (no OCR) |
+| `read_document_many` | Reads up to 8 documents (local paths or URLs, mixed) in one call, 4 at a time, each exactly as `read_document` reads it. One block per entry in the order given: the `read_document` answer, or an `ERROR` line with the reason. `range`, `max_chars` and `info_only` apply to every document (`range="1-3"` reads those units of each one and fails alone for a document it does not fit; `max_chars` is the cap per document); an entry repeated is read once; the call fails only when every document failed. Opt-in, like `read_document` |
 | `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage; `graph` with `symbol` tells what changing a function touches: callers, calls, the tests that reach it and the files that import it |
 
 Agents that must click, type or log in also get Microsoft's [Playwright MCP](https://github.com/microsoft/playwright-mcp),
@@ -18,7 +19,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.85 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.86 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -90,7 +91,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.85 install
+npx @allansantos-dev/smart-tool@0.9.86 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -328,12 +329,33 @@ Redirects) and Maintenance (Setup audit, Startup).
    fails, is a check that is not ok with the reason, never a silent pass. The reply also lists the commit subjects since
    the latest tag (`limit`); the full notes are `release_notes`, which analyzes the diff and takes seconds. Changes and
    tags nothing.
+   **Upgrade preview**: `project_manage action=upgrade_preview package=... to=...` says, before a dependency's manifest is
+   edited, what bumping it changes: where the manifests declare it and the current version (the lockfile's when it
+   satisfies the range), the OSV advisories of the current and the target version with those the target fixes or adds, the
+   changelog or release notes of the target, and the tests that import the package or reach a file that does. `to` is
+   optional; without it the notes are not read. The notes are read through the `web_fetch` path (the registry names the
+   repository, its release pages are read), and only when the network use `web_fetch` needs is available; otherwise the
+   rest is answered and the reason the notes were not read is in the answer. An OSV lookup that is unavailable is said, never
+   shown as clean. It refuses a package no manifest declares, takes `limit` and edits nothing. A Python package is looked
+   for under its own name, so one imported under another name (PyYAML as `yaml`) is not seen in the tests.
    **Move preview**: `project_manage action=move_preview path=... to=...` lists what moving a file or folder would break:
    the modules importing it (file, line, import), the Markdown and HTML links to it with their anchors (a link between two
    files that move together is not listed, a root-relative link is marked), the README and `docs` lines that write its
    path, the `docs/scope` anchors that name its functions and the tests that reach it (by import or by naming the path in
    a string). It refuses when `path` does not exist, `to` already exists, `to` is inside `path` or either leaves the
    project. Static analysis over git-tracked text: search the old path as text too. Takes `limit`, moves and writes nothing.
+   **Delete preview**: `project_manage action=delete_preview path=...` lists what deleting a file would break, with the
+   readers of the move preview: the modules importing it, the links to it and the README and `docs` lines that write its
+   path, the `docs/scope` anchors and the tests that reach it. With `symbol=...` (a function, `Class.method` or class
+   that `path` defines) it lists what deleting only that definition would leave behind: the call sites that would still
+   name it (resolved calls, calls found by name, imports of the name, calls left in the same file, and the methods that
+   go with a class) and the tests that reach it. It refuses a `path` that does not exist or is a folder and a `symbol`
+   that `path` does not define. Static analysis: search the name as text too. Takes `limit`, deletes and writes nothing.
+   **Tree review**: `project_manage action=review_tree` gives the working tree the review `commit_check` gives the staged
+   change: the tracked files changed since `HEAD`, staged or not, read from disk, through the same notes. Untracked,
+   deleted and binary files are left out, the first 50 files are reviewed and the rest is said, and a tree with no change
+   answers `clean: true` with the sentence "The working tree is clean: nothing to review." It writes and blocks nothing;
+   `commit_check` and the pre-commit hook are unchanged.
    **Commit check** (opt-in): `project_manage action=commit_check` reviews the staged change (`git diff --cached`, not the
    working tree) with the notes the edit hook gives a finished diff (credentials, commented-out code, missing docstrings,
    duplicates, dependency advisories, link and edit notes), so edits the agent hook never saw (an IDE, hand edits,
@@ -353,6 +375,10 @@ Redirects) and Maintenance (Setup audit, Startup).
    is always 0, and a daemon that is down is one line naming the origin `smart-tool` and saying the service is not
    running. The command line ends with `--hook-origin=smart-tool` and the daemon is found through its run file on every
    call, with no port written anywhere. The install and the uninstall refuse and restore exactly as for `pre-commit`.
+   `commit_hook_install hook=pre-push docs=true` also lists, at every push, the public functions of the pushed range that
+   have no docstring or whose technical entry under `docs/scope` has no `Feature` line (or no entry); without `docs/scope`
+   it says the Feature lines were not checked. The option is the `--docs` flag of the written command, so installing again
+   without it writes the plain hook, which is byte for byte the one written without the option; it never blocks either.
 
    **Layers on edit**: when the project has confirmed layers (`.smart-tool/layers.json`), an edit that adds a call from
    a lower layer to a function of a higher one is flagged to the agent; it never blocks. `layer_mode` in
@@ -540,7 +566,7 @@ fails to load is listed in the setup screen with its error and does not affect t
 ## Uninstall
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.85 uninstall [--target DIR] [--keep-data]
+npx @allansantos-dev/smart-tool@0.9.86 uninstall [--target DIR] [--keep-data]
 ```
 
 It asks nothing and opens no window. It stops the tray and the daemon, removes the logon task, the hook entries of Smart

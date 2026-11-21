@@ -86,6 +86,8 @@ import low_priority
 import web_search_health
 import web_fetch
 import web_fetch_many
+import read_document_many
+import search_queries
 import version
 import update_check
 import gateway
@@ -390,10 +392,10 @@ SERVER_INSTRUCTIONS = (
 TOOLS = [
     {
         "name": "project_manage",
-        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project (a project whose folder is gone shows as unavailable with the reason); status shows storage, scope and jobs, and with a path inside a registered project answers for the deepest one that holds it (resolved_from). deps lists the known OSV advisories of every dependency the manifests of the project declare (package.json, requirements*.txt, pyproject.toml, go.mod), not only the ones an edit changed, at the version a package-lock.json beside a package.json resolved when it satisfies the range; only package names and versions leave the machine. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers and the tests that reach them (those no test reaches are listed apart), the documentation entries it leaves out of date, the notes the edit hook would have added to the whole diff (comments, copies, dependency advisories) and the tests to run with their command; it publishes nothing. pr_impact_comment (pr, base required) posts that report as a comment on pull request pr through the gh CLI, from the project folder, and returns the comment URL; a rerun replaces the previous Smart Tool comment (marked by a hidden HTML marker) instead of stacking another, and the body carries no local path; it is a write to GitHub, so it refuses unless the user turned pr_comment on in the setup screen (Agent rules, off by default), and when gh is missing or not logged in; never call it without the user asking for the comment. hotspots (limit) ranks the code files by commits times lines, the riskiest to change; dead_code lists the functions no code calls and those only tests call (static call graph, candidates); import_cycles lists the groups of files that import each other; comments lists comments in the wrong place (commented-out code, history tags, loose docs, long inline blocks) across the code files, not only in an edit; credentials lists, per git-tracked text file (read from disk, so .env files and old commits count), the file and line of each credential shape (provider tokens, AWS keys, private-key headers), never the value, and skips lines that say they are an example; links lists the relative links of the tracked HTML and Markdown files that point to a missing file, plus the links it could not decide (root-relative, template expressions, pages with a base element), reported as unchecked, not broken. rename_preview lists, before a rename of the function in symbol, its definitions with file and lines, its callers with line (also the calls the graph left unresolved under that name), the tests that reach it, the files importing its module, the anchors of docs/scope and the lines of the README and docs text that name it, each list capped by limit with the totals in counts; it fails when the symbol is not found and writes nothing. release_notes drafts the notes of the next release in Markdown under a `## Draft since <base>` heading without a model: the commit subjects since base (default the latest tag), the public functions the diff touches with their caller and test counts, the decision notes that name them and the documentation entries the diff leaves out of date; it writes nothing and fails when there is no tag and no base. release_check answers whether the project can be tagged, as {ready, checks}: version.py against the top heading of CHANGELOG.md, the README status line and site/index.html, no Unreleased text left in the changelog, a clean working tree on main or develop, the tag v<version> still free and no documentation entry out of date, each check with its reason (a missing file is a check that is not ok), plus the commit subjects since the latest tag; it changes and tags nothing. move_preview lists, before moving the file or folder in path to the project-relative to, the modules importing it, the Markdown and HTML links (with their anchors) and the README and docs lines that point at it, the anchors of docs/scope that name its functions and the tests that reach it, each list capped by limit with the totals in counts; it refuses when path does not exist or to already exists, and moves nothing. commit_check reviews the staged change (git diff --cached, not the working tree) with the notes the edit hook gives a finished diff (credentials, commented-out code, missing docstrings, duplicates, dependency advisories, link and edit notes), for edits the agent hook never saw (an IDE, hand edits, another agent); it writes nothing. commit_hook_install writes a git pre-commit hook in the project that prints that review to stderr at every commit and never blocks it (exit 0 always; a daemon that is down is one line, a check that fails is printed); it is opt-in, and refuses, naming what it found and changing nothing, when core.hooksPath is set, husky is used or a pre-commit that is not Smart Tool's exists; commit_hook_uninstall removes only that hook and puts back a backed-up hook that is not ours. With hook=pre-push (default pre-commit) both actions manage a git pre-push hook instead: at every push it prints to stderr the tests the pushed commits affect and the pr_impact summary against the commit the remote holds, never blocks the push, finds the service through its run file at run time, and refuses under the same conditions. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); each technical entry carries a Feature line naming the features whose flow reaches it and a marker with signature, body and docstring stamps, so check and validate also report a body or docstring changed under the same signature, and the chain check of validate fails when a technical entry and the functional overview do not name each other; with the Claude Code hook installed, at the end of each turn in a project with docs/scope the daemon rewrites, without a model, only the pages of the functions the turn changed; docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; each view carries stale (not updated for 30 days, the test of the daily cleanup that removes them) and stale_bytes sums them; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. junk (no project_root) lists the registered projects that were never projects: a personal, system, application-data or build folder, a subfolder of a repository or of another project, a folder of projects, or a folder that no longer exists (on a drive or share that is mounted); with confirm=true it unregisters them and deletes only their index files, and the manifest says what went. A project is the folder where the session started, so smart_search and register refuse a folder that is not a project and index a new one only from the session that started in it. Jobs via smart_search_result.",
+        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project (a project whose folder is gone shows as unavailable with the reason); status shows storage, scope and jobs, and with a path inside a registered project answers for the deepest one that holds it (resolved_from). deps lists the known OSV advisories of every dependency the manifests of the project declare (package.json, requirements*.txt, pyproject.toml, go.mod), not only the ones an edit changed, at the version a package-lock.json beside a package.json resolved when it satisfies the range; only package names and versions leave the machine. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers and the tests that reach them (those no test reaches are listed apart), the documentation entries it leaves out of date, the notes the edit hook would have added to the whole diff (comments, copies, dependency advisories) and the tests to run with their command; it publishes nothing. pr_impact_comment (pr, base required) posts that report as a comment on pull request pr through the gh CLI, from the project folder, and returns the comment URL; a rerun replaces the previous Smart Tool comment (marked by a hidden HTML marker) instead of stacking another, and the body carries no local path; it is a write to GitHub, so it refuses unless the user turned pr_comment on in the setup screen (Agent rules, off by default), and when gh is missing or not logged in; never call it without the user asking for the comment. hotspots (limit) ranks the code files by commits times lines, the riskiest to change; dead_code lists the functions no code calls and those only tests call (static call graph, candidates); import_cycles lists the groups of files that import each other; comments lists comments in the wrong place (commented-out code, history tags, loose docs, long inline blocks) across the code files, not only in an edit; credentials lists, per git-tracked text file (read from disk, so .env files and old commits count), the file and line of each credential shape (provider tokens, AWS keys, private-key headers), never the value, and skips lines that say they are an example; links lists the relative links of the tracked HTML and Markdown files that point to a missing file, plus the links it could not decide (root-relative, template expressions, pages with a base element), reported as unchecked, not broken. rename_preview lists, before a rename of the function in symbol, its definitions with file and lines, its callers with line (also the calls the graph left unresolved under that name), the tests that reach it, the files importing its module, the anchors of docs/scope and the lines of the README and docs text that name it, each list capped by limit with the totals in counts; it fails when the symbol is not found and writes nothing. release_notes drafts the notes of the next release in Markdown under a `## Draft since <base>` heading without a model: the commit subjects since base (default the latest tag), the public functions the diff touches with their caller and test counts, the decision notes that name them and the documentation entries the diff leaves out of date; it writes nothing and fails when there is no tag and no base. release_check answers whether the project can be tagged, as {ready, checks}: version.py against the top heading of CHANGELOG.md, the README status line and site/index.html, no Unreleased text left in the changelog, a clean working tree on main or develop, the tag v<version> still free and no documentation entry out of date, each check with its reason (a missing file is a check that is not ok), plus the commit subjects since the latest tag; it changes and tags nothing. upgrade_preview says, before the manifest of a dependency is edited, what bumping the package in package (optionally to the version in to) changes: where the manifests declare it with the current version (the lockfile's when it satisfies the range), the OSV advisories of the current and the target version (those the target fixes or adds; a lookup that is unavailable is said, never shown as clean), the changelog or release notes of the target read through the web_fetch path only when the network use web_fetch needs is available (otherwise the local part is answered and the reason the notes were not read is given) and the tests that import the package or reach a file that does, listed up to limit; it refuses a package no manifest declares, and edits nothing. move_preview lists, before moving the file or folder in path to the project-relative to, the modules importing it, the Markdown and HTML links (with their anchors) and the README and docs lines that point at it, the anchors of docs/scope that name its functions and the tests that reach it, each list capped by limit with the totals in counts; it refuses when path does not exist or to already exists, and moves nothing. delete_preview lists, before deleting the file in path (or only the function or class symbol defined in it), what the deletion breaks without touching anything: for a file the modules importing it, the Markdown and HTML links and the README and docs lines that point at it, the anchors of docs/scope and the tests that reach it; for a symbol the call sites that would be left naming it (also calls and imports found by name, and calls left in the same file), the functions that go with it and the tests that reach it, each list capped by limit with the totals in counts; it refuses a path that does not exist or is a folder, and a symbol that path does not define. commit_check reviews the staged change (git diff --cached, not the working tree) with the notes the edit hook gives a finished diff (credentials, commented-out code, missing docstrings, duplicates, dependency advisories, link and edit notes), for edits the agent hook never saw (an IDE, hand edits, another agent); it writes nothing. review_tree gives the same review to the uncommitted working tree: the tracked files modified since HEAD, staged or not, read from disk (untracked, deleted and binary files are left out; the first 50 are reviewed and the rest is said), and says plainly when the tree is clean; it writes nothing and blocks nothing. commit_hook_install writes a git pre-commit hook in the project that prints that review to stderr at every commit and never blocks it (exit 0 always; a daemon that is down is one line, a check that fails is printed); it is opt-in, and refuses, naming what it found and changing nothing, when core.hooksPath is set, husky is used or a pre-commit that is not Smart Tool's exists; commit_hook_uninstall removes only that hook and puts back a backed-up hook that is not ours. With hook=pre-push (default pre-commit) both actions manage a git pre-push hook instead: at every push it prints to stderr the tests the pushed commits affect and the pr_impact summary against the commit the remote holds, never blocks the push, finds the service through its run file at run time, and refuses under the same conditions; commit_hook_install with hook=pre-push and docs=true also lists there the public functions of the pushed range that lack a docstring or the Feature line (the option is written into the hook; installing again without it writes the plain hook). graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); each technical entry carries a Feature line naming the features whose flow reaches it and a marker with signature, body and docstring stamps, so check and validate also report a body or docstring changed under the same signature, and the chain check of validate fails when a technical entry and the functional overview do not name each other; with the Claude Code hook installed, at the end of each turn in a project with docs/scope the daemon rewrites, without a model, only the pages of the functions the turn changed; docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; each view carries stale (not updated for 30 days, the test of the daily cleanup that removes them) and stale_bytes sums them; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. junk (no project_root) lists the registered projects that were never projects: a personal, system, application-data or build folder, a subfolder of a repository or of another project, a folder of projects, or a folder that no longer exists (on a drive or share that is mounted); with confirm=true it unregisters them and deletes only their index files, and the manifest says what went. A project is the folder where the session started, so smart_search and register refuse a folder that is not a project and index a new one only from the session that started in it. Jobs via smart_search_result.",
         "inputSchema": {
             "type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "layers", "affected_tests", "pr_impact", "pr_impact_comment", "hotspots", "dead_code", "import_cycles", "comments", "credentials", "links", "rename_preview", "release_notes", "release_check", "move_preview", "commit_check", "commit_hook_install", "commit_hook_uninstall", "setup_audit", "redirect_proposals", "redirect_decide", "junk", "deps"]},
+                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "layers", "affected_tests", "pr_impact", "pr_impact_comment", "hotspots", "dead_code", "import_cycles", "comments", "credentials", "links", "rename_preview", "release_notes", "release_check", "move_preview", "upgrade_preview", "delete_preview", "commit_check", "review_tree", "commit_hook_install", "commit_hook_uninstall", "setup_audit", "redirect_proposals", "redirect_decide", "junk", "deps"]},
                 "ids": {"type": "array", "items": {"type": "string"}, "description": "redirect_decide: proposal ids from redirect_proposals (accepted ids for remove)"},
                 "decision": {"type": "string", "enum": ["accept", "instruct", "reject", "remove"], "description": "redirect_decide: accept redirects matching calls to smart_search; instruct lets them run with a tip naming smart_search; reject discards; remove deletes an accepted pattern"},
                 "finding_id": {"type": "string"},
@@ -428,9 +430,11 @@ TOOLS = [
                 "base": {"type": "string", "default": "HEAD", "description": "affected_tests: git revision the changes are compared with (HEAD = uncommitted work; main or origin/main for a branch); release_notes: tag, branch or commit the draft starts from (default: the latest tag, and it fails when there is none)"},
                 "pr": {"type": "integer", "minimum": 1, "description": "pr_impact_comment: number of the pull request to comment on"},
                 "hook": {"type": "string", "enum": ["pre-commit", "pre-push"], "default": "pre-commit", "description": "commit_hook_install and commit_hook_uninstall: the git hook to write or remove"},
-                "symbol": {"type": "string", "description": "graph: function, Class.method, class name or path::name to get its callers, calls, tests and importers; docs: where that function is documented; rename_preview: the function to rename"},
-                "path": {"type": "string", "description": "move_preview: the file or folder to move, relative to the project folder (it must exist)"},
-                "to": {"type": "string", "description": "move_preview: where it would move, relative to the project folder (it must not exist)"},
+                "docs": {"type": "boolean", "default": False, "description": "commit_hook_install with hook=pre-push: also list, at every push, the public functions of the pushed range that lack a docstring or the Feature line; it is written into the hook, and installing again without it writes the plain hook"},
+                "symbol": {"type": "string", "description": "graph: function, Class.method, class name or path::name to get its callers, calls, tests and importers; docs: where that function is documented; rename_preview: the function to rename; delete_preview: the function or class of path to delete (omit it to delete the whole file)"},
+                "path": {"type": "string", "description": "move_preview: the file or folder to move, relative to the project folder (it must exist); delete_preview: the file to delete, or the file that defines symbol (it must exist)"},
+                "to": {"type": "string", "description": "move_preview: where it would move, relative to the project folder (it must not exist); upgrade_preview: the target version of the package (optional)"},
+                "package": {"type": "string", "description": "upgrade_preview: the dependency as a manifest names it (for example requests or @scope/name); it must be declared in a manifest of the project"},
                 "depth": {"type": "integer", "minimum": 1, "maximum": 4, "default": 3, "description": "graph with symbol: call hops searched for tests"},
                 "project_root": {"type": "string"}, "project_id": {"type": "string"},
                 "job_id": {"type": "string"}, "watch": {"type": "boolean"},
@@ -491,6 +495,12 @@ TOOLS = [
                             "description": "mode=dossier only: also search the messages of the project's commits that have a body (hits with source git and id git:<hash>); the first read of a repository can take longer than timeout_ms"},
                 "decision_notes": {"type": "boolean", "default": False,
                                    "description": "mode=search only: append the project's decision notes (docs/research, the backlog, CLAUDE.md, AGENTS.md and commit messages) under decision_notes"},
+                "queries": {"type": "array", "minItems": 1, "maxItems": search_queries.MAX_QUERIES,
+                            "items": {"type": "object", "additionalProperties": False, "properties": {
+                                "query_identifiers": {"type": "string"}, "query_comments": {"type": "string"},
+                                "doc_query": {"type": "string"},
+                                "folder": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}, "maxItems": 10}]}}},
+                            "description": "Instead of query_identifiers, query_comments and doc_query (not together): up to 5 searches in one call, each with its own query fields and folder; the other arguments are shared. One section per query, run in turn; a failing query shows an ERROR line"},
             },
             "required": ["project_root"],
         },
@@ -659,6 +669,32 @@ TOOLS = [
                 "info_only": {"type": "boolean", "default": False, "description": "Return only the facts (type, size, counts, estimated tokens), no text"},
             },
             "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "read_document_many",
+        "description": (
+            "Reads up to 8 documents in one call, each exactly as read_document reads it (same types, size limits and "
+            "http(s) URLs, local paths or URLs mixed), 4 at a time, and returns one block per entry, in the order given: "
+            "the read_document answer, or an ERROR line with the reason. The same range, max_chars and info_only apply to "
+            "every document: a range such as `1-3` reads those pages, slides, parts or chapters of each one, and a "
+            "document it does not fit (a 2-page PDF asked for `5`) fails alone with its reason while the others are read; "
+            "max_chars is the cap per document, so the whole answer can reach 8 times that. A document that fails never "
+            "hides the others; the call fails as a whole only when every document failed. An entry repeated is read once. "
+            "Use it instead of several read_document calls for the same range, or with info_only to size a set of files "
+            "before choosing what to read; use read_document for one document or a different range per document."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "paths": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": read_document_many.MAX_DOCUMENTS,
+                          "description": "Absolute paths of .pdf, .docx, .pptx, .xlsx, .html, .htm, .csv or .epub files, or http(s) URLs of documents"},
+                "range": {"type": "string", "description": "Applied to every document: pages, slides, parts, chapters or sheets to read, `3`, `3-5`, `7-`, `-4` or a comma list like `1,4-6`; a sheet name also works for a workbook. Default: from the first one"},
+                "max_chars": {"type": "integer", "minimum": 1000, "maximum": document_read.MAX_CHARS_LIMIT, "default": document_read.DEFAULT_MAX_CHARS, "description": "Cap of the text returned for each document (about four characters per token)"},
+                "info_only": {"type": "boolean", "default": False, "description": "Return only the facts of each document (type, size, counts, estimated tokens), no text"},
+            },
+            "required": ["paths"],
             "additionalProperties": False,
         },
     },
@@ -1945,6 +1981,8 @@ def _handle_smart_search(arguments):
     if mode != "search":
         raise ValueError("mode must be search or dossier.")
     arguments = {key: value for key, value in arguments.items() if key != "mode"}
+    if "queries" in arguments:
+        return _handle_search_queries(arguments)
     want_notes = arguments.pop("decision_notes", False)
     if not isinstance(want_notes, bool):
         raise ValueError("decision_notes must be true or false.")
@@ -1968,6 +2006,30 @@ def _handle_smart_search(arguments):
         result = future.result()
     _mark_notice_delivered(job_id)
     return _with_decision_notes(result, arguments["project_root"], notes_text) if want_notes else result
+
+
+def _handle_search_queries(arguments):
+    """smart_search with `queries`: each query through `_handle_smart_search`, one after the other, and the per-query
+    report of search_queries.render. A query that fails (or is still pending: its section carries the job id) never
+    hides the others; the call fails with the report only when every query failed."""
+    started = time.monotonic()
+    try:
+        expanded = search_queries.expand(arguments)
+    except ValueError as exc:
+        _metric("reject", kind="queries", message=str(exc)[:200])
+        raise
+    results = []
+    for label, query_arguments in expanded:
+        try:
+            results.append({"label": label, "ok": True, "text": _handle_smart_search(query_arguments)})
+        except Exception as exc:
+            results.append({"label": label, "ok": False, "error": str(exc) or type(exc).__name__})
+    failed = sum(not result["ok"] for result in results)
+    _metric("search_queries", queries=len(results), failed=failed, elapsed_s=round(time.monotonic() - started, 2))
+    report = search_queries.render(results)
+    if failed == len(results):
+        raise RuntimeError(report)
+    return report
 
 
 def _with_decision_notes(result, root, text):
@@ -2585,7 +2647,7 @@ def _project_action(arguments):
     action = arguments.get("action", "list")
     if action == "probe":
         return _probe_index_models()
-    if action in ('graph','compare','duplicates','duplicates_dismiss','duplicates_restore','docs','layers','affected_tests','pr_impact','pr_impact_comment','hotspots','dead_code','import_cycles','comments','credentials','links','rename_preview','release_notes','release_check','move_preview','commit_check'):
+    if action in ('graph','compare','duplicates','duplicates_dismiss','duplicates_restore','docs','layers','affected_tests','pr_impact','pr_impact_comment','hotspots','dead_code','import_cycles','comments','credentials','links','rename_preview','release_notes','release_check','move_preview','upgrade_preview','delete_preview','commit_check','review_tree'):
         # Análise somente leitura pode demorar; não prende o lock global de ações.
         key=arguments.get('project_id')
         if not isinstance(key,str) or not re.fullmatch(r'[a-f0-9]{16}',key):
@@ -2640,6 +2702,13 @@ def _project_action(arguments):
         if action=='commit_check':
             import commit_check
             return commit_check.review(project['root'])
+        if action=='review_tree':
+            import review_tree
+            return review_tree.review(project['root'])
+        if action=='delete_preview':
+            import delete_preview
+            limit=_parse_bounded_int(arguments.get('limit'),default=30,min_v=1,max_v=200,field_name='limit')
+            return delete_preview.preview(project['root'],arguments.get('path'),arguments.get('symbol'),arguments.get('view_id'),limit)
         if action=='release_notes':
             import release_notes
             limit=_parse_bounded_int(arguments.get('limit'),default=30,min_v=1,max_v=200,field_name='limit')
@@ -2648,6 +2717,9 @@ def _project_action(arguments):
             import release_check
             limit=_parse_bounded_int(arguments.get('limit'),default=30,min_v=1,max_v=200,field_name='limit')
             return release_check.check(project['root'],limit)
+        if action=='upgrade_preview':
+            limit=_parse_bounded_int(arguments.get('limit'),default=30,min_v=1,max_v=200,field_name='limit')
+            return _upgrade_preview(project['root'],arguments,limit)
         if action=='move_preview':
             import move_preview
             limit=_parse_bounded_int(arguments.get('limit'),default=30,min_v=1,max_v=200,field_name='limit')
@@ -2785,8 +2857,12 @@ def _project_action_locked(arguments):
         raise ValueError("Project not registered.")
     if action in ("commit_hook_install", "commit_hook_uninstall"):
         import commit_check
-        return (commit_check.install_hook if action == "commit_hook_install" else commit_check.uninstall_hook)(
-            project["root"], arguments.get("hook", commit_check.DEFAULT_HOOK))
+        if action == "commit_hook_install":
+            return commit_check.install_hook(project["root"], arguments.get("hook", commit_check.DEFAULT_HOOK),
+                                             arguments.get("docs", False))
+        if "docs" in arguments:
+            raise ValueError("docs is an option of commit_hook_install; commit_hook_uninstall takes only hook.")
+        return commit_check.uninstall_hook(project["root"], arguments.get("hook", commit_check.DEFAULT_HOOK))
     if action == "status":
         if arguments.get("resolved_from"):
             return {"project": _project_payload(project), "resolved_from": arguments["resolved_from"],
@@ -4494,6 +4570,23 @@ def _handle_web_fetch(arguments):
     return _sanitize_text(f"Source: {page['final_url']} (read at {read_at}, {origin}{cut})\n\n{text}")
 
 
+def _upgrade_preview(root, arguments, limit):
+    """`upgrade_preview.preview` with the release-notes readers of `web_fetch` when the network use that tool needs
+    (a ready gateway with a router model) is available, and the reason it is not otherwise; asked only when a target
+    version is given."""
+    import upgrade_preview
+    web, problem = None, ""
+    if arguments.get("to") is not None:
+        problem = _web_fetch_unavailable()
+        if not problem:
+            web = upgrade_preview.Web(
+                page=lambda url: web_fetch.read_page(url, time.monotonic() + WEB_FETCH_TIMEOUT_S, lambda *_: "")["text"],
+                answer=lambda urls, prompt: web_fetch_many.read_many(
+                    urls, prompt, lambda url, text: _handle_web_fetch({"url": url, "prompt": text})))
+    return upgrade_preview.preview(root, arguments.get("package"), arguments.get("to"), arguments.get("view_id"), limit,
+                                   web, problem or "")
+
+
 def _handle_web_fetch_many(arguments):
     """Several URLs with one prompt, each through `_handle_web_fetch`: the per-URL report of web_fetch_many.render, and an
     error carrying that report when no URL could be read."""
@@ -4755,7 +4848,8 @@ def _pre_push_hook(handler):
     try:
         import push_check
         payload, project = _git_hook_request(handler)
-        return {"ok": True, **push_check.review(project["root"], payload.get("remote"), payload.get("ranges"))}
+        return {"ok": True, **push_check.review(project["root"], payload.get("remote"), payload.get("ranges"),
+                                                payload.get("docs", False))}
     except Exception as exc:
         _log(f"Pre-push review failed: {type(exc).__name__}: {exc}")
         return {"ok": False, "error": f"{type(exc).__name__}: {_sanitize_text(str(exc))}"}
@@ -4812,8 +4906,33 @@ def _handle_read_document(arguments):
     return _sanitize_text(text)
 
 
+def _handle_read_document_many(arguments):
+    """Several documents with the same range and limits, each through `_handle_read_document`: the per-document report of
+    read_document_many.render, and an error carrying that report when no document could be read."""
+    unknown = sorted(set(arguments) - {"paths", *read_document_many.SHARED_FIELDS})
+    if unknown:
+        raise ValueError(f"read_document_many does not take {', '.join(unknown)}")
+    paths = arguments.get("paths")
+    shared = {key: arguments[key] for key in read_document_many.SHARED_FIELDS if key in arguments}
+    started = time.monotonic()
+    try:
+        read_document_many.check(paths, shared)
+    except ValueError as exc:
+        _metric("read_document_many", error=type(exc).__name__, elapsed_s=round(time.monotonic() - started, 2))
+        raise
+    results = read_document_many.read_many(paths, lambda path: _handle_read_document({"path": path, **shared}))
+    failed = sum(not result["ok"] for result in results)
+    _metric("read_document_many", documents=len(results), distinct=read_document_many.distinct(paths), failed=failed,
+            elapsed_s=round(time.monotonic() - started, 2))
+    report = _sanitize_text(read_document_many.render(results))
+    if failed == len(results):
+        raise RuntimeError(report)
+    return report
+
+
 _TOOL_HANDLERS = {
     "read_document": _handle_read_document,
+    "read_document_many": _handle_read_document_many,
     "web_fetch": _handle_web_fetch,
     "web_fetch_many": _handle_web_fetch_many,
     "project_manage": _handle_project_manage,

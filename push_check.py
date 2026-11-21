@@ -4,13 +4,20 @@ Per pushed range it joins what Smart Tool already computes for a change set: the
 impact summary (`pr_impact.report`, with the commit the remote holds as its base). The hook that asks for it never blocks
 a push; a range that cannot be analyzed is said with its reason, never dropped silently.
 """
+import os
 import re
 
 import affected_tests
+import doc_check
+import doc_scope
+import doc_validate
+import index_profile
+import index_scope
 import pr_impact
 import removed_callers
 
 MAX_RANGES = 3
+MAX_DOC_FILES = 50
 REPORT_LIMIT = 15
 MAX_LISTED = 8
 DECISION_FUNCTIONS = 3
@@ -111,9 +118,69 @@ def _summary(report):
     return lines
 
 
-def _range_lines(root, remote, pushed):
+def _public_touched(root, base):
+    """The public functions of the code files the range changes that the range adds or edits, as the documentation
+    rule sees them (`doc_check.functions`: public by the language convention, not nested, not an override).
+
+    Returns: tuple (list of dicts `path`, `name`, `documented`, `anchor`; int code files past MAX_DOC_FILES that were
+    not read).
+    """
+    changes = affected_tests._changes(root, base)
+    profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile"))
+    paths = [path for path, change in sorted(changes.items())
+             if change["status"] != "deleted" and doc_check.supported(path) and index_profile.kind(path, profile) == "code"]
+    found = []
+    for path in paths[:MAX_DOC_FILES]:
+        try:
+            with open(os.path.join(root, *path.split("/")), encoding="utf-8") as stream:
+                source = stream.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        functions = [f for f in doc_check.functions(path, source) if f.get("kind", "function") in ("function", "method")]
+        anchors, lines = doc_scope.anchor_ids(functions, path), changes[path]["lines"]
+        found += [{"path": path, "name": f["name"], "documented": f["documented"], "anchor": anchors[f["start"]]}
+                  for f in functions if f["required"]
+                  and (lines is None or lines.intersection(range(f["start"], f["end"] + 1)))]
+    return found, max(len(paths) - MAX_DOC_FILES, 0)
+
+
+def _docs_lines(root, base):
+    """The documentation section of a pushed range (the `docs=true` option of the hook): the public functions the range
+    adds or edits that have no docstring or whose technical entry under docs/scope has no Feature line or does not exist.
+    A section with nothing to say is left out; a check that could not run is said."""
+    try:
+        functions, left = _public_touched(root, base)
+        if not functions:
+            return []
+        generated = os.path.isdir(os.path.join(root, doc_scope.DOCS_DIR))
+        sections = doc_validate.technical_sections(root) if generated else {}
+        problems = []
+        for item in functions:
+            label = f"{item['path']}::{item['name']}"
+            if not item["documented"]:
+                problems.append(f"{label}: no docstring")
+            if not generated:
+                continue
+            entry = sections.get(item["anchor"])
+            if entry is None:
+                problems.append(f"{label}: no entry in {doc_scope.DOCS_DIR}, regenerate it")
+            elif not doc_validate.has_feature_line(entry):
+                problems.append(f"{label}: its technical entry has no Feature line")
+        lines = _listed("Public functions of the range without documentation:", problems) if problems else []
+        if not generated:
+            lines.append(f"Feature lines not checked: {doc_scope.DOCS_DIR} does not exist here "
+                         "(project_manage action=docs generate=true).")
+        if left:
+            lines.append(f"{left} changed code file(s) were not read for documentation: the check reads the first "
+                         f"{MAX_DOC_FILES}.")
+        return lines
+    except Exception as exc:
+        return [f"The documentation check failed: {type(exc).__name__}: {exc}"]
+
+
+def _range_lines(root, remote, pushed, docs=False):
     """The lines for one pushed range; empty for a deletion or a range with nothing new, a sentence with the reason for
-    a range that cannot be analyzed."""
+    a range that cannot be analyzed. With `docs` the documentation section follows the summary."""
     if _unborn(pushed["local"]):
         return []
     title = f"Smart Tool push review of {pushed['local_ref']}"
@@ -126,25 +193,28 @@ def _range_lines(root, remote, pushed):
         lines = [f"{title} against {base[:10]}:"]
         if affected_tests._git(root, "status", "--porcelain").strip():
             lines.append("The working tree has uncommitted changes; the review includes them.")
-        return lines + _summary(pr_impact.report(root, base, REPORT_LIMIT)) + \
+        return lines + _summary(pr_impact.report(root, base, REPORT_LIMIT)) + (_docs_lines(root, base) if docs else []) + \
             [f"Full report: project_manage action=pr_impact base={base[:10]}"]
     except Exception as exc:
         return [f"{title}: the review failed: {type(exc).__name__}: {exc}"]
 
 
-def review(root, remote, ranges):
+def review(root, remote, ranges, docs=False):
     """Reviews what a push of `ranges` sends from the repository at `root` to `remote`.
 
     Parameters: root (str) project folder, inside a git repository; remote (str) the remote's name or URL as git passes
-    it to the hook ("" when unknown); ranges (list) as `ranges_from` takes them.
+    it to the hook ("" when unknown); ranges (list) as `ranges_from` takes them; docs (bool) add the documentation
+    section of each range.
     Returns: dict with `text` (what the hook prints; empty when there is nothing to say) and `ranges` (how many were
     looked at; those past MAX_RANGES are named, not analyzed).
-    Raises: ValueError when `ranges` is malformed.
+    Raises: ValueError when `ranges` is malformed or `docs` is not a boolean.
     """
+    if type(docs) is not bool:
+        raise ValueError("docs must be true or false")
     ranges = ranges_from(ranges)
     lines = []
     for pushed in ranges[:MAX_RANGES]:
-        lines += _range_lines(root, remote if isinstance(remote, str) else "", pushed)
+        lines += _range_lines(root, remote if isinstance(remote, str) else "", pushed, docs)
     if len(ranges) > MAX_RANGES:
         lines.append(f"{len(ranges) - MAX_RANGES} more pushed range(s) were not reviewed: the review reads the first "
                      f"{MAX_RANGES}.")

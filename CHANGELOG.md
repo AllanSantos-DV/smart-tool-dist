@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.9.86 - beta
+
+- `project_manage action=upgrade_preview` with `package` (and optionally `to`) says what bumping a dependency changes
+  before its manifest is edited: where the manifests declare it with the current version (the lockfile's when it
+  satisfies the range, read with the manifest parsing of the dependency notice), the OSV advisories of the current and
+  the target version with the ones the target fixes or adds (the lookup shared with the edit notice; an unavailable one is
+  said in the answer, never shown as clean), the changelog or release notes of the target, and the tests that import the
+  package or reach a file that does. The notes are read through the `web_fetch` path only when the network use that tool
+  needs is available; without it, or without `to`, the rest is answered and the reason is given. It refuses a package no
+  manifest declares and edits nothing. Rules followed from `docs/research/2026-11-21-notas-de-decisao-na-leitura.md`
+  (`docs/research/2026-11-22-upgrade-preview-e-docs-no-pre-push.md`). Tests: `tests/test_upgrade_preview.py`.
+- `commit_hook_install` takes `docs=true` for `hook=pre-push`: at every push the hook also lists the public functions of
+  the pushed range that have no docstring or whose technical entry under `docs/scope` has no `Feature` line. The option is
+  written into the hook as the `--docs` flag, installing again without it writes the plain hook, and without the option the
+  hook text and the review are byte for byte what they were; the push is still never blocked and no port is written. Tests:
+  `tests/test_pre_push_docs.py`.
+- `project_manage action=delete_preview` with `path` (and optionally `symbol`) lists what deleting a file, or one function
+  or class of it, would break, before the deletion. For a file: the modules importing it, the links with their anchors,
+  the README and `docs` lines that write its path, the `docs/scope` anchors and the tests that reach it, read the way
+  `move_preview` reads them. For a symbol: the call sites that would still name it (from the code graph, by name, imports
+  of the name and calls left in the same file, with the methods that go with a class) and the tests that reach it. It
+  refuses a path that does not exist or is a folder and a symbol the path does not define, and deletes nothing. Tests:
+  `tests/test_delete_preview.py`.
+- `project_manage action=review_tree` reviews the uncommitted working tree the way `commit_check` reviews the staged
+  change: the tracked files changed since `HEAD`, read from disk, through the same notes, the same 50-file cap and the
+  same text-only rule; it says plainly when the tree is clean. `commit_check` and the pre-commit hook are unchanged.
+  Rule followed from `docs/research/2026-11-21-notas-de-decisao-na-leitura.md`
+  (`docs/research/2026-11-22-delete-preview-e-review-tree.md`). Tests: `tests/test_review_tree.py`.
+- New tool `read_document_many`, the sister of `read_document` as `web_fetch_many` is of `web_fetch`: up to 8 documents
+  (local paths or http(s) URLs, mixed) in one call, 4 at a time, each read exactly as `read_document` reads it (size
+  limits, URL download and 24 h kept copy, answer). One block per entry in the order given, the `read_document` answer or
+  an `ERROR` line with the reason; an entry repeated is read once; the call fails only when every document failed. `range`,
+  `max_chars` and `info_only` are the `read_document` arguments applied to every document: a range that does not fit one
+  document fails that document alone, `max_chars` caps each document, and a malformed argument fails the call before
+  anything is read. Opt-in and not loaded upfront, like `read_document`, which is unchanged; the pool moved from
+  `web_fetch_many` into a function both use. Reason: `docs/research/2026-11-21-web-fetch-many-medicao.md` measured many
+  reads per turn, mostly in sequential rounds (`docs/research/2026-11-22-read-document-many-e-lote-de-buscas.md`). Tests:
+  `tests/test_read_document_many.py`.
+- `smart_search` takes an optional `queries`: up to 5 objects, each with its own `query_identifiers`, `query_comments`,
+  `doc_query` and `folder`, while `project_root`, `group`, `top_k`, `detail`, `layer`, `single_language_reason` and
+  `decision_notes` are set once. Each query runs through the ordinary search one after the other and the answer has one
+  section per query, in order; a query that fails shows an `ERROR` line, one still running shows its job id, and the call
+  fails only when every query failed. `queries` next to `query_identifiers`, `query_comments` or `doc_query`, more than 5
+  queries, or a query with any other field fails before a search runs. Without `queries` the answer is byte for byte what
+  it was (`docs/research/2026-11-22-read-document-many-e-lote-de-buscas.md`). Tests: `tests/test_search_queries.py`.
+
 ## 0.9.85 - beta
 
 - `web_search` takes two optional parameters, `fetch_top` (0 = off, the default, to 8) and `fetch_prompt`: with

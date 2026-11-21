@@ -37,11 +37,17 @@ def read_many(urls, prompt, fetch_one):
     every position gets its result. Each read runs in a copy of the caller's context, so the request attribution and
     the model-failure collection of the tool call follow it into the pool."""
     keys = [web_fetch.normalize(url) for url in urls]
-    distinct = list(dict.fromkeys(keys))
-    with concurrent.futures.ThreadPoolExecutor(min(WORKERS, len(distinct)), thread_name_prefix="web-fetch-many") as pool:
-        futures = {key: pool.submit(contextvars.copy_context().run, fetch_one, key, prompt) for key in distinct}
-    outcomes = {key: _outcome(future) for key, future in futures.items()}
+    outcomes = read_pool({key: key for key in keys}, lambda key: fetch_one(key, prompt))
     return [{"url": url, **outcomes[key]} for url, key in zip(urls, keys)]
+
+
+def read_pool(jobs, read_one):
+    """Runs `read_one(argument)` for every entry of `jobs` ({key: argument}) in a pool of at most WORKERS threads, each in
+    a copy of the caller's context. Returns {key: {"ok": True, "text"} or {"ok": False, "error"}}: a read that raises is
+    reported under its key and never stops the others."""
+    with concurrent.futures.ThreadPoolExecutor(min(WORKERS, len(jobs)), thread_name_prefix="read-many") as pool:
+        futures = {key: pool.submit(contextvars.copy_context().run, read_one, argument) for key, argument in jobs.items()}
+    return {key: _outcome(future) for key, future in futures.items()}
 
 
 def _outcome(future):

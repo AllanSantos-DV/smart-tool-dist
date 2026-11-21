@@ -101,6 +101,21 @@ def _sections(text):
     return found
 
 
+def technical_sections(root):
+    """The anchored sections of the technical pages under docs/scope: anchor -> section of `_sections`; empty when the
+    folder holds none."""
+    found = {}
+    for rel, text in _pages(root).items():
+        if rel.startswith("technical/"):
+            found.update(_sections(text))
+    return found
+
+
+def has_feature_line(section):
+    """Whether a technical entry (a section of `_sections`) carries its `- Feature: ` line."""
+    return any(line.startswith("- Feature: ") for _number, line in section["body"])
+
+
 def _links(rel, text):
     """Links of a page: (line, label, target path, anchor or None); external links (with a scheme) left out."""
     found = []
@@ -220,7 +235,7 @@ class _Validation:
             for anchor, section in found.items():
                 if anchor not in self.model.function_of:
                     continue
-                if not any(l.startswith("- Feature: ") for _n, l in section["body"]):
+                if not has_feature_line(section):
                     check.fail(f"{rel}:{section['line']}", f"`{anchor}` has no Feature line")
                 for number, line in section["body"]:
                     kind = "" if line.startswith("- Feature: ") else "possible " if line.startswith(
