@@ -512,7 +512,9 @@ def _warm(root,key):
             _WARMING.discard(root)
 
 
-def build(root,view_id=None,storage_id=None,file_path=None,background=False):
+def build(root,view_id=None,storage_id=None,file_path=None,background=False,shared=False):
+    """Graph of an indexed view. shared=True returns a new top-level dict over the cached lists instead of a deep copy
+    (read-only for the caller; the file records are copied because their status is set per call)."""
     inventory=index_inventory.inspect(root,view_id,storage_id=storage_id)
     if not inventory['selected']:
         return {**inventory,'symbols':[],'dependencies':[],'calls':[],'diagnostics':[],'counts':{}}
@@ -543,7 +545,9 @@ def build(root,view_id=None,storage_id=None,file_path=None,background=False):
                 _CACHE[key]=cached
                 while len(_CACHE)>3:_CACHE.popitem(last=False)
             save_note=_disk_save(key,cached)
-    data=copy.deepcopy(cached)
+    if shared:
+        data=dict(cached);data['files']=[dict(f) for f in cached['files']]
+    else:data=copy.deepcopy(cached)
     if save_note:data['diagnostics']=[*data.get('diagnostics',[]),{'path':'','reason':save_note}]
     # Só compara metadados do diretório de trabalho quando a visão é a atual.
     for file in data['files']:
@@ -655,7 +659,7 @@ def build_current(root,view_id=None,shared=False):
     inventory=index_inventory.inspect(root,view_id)
     selected=inventory.get('selected') or {}
     changes=pending_changes(root,selected['path']) if selected.get('current') else {}
-    return build_overlay(root,changes,view_id,shared) if changes else build(root,view_id)
+    return build_overlay(root,changes,view_id,shared) if changes else build(root,view_id,shared=shared)
 
 
 def build_overlay(root,changes,view_id=None,shared=False):

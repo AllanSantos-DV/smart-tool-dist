@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.84 - beta
+
+- The description of `project_manage` now says what `docs` generates since 0.9.82: the Feature line of each technical entry, the
+  body and docstring stamps, the `chain` check and the end-of-turn rewrite. Tests: `tests/test_doc_chain.py`.
+- A read of the code graph that asks for the shared copy (`shared=True`: health, impact, rename preview, removed callers,
+  layers, documentation scope) no longer deep-copies the whole cached graph when the indexed view has no pending changes;
+  only the file records, whose status is set per call, are copied. The flag was dropped on that path, so every such query
+  paid the copy (0.33 s to 3.93 s at one to four times the limits). Tests: `tests/test_graph_cache.py`.
+
 ## 0.9.83 - beta
 
 - Commit check, opt-in: `project_manage action=commit_check` reviews the staged change (`git diff --cached`) with the
