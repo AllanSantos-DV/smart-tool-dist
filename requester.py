@@ -13,7 +13,7 @@ import json
 import threading
 import time
 
-WEB_TOOLS = ("web_search", "web_fetch")
+WEB_TOOLS = ("web_search", "web_fetch", "web_fetch_many")
 PROJECT_TOOLS = ("smart_search", "smart_scout", "project_manage")
 NOTE_TTL_S = 60
 MAX_NOTES = 256

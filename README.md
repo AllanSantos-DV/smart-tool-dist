@@ -8,7 +8,8 @@ A local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharpe
 | `smart_scout` | Answers a question about the code with the lines that answer it: reads the candidate files inside Smart Tool and returns `path:lines` with the literal text, so the files never enter the agent's context; with a `scout_model`, a small model also writes a short answer and keeps only the lines that support it; a question about why something is as it is (why, reason, decided) also lists up to three decision notes from the notes the project keeps about its intent, as ids with one excerpt each |
 | `web_search` / `web_search_result` | Web search across several sources in parallel, in the query language and in English, with a cache shared across sessions; `depth="research"` runs a multi-round research loop |
 | `web_fetch` | Reads a known URL and returns only the answer to your prompt, written by a small model; pages are cached for 24 h. Pages over 60,000 characters are not cut: the model reads the parts closest to the prompt (needs an `embedding_model`) |
-| `read_document` | Reads a PDF, Word, PowerPoint, Excel, HTML, CSV or EPUB file as compact text, a range at a time: type, size, page/slide/sheet/part/chapter count and estimated tokens first, then only the units asked for (`range="3-5"`), so the file never enters the agent's context whole. Opt-in: the native Read is not redirected. Scanned PDFs fail with that reason (no OCR) |
+| `web_fetch_many` | Reads up to 8 known URLs in one call with the same prompt, 4 at a time, each exactly as `web_fetch` reads it (24 h cache, browser for JavaScript pages, public addresses only). One block per URL in the order given: the answer, or an `ERROR` line with the reason, so a URL that fails never hides the others; a repeated URL is read once |
+| `read_document` | Reads a PDF, Word, PowerPoint, Excel, HTML, CSV or EPUB file as compact text, a range at a time: type, size, page/slide/sheet/part/chapter count and estimated tokens first, then only the units asked for (`range="3-5"`), so the file never enters the agent's context whole. The path can also be an `http(s)` URL of a PDF, Word, PowerPoint, Excel, CSV or EPUB file: it is downloaded the way `web_fetch` downloads (public addresses only, 5 MB cap), kept for 24 hours and read with the same ranges and token estimate; a URL of a web page fails and points to `web_fetch`. Opt-in: the native Read is not redirected. Scanned PDFs fail with that reason (no OCR) |
 | `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage; `graph` with `symbol` tells what changing a function touches: callers, calls, the tests that reach it and the files that import it |
 
 Agents that must click, type or log in also get Microsoft's [Playwright MCP](https://github.com/microsoft/playwright-mcp),
@@ -17,7 +18,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.82 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.83 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -84,7 +85,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.82 install
+npx @allansantos-dev/smart-tool@0.9.83 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -303,6 +304,28 @@ Redirects) and Maintenance (Setup audit, Startup).
    value; `links` lists the relative links in tracked HTML and Markdown files that point to a missing file, and the ones
    it could not decide (root-relative, template expressions, pages with a `<base>` element) as unchecked, not broken.
    Each takes `limit` and writes nothing.
+   **Rename preview**: `project_manage action=rename_preview symbol=...` answers, before a function is renamed, with its
+   definitions (file and lines), its callers with line (including calls the graph left unresolved under that name), the
+   tests that reach it, the files importing its module, the `path::name` anchors of `docs/scope` that would go stale and
+   the lines of the README and `docs` text that name it (`path::name`, `module.name`, the name in backticks, or a
+   compound name; a plain word alone is not counted). A symbol that is not found fails with the closest names. Static
+   analysis does not see strings or dynamic access, so search the old name as text too. Takes `limit`, writes nothing.
+   **Release notes draft**: `project_manage action=release_notes` (optional `base`, default the latest tag; no tag and no
+   `base` is an error) returns a Markdown section headed `## Draft since <base>` built without a model: the commit
+   subjects since the base, the public functions the diff touches with their caller and test counts, the decision notes
+   that name them and the documentation entries the diff leaves out of date, the same builders `pr_impact` uses. It
+   writes no prose of its own, so the agent or the maintainer words the notes from it. Takes `limit`, writes nothing.
+   **Commit check** (opt-in): `project_manage action=commit_check` reviews the staged change (`git diff --cached`, not the
+   working tree) with the notes the edit hook gives a finished diff (credentials, commented-out code, missing docstrings,
+   duplicates, dependency advisories, link and edit notes), so edits the agent hook never saw (an IDE, hand edits,
+   another agent) are reviewed before they reach the commit. `action=commit_hook_install` writes a git `pre-commit` hook
+   in the project that prints that review to stderr at every commit; it never blocks: the exit status is always 0, a
+   daemon that is down is one line (`Smart Tool is not running, commit not reviewed`) and a check that fails is
+   printed. The hook finds the daemon through its run file, never through a port. The install refuses, naming what it
+   found and changing nothing, when `core.hooksPath` is set, husky is used (a `.husky` folder or `husky` in
+   `package.json`) or a `pre-commit` that is not Smart Tool's exists; an older hook of ours is backed up first.
+   `action=commit_hook_uninstall` removes only that hook (identified by its marker line) and puts back a backed-up hook
+   that is not ours. In a worktree or submodule the hook goes where `git rev-parse --git-path hooks` points.
 
    **Layers on edit**: when the project has confirmed layers (`.smart-tool/layers.json`), an edit that adds a call from
    a lower layer to a function of a higher one is flagged to the agent; it never blocks. `layer_mode` in
@@ -319,6 +342,14 @@ Redirects) and Maintenance (Setup audit, Startup).
    network, no model, no git history, 300 ms per function), says when it fails or is cut, and never blocks.
    `decision_mode` in `config.json`: `warn` (default) or `off`, also on the setup screen. The measurement behind the rule is
    in `docs/research/2026-11-18-decision-notes-keyword-quality.md`.
+   **Recorded decisions on read**: a native `Read` of a code file of a registered project names the same notes for the
+   first three functions the file defines in the cached code graph, as context before the agent plans an edit. It is the
+   same rule and the same limits (two notes each, files only, 300 ms per function), and it adds a latency budget: the
+   graph is read only when it is already cached, so no analysis starts and nothing waits for one, and a project with
+   nothing cached, a file that is not code, a file outside a project and a file no note names get no line at all. A range
+   read (`offset`, `limit`) gets the note too. It follows `decision_mode` (`off` says nothing), is context only whatever
+   `hook_mode` says, and never blocks the read. About 80 to 115 ms per read on this repository
+   (`docs/research/2026-11-21-notas-de-decisao-na-leitura.md`).
 
    **Folder and layer in a search**: `smart_search folder="<path>"` (or a list) and `layer="<name>"` restrict the
    search to a folder of the project or to one of its confirmed layers, by their path globs. The filter runs before
@@ -482,7 +513,7 @@ fails to load is listed in the setup screen with its error and does not affect t
 ## Uninstall
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.82 uninstall [--target DIR] [--keep-data]
+npx @allansantos-dev/smart-tool@0.9.83 uninstall [--target DIR] [--keep-data]
 ```
 
 It asks nothing and opens no window. It stops the tray and the daemon, removes the logon task, the hook entries of Smart

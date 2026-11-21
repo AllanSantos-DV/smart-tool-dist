@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.9.83 - beta
+
+- Commit check, opt-in: `project_manage action=commit_check` reviews the staged change (`git diff --cached`) with the
+  notes the edit hook gives a finished diff, and `action=commit_hook_install` writes a git `pre-commit` hook that prints
+  them to stderr at every commit, for edits the agent hook never saw. The hook never blocks (exit 0 always): a daemon
+  that is down is one line, `Smart Tool is not running, commit not reviewed`, and a check that fails is printed. It finds
+  the daemon through its run file, never through a port. The install refuses and changes nothing when `core.hooksPath`
+  is set, husky is used or a `pre-commit` that is not ours exists; `action=commit_hook_uninstall` removes only our own
+  hook and puts back a backed-up hook that is not ours. Tests: `tests/test_commit_check.py`.
+- New tool `web_fetch_many`: up to 8 URLs with one prompt in one call. Each URL goes through the same path as
+  `web_fetch` (24 h cache, failure memory, browser for JavaScript pages, public addresses only, answer of the
+  gateway model), 4 at a time, and the reply holds one block per URL in the order given: the answer, or an `ERROR`
+  line with the reason, so a URL that fails (an internal address, a 404, a page without text) never hides the others
+  and is released to the native `WebFetch` for 10 minutes like a failed `web_fetch`. A URL repeated (same address
+  without the fragment) is read once; more than 8 URLs, a malformed list or an empty prompt fail the whole call before
+  anything is read; the call fails as a whole only when every URL failed, with the report as its text. `web_fetch` and
+  the redirect of the native `WebFetch` are unchanged; the tool is not a redirect target and loads on demand. Measured
+  before the build: in 843 turns of local Claude Code transcripts that fetched a page, 621 fetched two or more and 512 spread
+  them over several assistant messages (`docs/research/2026-11-21-web-fetch-many-medicao.md`). Tests:
+  `tests/test_web_fetch_many.py`.
+- A native `Read` of a code file of a registered project now names the recorded decisions that mention its functions, as
+  extra context before the agent plans an edit, with the same rule as the note after an edit: the first three functions
+  of the file in the cached code graph, up to two notes each from `docs/research`, the backlog, `CLAUDE.md` and
+  `AGENTS.md`, 300 ms per function, files only (no network, no model, no git history). It reads the graph only when it
+  is already cached (no analysis starts and nothing waits for one) and is silent when nothing is cached, for a file that
+  is not code, for a file outside a project and when no note names a function; a search that fails or is cut is said.
+  It follows `decision_mode` (`warn`, default, or `off`), never denies and never blocks the read, whatever `hook_mode` is.
+  The note after an edit is unchanged. A project that installed the hook before `Read` was in its matcher is reported as
+  outdated by the same check as any other missing tool and rewritten by the install. About 80 to 115 ms per read on this
+  repository with the graph in memory. Tests: `tests/test_read_decision_notes.py`. Measurement:
+  `docs/research/2026-11-21-notas-de-decisao-na-leitura.md`.
+- `read_document` also takes an `http://` or `https://` URL as its `path`. The file is downloaded with the `web_fetch`
+  download (public addresses only, every redirect hop checked, 5 MB cap), kept for 24 hours in the per-user cache folder
+  under a name made of a hash of the URL, and read like a local file: same page, slide and sheet ranges, same token
+  estimate. The answer names the URL without its query string and credentials, and the metric keeps only the extension of
+  the URL path. A URL of a web page fails with a pointer to `web_fetch`. Any other `path` is read exactly as before.
+- `project_scan.tracked_files` is now the one place that lists the files git tracks: the affected-tests selection and the
+  working-tree overlay of the code graph no longer run their own `git ls-files`. Their answers do not change.
+- `project_manage action=rename_preview` with `symbol` lists what a rename of a function touches, before the rename: its
+  definitions with file and lines, its callers with line (and the calls the graph left unresolved under that name), the
+  tests that reach it, the files importing its module, the anchors in `docs/scope` and the lines of README and `docs` text
+  that name it. Each list is capped by `limit` with the totals in `counts`; a symbol that is not found fails with the
+  closest names, and a project without `docs/scope` says so instead of returning an empty anchor list. Nothing is
+  written. Tests: `tests/test_rename_preview.py`.
+- `project_manage action=release_notes` drafts the notes of the next release in Markdown, without a model, under
+  `## Draft since <base>`: the commit subjects since `base` (default the latest tag from `git describe --tags
+  --abbrev=0`; no tag and no `base` is an error), the public functions the diff touches with their caller and test counts,
+  the decision notes that name them and the documentation entries the diff leaves out of date, all from the builders of
+  `pr_impact`. Lists are capped by `limit`; every line is a commit subject, a name or a count read from the project.
+  Nothing is written. Tests: `tests/test_release_notes.py`.
+
 ## 0.9.82 - beta
 
 - The edit hook adds two lines to its note, both read from what is already cached and silent otherwise (no analysis is

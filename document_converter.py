@@ -114,16 +114,16 @@ def _checked(engine, pages, expected_pages):
     return pages
 
 
-def cache_folder():
-    """The one folder of this version's converted pages: `%LOCALAPPDATA%\\SmartTool\\cache\\<version>\\convert`, created
-    here; the folders of other versions are deleted the first time it is asked for in a process.
+def cache_folder(name="convert"):
+    """The folder `name` of this version's cache: `%LOCALAPPDATA%\\SmartTool\\cache\\<version>\\<name>` (the converted
+    pages by default), created here; the folders of other versions are deleted the first time it is asked for in a process.
 
     Raises: RuntimeError when LOCALAPPDATA is not set."""
     local = os.environ.get("LOCALAPPDATA")
     if not local:
         raise RuntimeError("LOCALAPPDATA is not set: there is no per-user folder for the converter's cache.")
     root = os.path.join(local, "SmartTool", "cache")
-    folder = os.path.join(root, version.VERSION, "convert")
+    folder = os.path.join(root, version.VERSION, name)
     os.makedirs(folder, exist_ok=True)
     if root not in _swept:
         _swept.add(root)

@@ -286,12 +286,13 @@ def _spans(numbers):
     return ', '.join(spans)
 
 
-def header(document):
+def header(document, shown_as=None):
     """The metadata block that opens every answer: path, type, size, units and the estimated tokens of the whole text.
 
-    Parameters: document. Returns: the block as text."""
+    Parameters: document; shown_as (what the first line names instead of the document's path, for a file downloaded
+    from a URL). Returns: the block as text."""
     total = sum(estimate_tokens(unit.text) for unit in document.units)
-    lines = [f'document: {document.path}',
+    lines = [f'document: {shown_as or document.path}',
              f'type: {document.kind} | size: {document.size / 1048576:.2f} MiB | '
              f'{UNIT_NAMES[document.kind]}s: {len(document.units)} | est. tokens (all text): {total:,}']
     lines += [f'{key}: {value}' for key, value in document.facts.items()
@@ -299,18 +300,23 @@ def header(document):
     return '\n'.join(lines)
 
 
-def read(path, range_spec=None, max_chars=DEFAULT_MAX_CHARS, info_only=False):
+def check_max_chars(max_chars):
+    """Raises ValueError unless max_chars is an integer from 1000 to MAX_CHARS_LIMIT."""
+    if isinstance(max_chars, bool) or not isinstance(max_chars, int) or not 1000 <= max_chars <= MAX_CHARS_LIMIT:
+        raise ValueError(f'max_chars must be an integer from 1000 to {MAX_CHARS_LIMIT}')
+
+
+def read(path, range_spec=None, max_chars=DEFAULT_MAX_CHARS, info_only=False, shown_as=None):
     """The answer of read_document: the metadata block, then the chosen units as markdown, a note naming the next range
     when the text was cut.
 
     Parameters: path (see load), range_spec (see parse_range; None reads from the first unit up to max_chars),
     max_chars (cap of the text returned, 1000-MAX_CHARS_LIMIT; a single unit over the cap is cut at a line with a
-    notice), info_only (only the metadata block). Returns: the text. Raises: as load and parse_range, ValueError for a
-    max_chars out of bounds."""
-    if isinstance(max_chars, bool) or not isinstance(max_chars, int) or not 1000 <= max_chars <= MAX_CHARS_LIMIT:
-        raise ValueError(f'max_chars must be an integer from 1000 to {MAX_CHARS_LIMIT}')
+    notice), info_only (only the metadata block), shown_as (see header). Returns: the text. Raises: as load and
+    parse_range, ValueError for a max_chars out of bounds."""
+    check_max_chars(max_chars)
     document = load(path)
-    head = header(document)
+    head = header(document, shown_as)
     if info_only:
         return head
     numbers = parse_range(range_spec, document) if range_spec else list(range(1, len(document.units) + 1))

@@ -57,6 +57,7 @@ import index_inventory
 import usage_meter
 import document_read
 import document_text
+import document_url
 import dependency_notice
 import dossier
 import scout
@@ -84,6 +85,7 @@ import local_embedder
 import low_priority
 import web_search_health
 import web_fetch
+import web_fetch_many
 import version
 import update_check
 import gateway
@@ -388,10 +390,10 @@ SERVER_INSTRUCTIONS = (
 TOOLS = [
     {
         "name": "project_manage",
-        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project (a project whose folder is gone shows as unavailable with the reason); status shows storage, scope and jobs, and with a path inside a registered project answers for the deepest one that holds it (resolved_from). deps lists the known OSV advisories of every dependency the manifests of the project declare (package.json, requirements*.txt, pyproject.toml, go.mod), not only the ones an edit changed, at the version a package-lock.json beside a package.json resolved when it satisfies the range; only package names and versions leave the machine. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers and the tests that reach them (those no test reaches are listed apart), the documentation entries it leaves out of date, the notes the edit hook would have added to the whole diff (comments, copies, dependency advisories) and the tests to run with their command; it publishes nothing. pr_impact_comment (pr, base required) posts that report as a comment on pull request pr through the gh CLI, from the project folder, and returns the comment URL; a rerun replaces the previous Smart Tool comment (marked by a hidden HTML marker) instead of stacking another, and the body carries no local path; it is a write to GitHub, so it refuses unless the user turned pr_comment on in the setup screen (Agent rules, off by default), and when gh is missing or not logged in; never call it without the user asking for the comment. hotspots (limit) ranks the code files by commits times lines, the riskiest to change; dead_code lists the functions no code calls and those only tests call (static call graph, candidates); import_cycles lists the groups of files that import each other; comments lists comments in the wrong place (commented-out code, history tags, loose docs, long inline blocks) across the code files, not only in an edit; credentials lists, per git-tracked text file (read from disk, so .env files and old commits count), the file and line of each credential shape (provider tokens, AWS keys, private-key headers), never the value, and skips lines that say they are an example; links lists the relative links of the tracked HTML and Markdown files that point to a missing file, plus the links it could not decide (root-relative, template expressions, pages with a base element), reported as unchecked, not broken. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; each view carries stale (not updated for 30 days, the test of the daily cleanup that removes them) and stale_bytes sums them; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. junk (no project_root) lists the registered projects that were never projects: a personal, system, application-data or build folder, a subfolder of a repository or of another project, a folder of projects, or a folder that no longer exists (on a drive or share that is mounted); with confirm=true it unregisters them and deletes only their index files, and the manifest says what went. A project is the folder where the session started, so smart_search and register refuse a folder that is not a project and index a new one only from the session that started in it. Jobs via smart_search_result.",
+        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project (a project whose folder is gone shows as unavailable with the reason); status shows storage, scope and jobs, and with a path inside a registered project answers for the deepest one that holds it (resolved_from). deps lists the known OSV advisories of every dependency the manifests of the project declare (package.json, requirements*.txt, pyproject.toml, go.mod), not only the ones an edit changed, at the version a package-lock.json beside a package.json resolved when it satisfies the range; only package names and versions leave the machine. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers and the tests that reach them (those no test reaches are listed apart), the documentation entries it leaves out of date, the notes the edit hook would have added to the whole diff (comments, copies, dependency advisories) and the tests to run with their command; it publishes nothing. pr_impact_comment (pr, base required) posts that report as a comment on pull request pr through the gh CLI, from the project folder, and returns the comment URL; a rerun replaces the previous Smart Tool comment (marked by a hidden HTML marker) instead of stacking another, and the body carries no local path; it is a write to GitHub, so it refuses unless the user turned pr_comment on in the setup screen (Agent rules, off by default), and when gh is missing or not logged in; never call it without the user asking for the comment. hotspots (limit) ranks the code files by commits times lines, the riskiest to change; dead_code lists the functions no code calls and those only tests call (static call graph, candidates); import_cycles lists the groups of files that import each other; comments lists comments in the wrong place (commented-out code, history tags, loose docs, long inline blocks) across the code files, not only in an edit; credentials lists, per git-tracked text file (read from disk, so .env files and old commits count), the file and line of each credential shape (provider tokens, AWS keys, private-key headers), never the value, and skips lines that say they are an example; links lists the relative links of the tracked HTML and Markdown files that point to a missing file, plus the links it could not decide (root-relative, template expressions, pages with a base element), reported as unchecked, not broken. rename_preview lists, before a rename of the function in symbol, its definitions with file and lines, its callers with line (also the calls the graph left unresolved under that name), the tests that reach it, the files importing its module, the anchors of docs/scope and the lines of the README and docs text that name it, each list capped by limit with the totals in counts; it fails when the symbol is not found and writes nothing. release_notes drafts the notes of the next release in Markdown under a `## Draft since <base>` heading without a model: the commit subjects since base (default the latest tag), the public functions the diff touches with their caller and test counts, the decision notes that name them and the documentation entries the diff leaves out of date; it writes nothing and fails when there is no tag and no base. commit_check reviews the staged change (git diff --cached, not the working tree) with the notes the edit hook gives a finished diff (credentials, commented-out code, missing docstrings, duplicates, dependency advisories, link and edit notes), for edits the agent hook never saw (an IDE, hand edits, another agent); it writes nothing. commit_hook_install writes a git pre-commit hook in the project that prints that review to stderr at every commit and never blocks it (exit 0 always; a daemon that is down is one line, a check that fails is printed); it is opt-in, and refuses, naming what it found and changing nothing, when core.hooksPath is set, husky is used or a pre-commit that is not Smart Tool's exists; commit_hook_uninstall removes only that hook and puts back a backed-up hook that is not ours. graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; each view carries stale (not updated for 30 days, the test of the daily cleanup that removes them) and stale_bytes sums them; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. junk (no project_root) lists the registered projects that were never projects: a personal, system, application-data or build folder, a subfolder of a repository or of another project, a folder of projects, or a folder that no longer exists (on a drive or share that is mounted); with confirm=true it unregisters them and deletes only their index files, and the manifest says what went. A project is the folder where the session started, so smart_search and register refuse a folder that is not a project and index a new one only from the session that started in it. Jobs via smart_search_result.",
         "inputSchema": {
             "type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "layers", "affected_tests", "pr_impact", "pr_impact_comment", "hotspots", "dead_code", "import_cycles", "comments", "credentials", "links", "setup_audit", "redirect_proposals", "redirect_decide", "junk", "deps"]},
+                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "layers", "affected_tests", "pr_impact", "pr_impact_comment", "hotspots", "dead_code", "import_cycles", "comments", "credentials", "links", "rename_preview", "release_notes", "commit_check", "commit_hook_install", "commit_hook_uninstall", "setup_audit", "redirect_proposals", "redirect_decide", "junk", "deps"]},
                 "ids": {"type": "array", "items": {"type": "string"}, "description": "redirect_decide: proposal ids from redirect_proposals (accepted ids for remove)"},
                 "decision": {"type": "string", "enum": ["accept", "instruct", "reject", "remove"], "description": "redirect_decide: accept redirects matching calls to smart_search; instruct lets them run with a tip naming smart_search; reject discards; remove deletes an accepted pattern"},
                 "finding_id": {"type": "string"},
@@ -423,9 +425,9 @@ TOOLS = [
                 "view_id": {"type": "string"}, "file_path": {"type": "string"},
                 "mode": {"type": "string", "enum": ["run", "last"], "default": "run", "description": "setup_audit: run audits now; last reads the stored report (the service audits registered projects every 30 minutes) without running anything, and fails when none is stored"},
                 "probe": {"type": "boolean", "default": True, "description": "setup_audit: start/call each MCP server (initialize + tools/list); false reads configs only"},
-                "base": {"type": "string", "default": "HEAD", "description": "affected_tests: git revision the changes are compared with (HEAD = uncommitted work; main or origin/main for a branch)"},
+                "base": {"type": "string", "default": "HEAD", "description": "affected_tests: git revision the changes are compared with (HEAD = uncommitted work; main or origin/main for a branch); release_notes: tag, branch or commit the draft starts from (default: the latest tag, and it fails when there is none)"},
                 "pr": {"type": "integer", "minimum": 1, "description": "pr_impact_comment: number of the pull request to comment on"},
-                "symbol": {"type": "string", "description": "graph: function, Class.method, class name or path::name to get its callers, calls, tests and importers; docs: where that function is documented"},
+                "symbol": {"type": "string", "description": "graph: function, Class.method, class name or path::name to get its callers, calls, tests and importers; docs: where that function is documented; rename_preview: the function to rename"},
                 "depth": {"type": "integer", "minimum": 1, "maximum": 4, "default": 3, "description": "graph with symbol: call hops searched for tests"},
                 "project_root": {"type": "string"}, "project_id": {"type": "string"},
                 "job_id": {"type": "string"}, "watch": {"type": "boolean"},
@@ -583,7 +585,8 @@ TOOLS = [
         "description": (
             "Reads a known URL and returns only the answer to the prompt, written by the gateway's mini model - use instead of "
             "the native WebFetch. The page is cached for 24 h: another prompt on the same URL does not download it again. "
-            "JavaScript-built pages are rendered in the browser. Reads PDFs as text, page by page; does not read localhost or internal networks."
+            "JavaScript-built pages are rendered in the browser. Reads PDFs as text, page by page; does not read localhost or internal networks. "
+            "For several URLs with the same prompt, use web_fetch_many."
         ),
         "inputSchema": {
             "type": "object",
@@ -592,6 +595,26 @@ TOOLS = [
                 "prompt": {"type": "string", "description": "What to extract or answer from the page"},
             },
             "required": ["url", "prompt"],
+        },
+    },
+    {
+        "name": "web_fetch_many",
+        "description": (
+            "Reads up to 8 known URLs in one call with the same prompt and returns one block per URL, in the order given: the "
+            "answer, or an ERROR line with the reason. Each URL is read exactly as web_fetch reads it (24 h cache, browser for "
+            "JavaScript-built pages, PDFs as text, no localhost or internal networks), 4 at a time, and a URL that fails never "
+            "hides the others; the call fails as a whole only when every URL failed. A URL repeated is read once. Use it "
+            "instead of several web_fetch calls when the same question applies to every page; use web_fetch for one URL or "
+            "a different prompt per page."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "urls": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": web_fetch_many.MAX_URLS,
+                         "description": "Full http(s) URLs of the pages"},
+                "prompt": {"type": "string", "description": "What to extract or answer from each page"},
+            },
+            "required": ["urls", "prompt"],
         },
     },
     {
@@ -605,13 +628,16 @@ TOOLS = [
             "as markdown (headings, lists, tables) in parts of about 6,000 characters because a docx has no fixed "
             "pages; pptx per slide with the speaker notes; xlsx per sheet, one tab-separated line per row with the "
             "cached formula values; html as markdown in parts like a docx; csv as one sheet, one tab-separated line per row; "
-            "epub per chapter in reading order. Use info_only first to size a large file and pick the pages you need. A scanned "
+            "epub per chapter in reading order. Use info_only first to size a large file and pick the pages you need. The path "
+            "may also be an http(s) URL of a PDF, docx, pptx, xlsx, csv or epub file: it is downloaded the way web_fetch "
+            "downloads (public addresses only, 5 MB cap), kept for 24 h and read the same way, with the same ranges; a URL "
+            "of a web page fails, read it with web_fetch. A scanned "
             "PDF (no text layer) fails with that reason; there is no OCR. Not for plain text or code: use Read."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Absolute path of the .pdf, .docx, .pptx, .xlsx, .html, .htm, .csv or .epub file"},
+                "path": {"type": "string", "description": "Absolute path of the .pdf, .docx, .pptx, .xlsx, .html, .htm, .csv or .epub file, or the http(s) URL of a PDF, docx, pptx, xlsx, csv or epub file"},
                 "range": {"type": "string", "description": "Pages, slides, parts, chapters or sheets to read: `3`, `3-5`, `7-` (to the end), `-4` (the first four) or a comma list like `1,4-6`; a sheet name also works for a workbook. Default: from the first one"},
                 "max_chars": {"type": "integer", "minimum": 1000, "maximum": document_read.MAX_CHARS_LIMIT, "default": document_read.DEFAULT_MAX_CHARS, "description": "Cap of the text returned (about four characters per token)"},
                 "info_only": {"type": "boolean", "default": False, "description": "Return only the facts (type, size, counts, estimated tokens), no text"},
@@ -2533,7 +2559,7 @@ def _project_action(arguments):
     action = arguments.get("action", "list")
     if action == "probe":
         return _probe_index_models()
-    if action in ('graph','compare','duplicates','duplicates_dismiss','duplicates_restore','docs','layers','affected_tests','pr_impact','pr_impact_comment','hotspots','dead_code','import_cycles','comments','credentials','links'):
+    if action in ('graph','compare','duplicates','duplicates_dismiss','duplicates_restore','docs','layers','affected_tests','pr_impact','pr_impact_comment','hotspots','dead_code','import_cycles','comments','credentials','links','rename_preview','release_notes','commit_check'):
         # Análise somente leitura pode demorar; não prende o lock global de ações.
         key=arguments.get('project_id')
         if not isinstance(key,str) or not re.fullmatch(r'[a-f0-9]{16}',key):
@@ -2581,6 +2607,17 @@ def _project_action(arguments):
             if action in ('credentials','links'):
                 return getattr(project_scan,action)(project['root'],limit)
             return getattr(code_health,action)(project['root'],arguments.get('view_id'),limit)
+        if action=='rename_preview':
+            import rename_preview
+            limit=_parse_bounded_int(arguments.get('limit'),default=30,min_v=1,max_v=200,field_name='limit')
+            return rename_preview.preview(project['root'],arguments.get('symbol'),arguments.get('view_id'),limit)
+        if action=='commit_check':
+            import commit_check
+            return commit_check.review(project['root'])
+        if action=='release_notes':
+            import release_notes
+            limit=_parse_bounded_int(arguments.get('limit'),default=30,min_v=1,max_v=200,field_name='limit')
+            return release_notes.draft(project['root'],arguments.get('base'),limit,arguments.get('view_id'))
         if action=='pr_impact':
             import pr_impact
             limit=_parse_bounded_int(arguments.get('limit'),default=30,min_v=1,max_v=200,field_name='limit')
@@ -2619,7 +2656,7 @@ def _project_action(arguments):
         root = project['root'] if project else arguments.get('project_root')
         with index_views.pin(root) if isinstance(root, str) and os.path.isdir(root) else contextlib.nullcontext():
             result = _project_action_locked(arguments)
-    if _PROJECT_MONITOR and arguments.get("action") not in (None, "list", "status", "inspect", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "search_limits", "integration", "install_hook_preview", "install_hook"):
+    if _PROJECT_MONITOR and arguments.get("action") not in (None, "list", "status", "inspect", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "search_limits", "integration", "install_hook_preview", "install_hook", "commit_hook_install", "commit_hook_uninstall"):
         _PROJECT_MONITOR.refresh()
     return result
 
@@ -2712,6 +2749,9 @@ def _project_action_locked(arguments):
     project = project_store.get(key)
     if not project:
         raise ValueError("Project not registered.")
+    if action in ("commit_hook_install", "commit_hook_uninstall"):
+        import commit_check
+        return (commit_check.install_hook if action == "commit_hook_install" else commit_check.uninstall_hook)(project["root"])
     if action == "status":
         if arguments.get("resolved_from"):
             return {"project": _project_payload(project), "resolved_from": arguments["resolved_from"],
@@ -4380,6 +4420,26 @@ def _handle_web_fetch(arguments):
     return _sanitize_text(f"Source: {page['final_url']} (read at {read_at}, {origin}{cut})\n\n{text}")
 
 
+def _handle_web_fetch_many(arguments):
+    """Several URLs with one prompt, each through `_handle_web_fetch`: the per-URL report of web_fetch_many.render, and an
+    error carrying that report when no URL could be read."""
+    urls, prompt = arguments.get("urls"), arguments.get("prompt")
+    started = time.monotonic()
+    try:
+        web_fetch_many.check(urls, prompt)
+    except ValueError as exc:
+        _metric("web_fetch_many", error=type(exc).__name__, elapsed_s=round(time.monotonic() - started, 2))
+        raise
+    results = web_fetch_many.read_many(urls, prompt, lambda url, text: _handle_web_fetch({"url": url, "prompt": text}))
+    failed = sum(not result["ok"] for result in results)
+    _metric("web_fetch_many", urls=len(results), distinct=len({web_fetch.normalize(url) for url in urls}), failed=failed,
+            elapsed_s=round(time.monotonic() - started, 2))
+    report = _sanitize_text(web_fetch_many.render(results))
+    if failed == len(results):
+        raise RuntimeError(report)
+    return report
+
+
 def _web_route(tool, url):
     """Hook decision for native WebSearch/WebFetch: redirect to the Smart Tool only while it can answer."""
     if tool not in ("WebSearch", "WebFetch"):
@@ -4591,6 +4651,23 @@ def _stop_hook(handler):
                                  f"{type(exc).__name__}: {_sanitize_text(str(exc))}"}
 
 
+def _commit_check_hook(handler):
+    """Answer of the git pre-commit hook (hooks/pre_commit.py): `{ok: True, files, notes}` with the review of the staged
+    change of the registered project whose folder the hook sent, or `{ok: False, error}` naming why it could not run
+    (an unregistered folder included); always 200, the hook prints the failure and lets the commit go."""
+    try:
+        import commit_check
+        payload = json.loads(handler._read_body(HOOK_MAX_BODY_BYTES) or b"{}")
+        root = payload.get("root") if isinstance(payload, dict) else None
+        if not isinstance(root, str) or not os.path.isabs(root):
+            raise ValueError("the hook sent no project folder")
+        project = project_store.get(_with_project_id({"project_root": root})["project_id"])
+        return {"ok": True, **commit_check.review(project["root"])}
+    except Exception as exc:
+        _log(f"Commit check failed: {type(exc).__name__}: {exc}")
+        return {"ok": False, "error": f"{type(exc).__name__}: {_sanitize_text(str(exc))}"}
+
+
 def _session_audit_hook(handler):
     """SessionStart output of the session-start hook: the update notices both as systemMessage (shown to the user) and
     as additionalContext, plus the redirect proposals waiting for a decision as context; `{}` when there is nothing to
@@ -4616,19 +4693,28 @@ def _handle_read_document(arguments):
     """read_document: facts and a page, slide, sheet, part or chapter range of a PDF, docx, pptx, xlsx, html, csv or epub as compact text (see
     document_read). Fails loudly, with the reason, for a path that is not absolute or readable, an unsupported or
     oversized file, a password, a scanned PDF, a corrupt or hostile package and a range outside the document; one metric
-    row records the kind, the estimated tokens of the whole text and of the answer."""
+    row records the kind, the estimated tokens of the whole text and of the answer. A `path` that starts with http:// or
+    https:// is downloaded and read by document_url instead (the kind comes from the URL path: no query or credentials
+    reach the metric); every other value takes the file path above."""
     started = time.monotonic()
     unknown = sorted(set(arguments) - {"path", "range", "max_chars", "info_only"})
     if unknown:
         raise ValueError(f"read_document does not take {', '.join(unknown)}")
+    path = arguments.get("path")
+    from_url = document_url.is_url(path)
     try:
-        text = document_read.read(arguments.get("path"), arguments.get("range") or None,
-                                  arguments.get("max_chars", document_read.DEFAULT_MAX_CHARS),
-                                  bool(arguments.get("info_only")))
+        if from_url:
+            text = document_url.read(path, arguments.get("range") or None,
+                                     arguments.get("max_chars", document_read.DEFAULT_MAX_CHARS),
+                                     bool(arguments.get("info_only")), started + WEB_FETCH_TIMEOUT_S)
+        else:
+            text = document_read.read(path, arguments.get("range") or None,
+                                      arguments.get("max_chars", document_read.DEFAULT_MAX_CHARS),
+                                      bool(arguments.get("info_only")))
     except Exception as exc:
         _metric("read_document", error=type(exc).__name__, elapsed_s=round(time.monotonic() - started, 2))
         raise
-    _metric("read_document", kind=os.path.splitext(str(arguments.get("path")))[1].lower(),
+    _metric("read_document", kind=document_url.extension(path) if from_url else os.path.splitext(str(path))[1].lower(),
             answer_tokens=document_read.estimate_tokens(text), elapsed_s=round(time.monotonic() - started, 2))
     return _sanitize_text(text)
 
@@ -4636,6 +4722,7 @@ def _handle_read_document(arguments):
 _TOOL_HANDLERS = {
     "read_document": _handle_read_document,
     "web_fetch": _handle_web_fetch,
+    "web_fetch_many": _handle_web_fetch_many,
     "project_manage": _handle_project_manage,
     "smart_search": _handle_smart_search,
     "smart_search_result": _handle_smart_search_result,
@@ -5036,7 +5123,7 @@ class MCPHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Routes a POST: the Playwright bridge, setup actions, the hook routes (/hooks/pretool, /hooks/posttool,
-        /hooks/session-audit) and the MCP endpoint (/mcp); anything else is 404."""
+        /hooks/session-audit, /hooks/commit-check) and the MCP endpoint (/mcp); anything else is 404."""
         if self._reject_foreign_origin():
             return
         if self.path == browser_bridge.PATH:
@@ -5076,6 +5163,9 @@ class MCPHandler(BaseHTTPRequestHandler):
             return
         if urllib.parse.urlsplit(self.path).path == "/hooks/stop":
             self._write_json(200, _stop_hook(self))
+            return
+        if urllib.parse.urlsplit(self.path).path == "/hooks/commit-check":
+            self._write_json(200, _commit_check_hook(self))
             return
         if self.path == "/setup/notices":
             try:

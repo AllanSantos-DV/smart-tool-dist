@@ -16,6 +16,7 @@ import code_graph
 import index_inventory
 import index_profile
 import index_scope
+import project_scan
 
 RUN_ALL = re.compile(
     r"(^|/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|pnpm-workspace\.yaml|"
@@ -284,15 +285,15 @@ def _support(root, path):
 def _tracked_tests_outside_graph(root, parsed, profile):
     """Code test files git tracks that the graph could not analyze (over the size limits, unreadable): their imports
     are unknown, so they are selected instead of silently missing (a 1.4 MB test file covering 1,427 cases did)."""
-    listed = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, timeout=30)
-    if listed.returncode:
+    try:
+        tracked = project_scan.tracked_files(root)
+    except ValueError as exc:
+        if exc.__cause__:
+            raise
         return []
-    tests = []
-    for rel in listed.stdout.decode("utf-8", "replace").split("\0"):
-        if rel and rel not in parsed and rel.lower().endswith(TEST_SOURCES) and os.path.basename(rel) != "conftest.py" \
-                and index_profile.kind(rel, profile) == "test" and os.path.isfile(os.path.join(root, rel)):
-            tests.append(rel)
-    return tests
+    return [rel for rel in tracked
+            if rel not in parsed and rel.lower().endswith(TEST_SOURCES) and os.path.basename(rel) != "conftest.py"
+            and index_profile.kind(rel, profile) == "test"]
 
 
 def _label(symbol, by_id):

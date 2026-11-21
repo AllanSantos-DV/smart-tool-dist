@@ -17,6 +17,7 @@ from pathlib import Path
 import indexer
 import index_inventory
 import index_scope
+import project_scan
 import project_identity
 import web_search_adapters
 import web_document_graph
@@ -634,12 +635,15 @@ def _pending_changes(root,view_path):
             changes[rel]='deleted';continue
         if (stat.st_size,stat.st_mtime_ns)!=(size,stamp):changes[rel]='changed'
     scope=index_scope.load_scope(root)
-    listed=subprocess.run(['git','ls-files','-z'],cwd=root,capture_output=True,timeout=30,
-                          creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-    if scope and listed.returncode==0:
-        for rel in listed.stdout.decode('utf-8','replace').split('\0'):
-            if rel and rel not in indexed and rel not in changes and rel.lower().endswith(SOURCE_EXTENSIONS) \
-                    and index_scope.in_scope(scope,rel) and os.path.isfile(os.path.join(root,rel)):
+    try:
+        tracked=project_scan.tracked_files(root)
+    except ValueError as exc:
+        if exc.__cause__:raise
+        tracked=[]
+    if scope:
+        for rel in tracked:
+            if rel not in indexed and rel not in changes and rel.lower().endswith(SOURCE_EXTENSIONS) \
+                    and index_scope.in_scope(scope,rel):
                 changes[rel]='changed'
     return changes
 

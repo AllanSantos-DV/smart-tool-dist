@@ -424,6 +424,44 @@ def _decision_findings(root, rel, touched, failures):
     return found
 
 
+def _read_functions(root, rel):
+    """The first MAX_DECISION_FUNCTIONS functions of a file, by line, from the cached code graph (nothing is analyzed).
+
+    Parameters: root (str) project folder; rel (str) path of the file relative to it, forward slashes.
+    Returns: list of {"name"} as `_decision_findings` takes them; empty while no analysis is cached.
+    """
+    data = code_graph.cached_graph(root)
+    symbols = sorted((item for item in (data or {}).get("symbols") or []
+                      if item.get("path") == rel and item.get("kind") == "function"), key=lambda item: item.get("start_line") or 0)
+    names = list(dict.fromkeys(item["name"] for item in symbols))
+    return [{"name": name} for name in names[:MAX_DECISION_FUNCTIONS]]
+
+
+def _read_note(payload, decision_mode):
+    """The recorded decisions that name the functions of a code file being read, as context for the Read (never a denial).
+    It reads the cached graph and the project's notes only, like the note of an edit, and is silent for a file outside
+    a project, a file that is not code and a project with nothing cached.
+
+    Parameters: payload (dict) the PreToolUse payload of a Read; decision_mode (str) `warn` or `off`.
+    Returns: the hook output, `{}` when there is nothing to say.
+    """
+    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    path = tool_input.get("file_path")
+    if decision_mode == "off" or not isinstance(path, str) or not path:
+        return {}
+    path = os.path.join(payload.get("cwd") or "", path)
+    root = _project_of(path) if os.path.isabs(path) else None
+    if not root:
+        return {}
+    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root)).replace(os.sep, "/")
+    if index_profile.kind(rel, index_profile.current((index_scope.load_scope(root) or {}).get("profile"))) != "code":
+        return {}
+    failures = []
+    found = _decision_findings(root, rel, _read_functions(root, rel), failures)
+    parts = ([_decision_lines(found)] if found else []) + failures
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": " ".join(parts)}} if parts else {}
+
+
 def _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode="off", layer_mode="off",
                  link_mode="off", decision_mode="off"):
     """Checks of an edit before it runs. Docstrings follow doc_mode, in code files of registered projects only (tests,
@@ -690,7 +728,7 @@ def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comm
 
 def decide(payload, client, web_route, jobs):
     """Hook output for one PreToolUse payload: edits follow doc_mode (require | remind | off) and duplicate_mode
-    (warn | off) and dependency_mode (warn | off) and decision_mode (warn | off), and every edit review also notes credentials the edit writes, the other tools follow hook_mode (redirect | advise | off). In redirect mode the Smart Tool call that
+    (warn | off) and dependency_mode (warn | off) and decision_mode (warn | off), and every edit review also notes credentials the edit writes, a Read of a code file follows decision_mode too (see `_read_note`, context only), the other tools follow hook_mode (redirect | advise | off). In redirect mode the Smart Tool call that
     replaces a redirected one starts in `jobs` under the call's tool_use_id (see `_redirect`); only a search whose
     query cannot be built, or a client that sends no tool_use_id, is denied with the exact call to make, and never in a
     subagent whose tool list has no Smart Tool MCP tool: it has nothing to switch to."""
@@ -706,6 +744,9 @@ def decide(payload, client, web_route, jobs):
             return {}
         return _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode, link_mode,
                             decision_mode)
+    if isinstance(payload, dict) and payload.get("tool_name") == "Read":
+        routed = _route(payload, client, web_route, cfg) if config.hook_mode(cfg) != "off" else {}
+        return _read_note(payload, config.decision_mode(cfg)) or routed
     if isinstance(payload, dict) and str(payload.get("tool_name")).startswith(f"mcp__{SMART_TOOL_SERVER}__"):
         if payload["tool_name"] == SMART_SEARCH_TOOL:
             router.CLIENT.set(client)
