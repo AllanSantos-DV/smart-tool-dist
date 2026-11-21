@@ -1,5 +1,5 @@
 """Client side of every command hook that calls the Smart Tool daemon (PreToolUse, PostToolUse, SubagentStart, Stop, and the
-opt-in git pre-commit).
+opt-in git pre-commit and pre-push).
 
 The daemon address is read from its run file on every call, never from a port written into a settings file. A refused or
 reset connection (a daemon restarting) is retried with backoff for `RESTART_WINDOW_S`, so a restart produces no message at
@@ -22,7 +22,8 @@ DOWN_MEMORY_S = 60
 CONNECT_TIMEOUT_S = 2
 QUIET_CONNECT_TIMEOUT_S = 0.4
 BACKOFF_S = (0.1, 0.2, 0.4, 0.8, 1.0)
-ROUTE_TIMEOUT_S = {"pretool": 14, "posttool": 59, "subagent-start": 4, "stop": 110, "commit-check": 55}
+ROUTE_TIMEOUT_S = {"pretool": 14, "posttool": 59, "subagent-start": 4, "stop": 110, "commit-check": 55,
+                   "pre-push": 100}
 DOWN_MARKER = os.path.join(paths.DATA_DIR, "hook-down")
 LOG_NAME = "daemon.log"
 RETRYABLE = (ConnectionError, http.client.RemoteDisconnected, http.client.BadStatusLine)

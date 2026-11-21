@@ -363,7 +363,8 @@ def report(root, base="HEAD", limit=30, view_id=None):
         lines += ["", changes["note"]]
     return {"base": base, "markdown": "\n".join(lines).rstrip("\n") + "\n", "touched": touched,
             "callers": {label: (reached[1] if reached else 0) for label, reached in callers.items()},
-            "untested": untested, "coupled": coupled, "cycles": cycles, "hotspots": hotspots, "new_without_caller": new_dead, "decisions": decisions, "edit_checks": notes or notes_problem,
+            "untested": untested, "coupled": coupled, "cycles": cycles, "hotspots": hotspots, "new_without_caller": new_dead, "decisions": decisions, "decisions_note": decisions_note,
+            "edit_checks": notes or notes_problem,
             "removed_callers": [item for answer in removed for item in answer["findings"]],
             "signature_callers": [item for answer in resigned for item in answer["findings"]],
             "stale_anchors": stale, "stale_note": stale_note, "tests": changes["tests"],

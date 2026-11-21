@@ -6,7 +6,7 @@ A local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharpe
 |---|---|
 | `smart_search` / `smart_search_result` | Semantic + lexical search over an indexed project, results split into code, tests and docs, with the likeliest functions per chunk |
 | `smart_scout` | Answers a question about the code with the lines that answer it: reads the candidate files inside Smart Tool and returns `path:lines` with the literal text, so the files never enter the agent's context; with a `scout_model`, a small model also writes a short answer and keeps only the lines that support it; a question about why something is as it is (why, reason, decided) also lists up to three decision notes from the notes the project keeps about its intent, as ids with one excerpt each |
-| `web_search` / `web_search_result` | Web search across several sources in parallel, in the query language and in English, with a cache shared across sessions; `depth="research"` runs a multi-round research loop |
+| `web_search` / `web_search_result` | Web search across several sources in parallel, in the query language and in English, with a cache shared across sessions; `depth="research"` runs a multi-round research loop; with `fetch_top` (1 to 8) and `fetch_prompt`, `depth="quick"` also reads the first results the way `web_fetch_many` does and appends the pages after the unchanged results (a page that fails shows its `ERROR` line; off by default) |
 | `web_fetch` | Reads a known URL and returns only the answer to your prompt, written by a small model; pages are cached for 24 h. Pages over 60,000 characters are not cut: the model reads the parts closest to the prompt (needs an `embedding_model`) |
 | `web_fetch_many` | Reads up to 8 known URLs in one call with the same prompt, 4 at a time, each exactly as `web_fetch` reads it (24 h cache, browser for JavaScript pages, public addresses only). One block per URL in the order given: the answer, or an `ERROR` line with the reason, so a URL that fails never hides the others; a repeated URL is read once |
 | `read_document` | Reads a PDF, Word, PowerPoint, Excel, HTML, CSV or EPUB file as compact text, a range at a time: type, size, page/slide/sheet/part/chapter count and estimated tokens first, then only the units asked for (`range="3-5"`), so the file never enters the agent's context whole. The path can also be an `http(s)` URL of a PDF, Word, PowerPoint, Excel, CSV or EPUB file: it is downloaded the way `web_fetch` downloads (public addresses only, 5 MB cap), kept for 24 hours and read with the same ranges and token estimate; a URL of a web page fails and points to `web_fetch`. Opt-in: the native Read is not redirected. Scanned PDFs fail with that reason (no OCR) |
@@ -18,7 +18,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.84 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.85 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -51,6 +51,11 @@ and keeps, per file, the window with most of the question's words. The agent rec
 verbatim. With a `scout_model` (the setup screen fills it with Claude Haiku 5.5 when the gateway has it), a small model reads those windows, writes a few lines of answer
 and picks which lines to show; without an index it first picks the words and folders to scan (two calls; one with an
 index). What the model writes never replaces the literal lines, and when it fails the lines come back with the error.
+With `diff=true` (and `base`, a git revision, default `HEAD`) the question is about the current change: no search runs,
+and the candidates are the changed hunks of the diff against `base` (two lines of context each; a new file is read
+whole), the callers of the changed functions and the tests that reach them, never the whole files. `max_files` then
+counts changed files, caller files and test files each; what is cut, deleted or unreadable is named in a warning. It
+fails, saying why, outside a git repository, with a `base` that is not a commit, and with a `base` but no `diff`.
 
 **Searching the web.** `web_search` asks several free search sources in parallel (DuckDuckGo, Wikipedia, Yahoo,
 Exa, Google and others), in the language of the question and in English, and merges what comes back. Search APIs with a
@@ -85,7 +90,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.84 install
+npx @allansantos-dev/smart-tool@0.9.85 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -315,6 +320,20 @@ Redirects) and Maintenance (Setup audit, Startup).
    subjects since the base, the public functions the diff touches with their caller and test counts, the decision notes
    that name them and the documentation entries the diff leaves out of date, the same builders `pr_impact` uses. It
    writes no prose of its own, so the agent or the maintainer words the notes from it. Takes `limit`, writes nothing.
+   **Release check**: `project_manage action=release_check` answers "can I tag?" as `{ready, checks: [{name, ok, detail}]}`:
+   the `VERSION` of `version.py` against the top versioned heading of `CHANGELOG.md`, the README status line and
+   `site/index.html` (the `<version> beta` card and the pinned install command), no text left under an `Unreleased`
+   heading above the top version, a clean working tree (untracked files count) on `main` or `develop`, the tag
+   `v<version>` still free and no entry of `docs/scope` out of date. A file it needs that is missing, or a git call that
+   fails, is a check that is not ok with the reason, never a silent pass. The reply also lists the commit subjects since
+   the latest tag (`limit`); the full notes are `release_notes`, which analyzes the diff and takes seconds. Changes and
+   tags nothing.
+   **Move preview**: `project_manage action=move_preview path=... to=...` lists what moving a file or folder would break:
+   the modules importing it (file, line, import), the Markdown and HTML links to it with their anchors (a link between two
+   files that move together is not listed, a root-relative link is marked), the README and `docs` lines that write its
+   path, the `docs/scope` anchors that name its functions and the tests that reach it (by import or by naming the path in
+   a string). It refuses when `path` does not exist, `to` already exists, `to` is inside `path` or either leaves the
+   project. Static analysis over git-tracked text: search the old path as text too. Takes `limit`, moves and writes nothing.
    **Commit check** (opt-in): `project_manage action=commit_check` reviews the staged change (`git diff --cached`, not the
    working tree) with the notes the edit hook gives a finished diff (credentials, commented-out code, missing docstrings,
    duplicates, dependency advisories, link and edit notes), so edits the agent hook never saw (an IDE, hand edits,
@@ -326,6 +345,14 @@ Redirects) and Maintenance (Setup audit, Startup).
    `package.json`) or a `pre-commit` that is not Smart Tool's exists; an older hook of ours is backed up first.
    `action=commit_hook_uninstall` removes only that hook (identified by its marker line) and puts back a backed-up hook
    that is not ours. In a worktree or submodule the hook goes where `git rev-parse --git-path hooks` points.
+   **Push review** (opt-in): both actions take `hook` (`pre-commit`, the default and unchanged, or `pre-push`). With
+   `hook=pre-push` the hook reads the pushed ranges git writes to stdin and prints to stderr, at every push, the tests
+   the pushed commits affect and a summary of `pr_impact` against the commit the remote holds (for a new branch, the
+   commit before the first one no remote-tracking branch has); a range it cannot analyze (not the checked out commit, a
+   remote commit it does not have, no commit to compare with) is said with its reason. It never blocks: the exit status
+   is always 0, and a daemon that is down is one line naming the origin `smart-tool` and saying the service is not
+   running. The command line ends with `--hook-origin=smart-tool` and the daemon is found through its run file on every
+   call, with no port written anywhere. The install and the uninstall refuse and restore exactly as for `pre-commit`.
 
    **Layers on edit**: when the project has confirmed layers (`.smart-tool/layers.json`), an edit that adds a call from
    a lower layer to a function of a higher one is flagged to the agent; it never blocks. `layer_mode` in
@@ -513,7 +540,7 @@ fails to load is listed in the setup screen with its error and does not affect t
 ## Uninstall
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.84 uninstall [--target DIR] [--keep-data]
+npx @allansantos-dev/smart-tool@0.9.85 uninstall [--target DIR] [--keep-data]
 ```
 
 It asks nothing and opens no window. It stops the tray and the daemon, removes the logon task, the hook entries of Smart

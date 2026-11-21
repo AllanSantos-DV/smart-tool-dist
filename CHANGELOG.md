@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.9.85 - beta
+
+- `web_search` takes two optional parameters, `fetch_top` (0 = off, the default, to 8) and `fetch_prompt`: with
+  `depth="quick"` the first `fetch_top` result URLs are also read the way `web_fetch_many` reads them (same prompt, 4 at a
+  time, 24 h cache, `ERROR` line for a page that fails) and the pages are appended after the results, which are unchanged.
+  Without `fetch_top` the reply is exactly what it was. A missing or blank `fetch_prompt`, a count above 8, a
+  `fetch_prompt` without a count and `fetch_top` with `depth="deep"` or `"research"` fail before the search runs; when
+  every page fails the results are still returned with the error lines. `web_fetch`, `web_fetch_many` and the redirect of
+  the native `WebFetch` are unchanged. Reason: most turns that read pages read several, and a research agent reads many
+  (`docs/research/2026-11-21-web-search-fetch-top.md`). Tests: `tests/test_web_search_fetch_top.py`.
+- `project_manage action=release_check` answers "can I tag?" without changing anything, as `{ready, checks}`: `version.py`
+  against the top versioned heading of `CHANGELOG.md`, the README status line and `site/index.html` (the `<version> beta`
+  card and the pinned install command), no text left under an `Unreleased` heading above the top version, a clean working
+  tree on `main` or `develop`, the tag `v<version>` still free and no entry of `docs/scope` out of date, each with its
+  reason; a missing file or a failed git call is a check that is not ok, never a pass. It lists the commit subjects since
+  the latest tag and leaves the full draft to `release_notes`. Tests: `tests/test_release_check.py`.
+- `project_manage action=move_preview` with `path` and `to` lists what moving a file or folder would break, before the
+  move: the modules importing it, the Markdown and HTML links with their anchors, the README and `docs` lines that write
+  its path, the `docs/scope` anchors that name its functions and the tests that reach it. It refuses when `path` does not
+  exist or `to` already exists, and moves nothing. Tests: `tests/test_move_preview.py`.
+- `project_manage action=commit_hook_install` and `commit_hook_uninstall` take `hook`: `pre-commit` (the default; the hook
+  and the answer are byte for byte what they were) or `pre-push`. The pre-push hook reads the pushed ranges from stdin
+  and prints to stderr the tests the pushed commits affect and the `pr_impact` summary against the commit the remote
+  holds, through the new route `/hooks/pre-push`. It never blocks (exit 0 always; a daemon that is down is one line
+  naming the origin `smart-tool`), its command line ends with `--hook-origin=smart-tool`, it finds the daemon through the
+  run file on every call and no port is written anywhere. Same refusals as `pre-commit` (`core.hooksPath`, husky, a hook
+  that is not ours), same backup and marker; a range it cannot analyze is said with its reason. Rule followed from
+  `docs/research/2026-11-14-hooks-http-dono-e-porta.md` and `docs/research/2026-11-18-decision-notes-keyword-quality.md`
+  (`docs/research/2026-11-21-pre-push-e-scout-do-diff.md`). Tests: `tests/test_pre_push_hook.py`.
+- `smart_scout` takes `diff` (true or false) and `base` (a git revision, default `HEAD` with `diff=true`): the question is
+  answered from the changed hunks of the git diff against `base` plus the callers of the changed functions and the tests
+  that reach them, not from whole files, and no search runs. Without the new parameters it behaves as before. It fails
+  outside a git repository, with a `base` that is not a commit and with a `base` without `diff`. Tests:
+  `tests/test_scout_diff.py`.
+
 ## 0.9.84 - beta
 
 - The description of `project_manage` now says what `docs` generates since 0.9.82: the Feature line of each technical entry, the

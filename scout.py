@@ -5,7 +5,8 @@ keyword scan of the disk when it is not), reads the current lines of each candid
 terms and returns `path:lines` plus those lines verbatim. With a `scout_model` configured, a light model of the Smart
 Tool's own gateway also writes a short answer and picks which lines to show; what it writes never replaces the literal
 lines, which always come from the file on disk. Without an index the model gets two fixed calls (terms and folders to
-scan, then the answer); with an index, one.
+scan, then the answer); with an index, one. With `diff=true` the candidates are the changed hunks of the git diff plus
+the callers and tests of the changed functions (`scout_diff`), and nothing is searched.
 
 Market pattern copied (docs/research/2026-10-24-scout-modelo-leve-no-smart-tool.md): read-only, step limit, return
 `path:lines` with the excerpt (Windsurf Fast Context, Relace, Claude Code Explore); the light model is fed only the
@@ -35,7 +36,9 @@ PLAN_MAX_TERMS = 12
 PLAN_MAX_FOLDERS = 6
 OUTLINE_MAX_DIRS = 300
 OUTLINE_MAX_ROOT_FILES = 200
-_FIELDS = {"project_root", "question", "terms", "max_files"}
+_FIELDS = {"project_root", "question", "terms", "max_files", "diff", "base"}
+DEFAULT_BASE = "HEAD"
+BASE_REVISION = re.compile(r"[\w./@^~{}-]{1,200}")
 DECISION_NOTES_MAX = 3
 _INTENT = re.compile(r"\b(why|por\s*qu[êe]|rationale|reason|motivo|raz[ãa]o|decid\w*|decis[ãa]o)\b", re.IGNORECASE)
 
@@ -72,8 +75,10 @@ ANSWER_TOOL = {"type": "function", "function": {
 
 
 def arguments(raw):
-    """Validated `{"project_root", "question", "terms", "max_files"}` from the tool call; raises ValueError naming the
-    field. `terms` (identifier words the caller already knows) is optional and joins the question in the search."""
+    """Validated `{"project_root", "question", "terms", "max_files", "diff", "base"}` from the tool call; raises
+    ValueError naming the field. `terms` (identifier words the caller already knows) is optional and joins the question
+    in the search. `diff` (true or false, default false) reads the current git diff instead of searching; `base` (the
+    revision it is taken against, default HEAD) is `None` without `diff`, and is refused there."""
     if not isinstance(raw, dict):
         raise ValueError("smart_scout requires its arguments as a JSON object")
     unknown = set(raw) - _FIELDS
@@ -91,7 +96,16 @@ def arguments(raw):
     max_files = raw.get("max_files", DEFAULT_MAX_FILES)
     if type(max_files) is not int or not 1 <= max_files <= MAX_FILES:
         raise ValueError(f"max_files must be an integer from 1 to {MAX_FILES}")
-    return {"project_root": root, "question": question.strip(), "terms": (terms or "").strip(), "max_files": max_files}
+    diff = raw.get("diff", False)
+    if type(diff) is not bool:
+        raise ValueError("diff must be true or false")
+    base = raw.get("base")
+    if base is not None and not diff:
+        raise ValueError("base only applies with diff=true")
+    if base is not None and (not isinstance(base, str) or not BASE_REVISION.fullmatch(base) or base.startswith("-")):
+        raise ValueError("base must be a git revision such as HEAD, main or origin/main")
+    return {"project_root": root, "question": question.strip(), "terms": (terms or "").strip(), "max_files": max_files,
+            "diff": diff, "base": (base or DEFAULT_BASE) if diff else None}
 
 
 def is_intent_question(question):
@@ -149,9 +163,9 @@ def order_candidates(blocks, max_files):
     return head + reserved + rest
 
 
-def evidence(root, rows, terms, max_files, window_lines):
+def evidence(root, rows, terms, max_files, window_lines, per_file=WINDOWS_PER_FILE):
     """Evidence items `{id, path, start, end, lines, symbols}` for the first `max_files` files of `rows` (search rows
-    `{path, lines: "a-b", snippet, symbols}`), at most WINDOWS_PER_FILE non-overlapping windows per file, each the
+    `{path, lines: "a-b", snippet, symbols}`), at most `per_file` non-overlapping windows per file, each the
     `window_lines` lines of the chunk with most `terms`, read from disk now. A file that cannot be read from disk keeps
     the indexed snippet with its chunk range, except a PDF or Office file, whose window is chosen from the lines the
     index stored (it never extracts the document again)."""
@@ -167,7 +181,7 @@ def evidence(root, rows, terms, max_files, window_lines):
                 continue
             files.append(path)
         mine = [item for item in items if item["path"] == path]
-        if len(mine) >= WINDOWS_PER_FILE or any(item["start"] <= end and start <= item["end"] for item in mine):
+        if len(mine) >= per_file or any(item["start"] <= end and start <= item["end"] for item in mine):
             continue
         lines = disk_lines(root, path, start, end)
         if lines is None and document_text.is_extracted(path):

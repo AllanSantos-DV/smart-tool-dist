@@ -1,8 +1,9 @@
-"""Commit-time review of the staged change, and the opt-in git hook that prints it.
+"""Commit-time review of the staged change, and the opt-in git hooks that print reviews.
 
 The review is the one the edit hook gives a finished diff (`hook_decision.review_diff`), over what `git diff --cached`
 holds, so edits the agent hook never saw (an IDE, hand edits, another agent) are reviewed before they reach the commit.
-The `pre-commit` script this module writes only forwards to the daemon (`hooks/pre_commit.py`) and never blocks a commit.
+The `pre-commit` script this module writes only forwards to the daemon (`hooks/pre_commit.py`) and never blocks a commit;
+the `pre-push` script does the same for the commits a push sends (`hooks/pre_push.py`, `push_check.py`).
 """
 import glob
 import json
@@ -21,6 +22,10 @@ MARKER = "# smart-tool-commit-check"
 HOOK_NAME = "pre-commit"
 HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "pre_commit.py")
 HOOK_ORIGIN = client_hooks.HOOK_ORIGIN
+PUSH_MARKER = "# smart-tool-pre-push"
+PUSH_HOOK_NAME = "pre-push"
+PUSH_HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "pre_push.py")
+DEFAULT_HOOK = HOOK_NAME
 MAX_FILES = 50
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -96,6 +101,36 @@ def _hook_text():
             "exit 0\n")
 
 
+def _push_hook_text():
+    """The `pre-push` script: it passes git's arguments and, through the inherited stdin, the pushed ranges to the review
+    client; the command line ends with the hook origin, the failure line is printed, and the exit status stays 0 (a git
+    hook that exits non-zero blocks the push)."""
+    command = f"{shlex.quote(hook_python())} {shlex.quote(client_hooks._shell_safe(PUSH_HOOK_SCRIPT))}"
+    return (f"#!/bin/sh\n{PUSH_MARKER}: written by Smart Tool (project_manage action=commit_hook_install hook=pre-push); "
+            f"commit_hook_uninstall hook=pre-push removes it\n"
+            f'{command} "$@" {HOOK_ORIGIN}\n'
+            "status=$?\n"
+            '[ "$status" -eq 0 ] || echo "Smart Tool push review could not run (exit $status), push not reviewed" >&2\n'
+            "exit 0\n")
+
+
+_HOOKS = {
+    HOOK_NAME: {"marker": MARKER, "text": _hook_text, "label": "commit",
+                "note": "Commits in this repository print the review of the staged change to stderr and never wait on it "
+                        "to succeed."},
+    PUSH_HOOK_NAME: {"marker": PUSH_MARKER, "text": _push_hook_text, "label": PUSH_HOOK_NAME,
+                     "note": "Pushes from this repository print the tests affected by the pushed commits and the impact "
+                             "summary to stderr and never wait on it to succeed."},
+}
+
+
+def _spec(hook):
+    """The entry of `_HOOKS` for the git hook named `hook`; raises ValueError naming the accepted hooks."""
+    if hook not in _HOOKS:
+        raise ValueError(f"hook must be one of {', '.join(_HOOKS)}, not {hook!r}.")
+    return _HOOKS[hook]
+
+
 def _hooks_dir(root):
     """The absolute folder git runs hooks from for the repository at `root` (a worktree or submodule shares the one
     its `.git` file points to)."""
@@ -127,8 +162,9 @@ def _husky(root):
     return found
 
 
-def _blockers(root, hook):
-    """Sentences naming what makes the install refuse: `core.hooksPath` set, husky, or a `pre-commit` that is not ours."""
+def _blockers(root, hook, marker=MARKER):
+    """Sentences naming what makes the install refuse: `core.hooksPath` set, husky, or a hook file at `hook` without our
+    `marker` line."""
     found = []
     configured = _git_raw(root, "config", "--show-scope", "--get", "core.hooksPath")
     if configured.returncode == 0:
@@ -137,48 +173,48 @@ def _blockers(root, hook):
     elif configured.returncode != 1:
         raise ValueError(f"git config core.hooksPath failed: {configured.stderr.decode('utf-8', 'replace').strip()[:300]}")
     found += _husky(root)
-    if os.path.isfile(hook) and MARKER not in _read(hook):
-        found.append(f"{hook} already exists and is not Smart Tool's (it has no {MARKER} line)")
+    if os.path.isfile(hook) and marker not in _read(hook):
+        found.append(f"{hook} already exists and is not Smart Tool's (it has no {marker} line)")
     return found
 
 
-def install_hook(root):
-    """Writes the opt-in `pre-commit` hook of the repository at `root`, after a backup of an older hook of ours.
+def install_hook(root, hook=DEFAULT_HOOK):
+    """Writes the opt-in git hook `hook` of the repository at `root`, after a backup of an older hook of ours.
 
-    Parameters: root (str) project folder, inside a git repository.
+    Parameters: root (str) project folder, inside a git repository; hook (str) `pre-commit` or `pre-push`.
     Returns: dict with `installed`, `changed`, `file` and `backup` (path of the copy of our older hook, None when new).
-    Raises: ValueError, naming everything found and changing nothing, when core.hooksPath is set, husky is used or a
-    `pre-commit` that is not ours exists.
+    Raises: ValueError, naming everything found and changing nothing, when `hook` is unknown, core.hooksPath is set,
+    husky is used or a hook of that name that is not ours exists.
     """
-    hook = os.path.join(_hooks_dir(root), HOOK_NAME)
-    found = _blockers(root, hook)
+    spec = _spec(hook)
+    path = os.path.join(_hooks_dir(root), hook)
+    found = _blockers(root, path, spec["marker"])
     if found:
-        raise ValueError("The commit hook was not installed and nothing was changed: " + "; ".join(found) + ".")
-    os.makedirs(os.path.dirname(hook), exist_ok=True)
-    backup = atomic_io.backup_file(hook)
-    atomic_io.write_text(hook, _hook_text())
-    os.chmod(hook, 0o755)
-    return {"installed": True, "changed": True, "file": hook, "backup": backup,
-            "note": "Commits in this repository print the review of the staged change to stderr and never wait on it "
-                    "to succeed."}
+        raise ValueError(f"The {spec['label']} hook was not installed and nothing was changed: " + "; ".join(found) + ".")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    backup = atomic_io.backup_file(path)
+    atomic_io.write_text(path, spec["text"]())
+    os.chmod(path, 0o755)
+    return {"installed": True, "changed": True, "file": path, "backup": backup, "note": spec["note"]}
 
 
-def uninstall_hook(root):
-    """Removes our `pre-commit` hook of the repository at `root` and puts back a backed-up hook that is not ours.
+def uninstall_hook(root, hook=DEFAULT_HOOK):
+    """Removes our git hook `hook` of the repository at `root` and puts back a backed-up hook that is not ours.
 
-    Parameters: root (str) project folder, inside a git repository.
+    Parameters: root (str) project folder, inside a git repository; hook (str) `pre-commit` or `pre-push`.
     Returns: dict with `removed`, `restored` (path of the backup put back, None when there is none) and `file`; a
     repository without a hook answers `removed` false with a `note`.
-    Raises: ValueError when the `pre-commit` file is not ours; it stays as it is.
+    Raises: ValueError when `hook` is unknown or the hook file is not ours; it stays as it is.
     """
-    hook = os.path.join(_hooks_dir(root), HOOK_NAME)
-    if not os.path.isfile(hook):
-        return {"removed": False, "restored": None, "file": hook, "note": f"No pre-commit hook at {hook}."}
-    if MARKER not in _read(hook):
-        raise ValueError(f"{hook} is not Smart Tool's (it has no {MARKER} line) and was left as it is.")
-    os.remove(hook)
-    copies = sorted(glob.glob(glob.escape(hook + atomic_io.BACKUP_INFIX) + "*"), reverse=True)
-    saved = next((copy for copy in copies if MARKER not in _read(copy)), None)
+    marker = _spec(hook)["marker"]
+    path = os.path.join(_hooks_dir(root), hook)
+    if not os.path.isfile(path):
+        return {"removed": False, "restored": None, "file": path, "note": f"No {hook} hook at {path}."}
+    if marker not in _read(path):
+        raise ValueError(f"{path} is not Smart Tool's (it has no {marker} line) and was left as it is.")
+    os.remove(path)
+    copies = sorted(glob.glob(glob.escape(path + atomic_io.BACKUP_INFIX) + "*"), reverse=True)
+    saved = next((copy for copy in copies if marker not in _read(copy)), None)
     if saved:
-        os.replace(saved, hook)
-    return {"removed": True, "restored": saved, "file": hook}
+        os.replace(saved, path)
+    return {"removed": True, "restored": saved, "file": path}
