@@ -10,9 +10,13 @@ import re
 import affected_tests
 import doc_check
 import doc_scope
+import dependencies_section
+import doc_refs_section
 import doc_validate
+import duplicates_section
 import index_profile
 import index_scope
+import new_links_section
 import pr_impact
 import removed_callers
 
@@ -85,8 +89,17 @@ def _listed(label, lines, total=None):
     return [label] + [f"  {line}" for line in shown] + more
 
 
+def _advisory(section, title, describe, label):
+    """The lines of one advisory section of the report: its findings under `title`, or one line with the reason when the
+    check could not run; none when it found nothing."""
+    if section["findings"]:
+        return _listed(title, [describe(item) for item in section["findings"]])
+    return [] if section["checked"] else [f"{label} not checked: {section['problem']}."]
+
+
 def _summary(report):
-    """The lines of the report worth a push: the tests to run first, then only the sections that found something. The
+    """The lines of the report worth a push: the tests to run first, then only the sections that found something (the
+    duplicates, documentation references and dependencies sections also say when they could not be checked). The
     decision notes keep to the rule of the edit hook (the first DECISION_FUNCTIONS functions, DECISION_NOTES notes each),
     so a push that names a weak match says nothing."""
     counts = report["counts"]
@@ -109,6 +122,24 @@ def _summary(report):
                                                            for f in report["stale_anchors"]])
     if report["edit_checks"]:
         lines += ["Edit checks over the whole range:", f"  {report['edit_checks']}"]
+    copies = report["duplicates"]
+    if copies["findings"]:
+        lines += _listed("Functions of the range that duplicate existing code (advisory):",
+                         [duplicates_section.describe(item) for item in copies["findings"]])
+    elif not copies["checked"]:
+        lines.append(f"Duplicates not checked: {copies['problem']}.")
+    lines += _advisory(report["doc_refs"], "Documentation that still names code the range removed (advisory):",
+                       doc_refs_section.describe, "Documentation references")
+    lines += _advisory(report["dependencies"], "Dependencies the range leaves out of step with the manifests (advisory):",
+                       dependencies_section.describe, "Dependencies")
+    links = report["new_links"]
+    if links["findings"]:
+        lines += _listed("New external links of the range that may be dead (advisory):",
+                         [new_links_section.describe(item) for item in links["findings"]])
+    if links["problem"]:
+        lines.append(f"New links not checked: {links['problem']}.")
+    if links["not_checked"]:
+        lines.append(new_links_section.cut_sentence(links["not_checked"]))
     notes = [f"{label}: {hit['id']} {hit['title']}" for label, hits in list(report["decisions"].items())[:DECISION_FUNCTIONS]
              for hit in hits[:DECISION_NOTES]]
     if notes:
@@ -178,9 +209,10 @@ def _docs_lines(root, base):
         return [f"The documentation check failed: {type(exc).__name__}: {exc}"]
 
 
-def _range_lines(root, remote, pushed, docs=False):
+def _range_lines(root, remote, pushed, docs=False, links=False):
     """The lines for one pushed range; empty for a deletion or a range with nothing new, a sentence with the reason for
-    a range that cannot be analyzed. With `docs` the documentation section follows the summary."""
+    a range that cannot be analyzed. With `docs` the documentation section follows the summary; with `links` the summary
+    includes the check of the links the range adds."""
     if _unborn(pushed["local"]):
         return []
     title = f"Smart Tool push review of {pushed['local_ref']}"
@@ -193,28 +225,30 @@ def _range_lines(root, remote, pushed, docs=False):
         lines = [f"{title} against {base[:10]}:"]
         if affected_tests._git(root, "status", "--porcelain").strip():
             lines.append("The working tree has uncommitted changes; the review includes them.")
-        return lines + _summary(pr_impact.report(root, base, REPORT_LIMIT)) + (_docs_lines(root, base) if docs else []) + \
+        return lines + _summary(pr_impact.report(root, base, REPORT_LIMIT, links=links)) + (_docs_lines(root, base) if docs else []) + \
             [f"Full report: project_manage action=pr_impact base={base[:10]}"]
     except Exception as exc:
         return [f"{title}: the review failed: {type(exc).__name__}: {exc}"]
 
 
-def review(root, remote, ranges, docs=False):
+def review(root, remote, ranges, docs=False, links=False):
     """Reviews what a push of `ranges` sends from the repository at `root` to `remote`.
 
     Parameters: root (str) project folder, inside a git repository; remote (str) the remote's name or URL as git passes
     it to the hook ("" when unknown); ranges (list) as `ranges_from` takes them; docs (bool) add the documentation
-    section of each range.
+    section of each range; links (bool) read the external links each range adds and say which look dead (network use).
     Returns: dict with `text` (what the hook prints; empty when there is nothing to say) and `ranges` (how many were
     looked at; those past MAX_RANGES are named, not analyzed).
-    Raises: ValueError when `ranges` is malformed or `docs` is not a boolean.
+    Raises: ValueError when `ranges` is malformed or `docs` or `links` is not a boolean.
     """
     if type(docs) is not bool:
         raise ValueError("docs must be true or false")
+    if type(links) is not bool:
+        raise ValueError("links must be true or false")
     ranges = ranges_from(ranges)
     lines = []
     for pushed in ranges[:MAX_RANGES]:
-        lines += _range_lines(root, remote if isinstance(remote, str) else "", pushed, docs)
+        lines += _range_lines(root, remote if isinstance(remote, str) else "", pushed, docs, links)
     if len(ranges) > MAX_RANGES:
         lines.append(f"{len(ranges) - MAX_RANGES} more pushed range(s) were not reviewed: the review reads the first "
                      f"{MAX_RANGES}.")

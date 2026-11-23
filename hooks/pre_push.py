@@ -14,6 +14,7 @@ import hook_call
 
 ORIGIN_FLAG = "--hook-origin="
 DOCS_FLAG = "--docs"
+LINKS_FLAG = "--links"
 DOWN = f"[hook-origin={hook_call.ORIGIN}] Smart Tool is not running, push not reviewed"
 FAILED = f"[hook-origin={hook_call.ORIGIN}] Smart Tool push review failed: "
 
@@ -32,11 +33,13 @@ def pushed_ranges(text):
     return ranges
 
 
-def run(root, remote, ranges, docs=False):
+def run(root, remote, ranges, docs=False, links=False):
     """The text the hook prints for the push of `ranges` from the repository at `root` to `remote`: what the daemon's
     review says ("" when there is nothing to say), the one line of a daemon that is down, or the reason the review could
-    not run. With `docs` the request asks for the documentation section; without it the request is the one it always was."""
-    raw = json.dumps({"root": root, "remote": remote, "ranges": ranges, **({"docs": True} if docs else {})}).encode()
+    not run. With `docs` the request asks for the documentation section and with `links` for the check of the new external
+    links; without them the request is the one it always was."""
+    options = {name: True for name, on in (("docs", docs), ("links", links)) if on}
+    raw = json.dumps({"root": root, "remote": remote, "ranges": ranges, **options}).encode()
     output, failure = hook_call.call("pre-push", raw, window_s=0)
     if output.get("ok") is True:
         return str(output.get("text") or "")
@@ -49,14 +52,15 @@ def run(root, remote, ranges, docs=False):
 
 def main():
     """Prints what `run` says about the push the hook runs for (git starts it at the top of the work tree, passes the
-    remote name and URL as arguments and the ranges on stdin; the `--docs` flag of the installed command asks for the
-    documentation section); any failure is printed and the exit status stays 0."""
+    remote name and URL as arguments and the ranges on stdin; the `--docs` and `--links` flags of the installed
+    command ask for the documentation section and the check of the new external links); any failure is printed and the
+    exit status stays 0."""
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     try:
-        arguments = [arg for arg in sys.argv[1:] if not arg.startswith(ORIGIN_FLAG) and arg != DOCS_FLAG]
+        arguments = [arg for arg in sys.argv[1:] if not arg.startswith(ORIGIN_FLAG) and arg not in (DOCS_FLAG, LINKS_FLAG)]
         ranges = pushed_ranges(sys.stdin.buffer.read().decode("utf-8", "replace"))
         text = run(os.getcwd(), arguments[0] if arguments else "", ranges,
-                   DOCS_FLAG in sys.argv[1:]) if ranges else ""
+                   DOCS_FLAG in sys.argv[1:], LINKS_FLAG in sys.argv[1:]) if ranges else ""
     except Exception as exc:
         text = f"{FAILED}{type(exc).__name__}: {exc}"
     if text:

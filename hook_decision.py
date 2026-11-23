@@ -31,6 +31,7 @@ import dossier
 import duplicates
 import edit_preview
 import edit_shape
+import import_notice
 import index_profile
 import index_scope
 import layer_check
@@ -351,6 +352,20 @@ def _cycle_lines(findings):
             "it is used; if the cycle is intended, go ahead.")
 
 
+def _import_lines(findings):
+    """The note that names the imports an edit adds that no manifest of the file's folder declares.
+
+    Parameters: findings (list of (rel, item)) the `import_notice.added_undeclared` items with the file that was edited.
+    Returns: str, one sentence per import with its confidence and reason, cut at MAX_DOC_FINDINGS.
+    """
+    lines = [f"{rel}:{item['line']} imports `{item['name']}`, which {', '.join(item['manifests'])} does not declare "
+             f"({item['confidence']} confidence: {item['reason']})" for rel, item in findings[:MAX_DOC_FINDINGS]]
+    if len(findings) > MAX_DOC_FINDINGS:
+        lines.append(f"{len(findings) - MAX_DOC_FINDINGS} more import(s) in the same situation")
+    return ("Smart Tool imports: " + "; ".join(lines) + ". Declare the package in the manifest, or if it arrives another way "
+            "(a dependency of another package, a name that is not its package name), go ahead.")
+
+
 def _history_lines(hotspots, coupled):
     """The note that names the hotspots among the edited files and the files that usually change with them.
 
@@ -512,7 +527,8 @@ def _history_findings(edited, failures):
 def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode="off", link_mode="off",
                     decision_mode="off", shape=False):
     """The checks of an edit over (path, before, after) triples: docstrings, comments, documentation anchors, copies,
-    dependency advisories, local links, layers and the decisions recorded about the touched functions, each following its mode.
+    dependency advisories and the imports added that no manifest declares (both follow dependency_mode), local links, layers
+    and the decisions recorded about the touched functions, each following its mode.
     With `shape`, two more notes read only the cached code graph and history: the import cycle an added Python import
     closes and the hotspots or usual change partners among the edited files.
 
@@ -525,7 +541,7 @@ def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_
     comment_findings, layer_findings, credential_findings, caller_answers = [], [], [], []
     broken_links, unchecked_links = [], []
     decision_findings, decisions_asked = [], 0
-    cycle_findings, edited_files = [], {}
+    cycle_findings, import_findings, edited_files = [], [], {}
     for path, before, after in changes:
         root = _project_of(path)
         rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root)).replace(os.sep, "/") if root else os.path.basename(path)
@@ -550,6 +566,11 @@ def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_
                 cycle_findings += [(rel, item) for item in edit_shape.added_cycles(root, rel, before, after)]
             except (ValueError, RuntimeError, OSError) as exc:
                 failures.append(f"Smart Tool cycles check skipped: {exc}")
+        if dependency_mode != "off" and root:
+            try:
+                import_findings += [(rel, item) for item in import_notice.added_undeclared(root, rel, before, after)]
+            except (ValueError, RuntimeError, OSError) as exc:
+                failures.append(f"Smart Tool imports check skipped: {exc}")
         edited = doc_check.written(path, before, after)
         profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile")) if root else None
         if doc_mode != "off" and root and index_profile.kind(rel, profile) == "code":
@@ -590,6 +611,7 @@ def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_
         ([_duplicate_lines(duplicate_findings)] if duplicate_findings else []) + \
         ([_layer_lines(layer_findings)] if layer_findings else []) + \
         ([_cycle_lines(cycle_findings)] if cycle_findings else []) + \
+        ([_import_lines(import_findings)] if import_findings else []) + \
         ([_decision_lines(decision_findings)] if decision_findings else []) + \
         ([_callers_lines(caller_answers)] if caller_answers else []) + \
         ([_credential_lines(credential_findings)] if credential_findings else []) + \

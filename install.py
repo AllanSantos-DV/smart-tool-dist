@@ -25,8 +25,10 @@ import version
 SOURCE = Path(__file__).resolve().parent
 DEFAULT_TARGET = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "Programs" / "SmartTool"
 TASK_NAME = "SmartTool-Tray"
-ENTRY_SCRIPTS = ("tray.py", "smart_tool_daemon.py", "pretool_router.py", "session_audit.py")
+ENTRY_SCRIPTS = ("tray.py", "smart_tool_daemon.py", "pretool_router.py", "session_audit.py", "smart-tool-hook.exe")
 HOOK_SCRIPTS = ("pretool_router.py", "session_audit.py")
+SCRIPT_SUBFOLDER = {"pretool_router.py": "hooks", "session_audit.py": "hooks", "smart-tool-hook.exe": "native/bin"}
+NATIVE_HOOK = "native/bin/smart-tool-hook.exe"
 STARTUP_SCRIPT = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / "Microsoft" / "Windows" / \
     "Start Menu" / "Programs" / "Startup" / "SmartTool-Tray.vbs"
 TASK_SCRIPT = Path(paths.DATA_DIR) / "tray-start.vbs"
@@ -38,7 +40,7 @@ DEPENDENCY_STAMP = ".dependencies.sha256"
 REGISTRY = Path(paths.DATA_DIR) / "daemon.json"
 BLOCKED = {"__pycache__", ".token-guard", ".git", ".pytest_cache", ".data", ".artifacts", ".claude", ".vscode",
            ".impeccable", "tests", "sessions", "results", "dist", "node_modules", ".node-runtime", ".venv",
-           ".scratch", ".memory", "docs", "reports", "site", "design", "release", "npm", ".github", "AGENTS.md", "CLAUDE.md", "DESIGN.md", "PRODUCT.md", "install.py", "uninstall.py", ".gitignore", ".gitattributes", MANIFEST}
+           ".scratch", ".memory", "docs", "reports", "site", "design", "release", "npm", "hook_client", ".github", "AGENTS.md", "CLAUDE.md", "DESIGN.md", "PRODUCT.md", "install.py", "uninstall.py", ".gitignore", ".gitattributes", MANIFEST}
 PACKAGE_ONLY = {"bin", "package.json", ".npmignore"}
 REQUIRED_TOOLS = {"smart_search", "smart_search_result", "web_search", "project_manage"}
 LANGUAGE = "en"
@@ -68,9 +70,11 @@ def t(text, **values):
 
 
 def ships(rel):
+    """Whether the repository file `rel` is part of the product: of `native/` only the compiled hook client is."""
     parts = Path(rel).parts
     *folders, name = parts
     return (parts[0] not in PACKAGE_ONLY
+            and (parts[0] != "native" or Path(rel).as_posix() == NATIVE_HOOK)
             and not any(part in BLOCKED or part.startswith("_cdp_") for part in folders)
             and name not in BLOCKED and not name.endswith((".log", ".pyc", ".png")))
 
@@ -103,8 +107,9 @@ def _processes():
 
 
 def _script_folder(script):
+    """The installation folder of an entry script or of the native hook client, whichever subfolder it sits in."""
     path = Path(script)
-    return path.parent.parent if path.name in HOOK_SCRIPTS else path.parent
+    return path.parents[len(Path(SCRIPT_SUBFOLDER.get(path.name, "")).parts)]
 
 
 def _same_folder(path, folder):
@@ -220,7 +225,8 @@ def other_installs(target):
 def _repointed(text, folder, target):
     """text with each spelling of folder found in front of an entry script (long, 8.3 or mixed) replaced by target."""
     for script in set(_script_paths(text)):
-        cut = len(Path(script).name) + 1 + (len("hooks") + 1 if Path(script).name in HOOK_SCRIPTS else 0)
+        subfolder = SCRIPT_SUBFOLDER.get(Path(script).name)
+        cut = len(Path(script).name) + 1 + (len(subfolder) + 1 if subfolder else 0)
         spelled = script[:-cut]
         if _same_folder(Path(spelled), folder):
             text = text.replace(spelled, target.as_posix() if "/" in spelled else str(target))
@@ -253,6 +259,21 @@ def remove_other_installs(target):
     return removed
 
 
+def copy_over(source, dest):
+    """Copies source over dest. Windows will not overwrite an executable that is running, such as the native hook client
+    of a call waiting out the daemon's restart, but it renames one: the old file goes aside as `<name>.old`, which the
+    next copy deletes."""
+    aside = dest.with_name(dest.name + ".old")
+    try:
+        aside.unlink(missing_ok=True)
+        shutil.copy2(source, dest)
+    except PermissionError:
+        if not dest.is_file():
+            raise
+        os.replace(dest, aside)
+        shutil.copy2(source, dest)
+
+
 def copy_files(target, files, backup, changed, removed):
     previous = set(json.loads((target / MANIFEST).read_text(encoding="utf-8"))["files"]) if (target / MANIFEST).is_file() else set()
     if (target / MANIFEST).is_file():
@@ -266,7 +287,7 @@ def copy_files(target, files, backup, changed, removed):
             shutil.copy2(dest, backup / rel)
         changed.append(rel)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, dest)
+        copy_over(source, dest)
         os.utime(dest)
     for rel in sorted(previous - set(files)):
         if (target / rel).is_file():
@@ -296,7 +317,7 @@ def clear_bytecode(target):
 def restore(target, backup, changed, removed):
     for rel in changed:
         if (backup / rel).is_file():
-            shutil.copy2(backup / rel, target / rel)
+            copy_over(backup / rel, target / rel)
             os.utime(target / rel)
         else:
             (target / rel).unlink(missing_ok=True)

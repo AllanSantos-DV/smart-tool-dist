@@ -16,7 +16,9 @@ import affected_tests
 import atomic_io
 import client_hooks
 import config
+import duplicates_section
 import hook_decision
+import staged_impact
 
 MARKER = "# smart-tool-commit-check"
 HOOK_NAME = "pre-commit"
@@ -28,6 +30,9 @@ PUSH_HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hoo
 PUSH_DOCS_FLAG = "--docs"
 PUSH_DOCS_NOTE = (" With docs=true it also lists the public functions of the pushed range that lack a docstring or the "
                   "Feature line.")
+PUSH_LINKS_FLAG = "--links"
+PUSH_LINKS_NOTE = (" With links=true it also reads the external links the pushed range adds, at most 10 per range, over "
+                   "the network, and lists the ones that look dead.")
 DEFAULT_HOOK = HOOK_NAME
 MAX_FILES = 50
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -61,8 +66,11 @@ def review(root):
     """Reviews the staged change of the repository at `root` with the notes the edit hook gives a finished diff.
 
     Parameters: root (str) project folder, inside a git repository.
-    Returns: dict with `files` (the staged files that were reviewed) and `notes` (str; empty when every check is quiet,
-    and it says how many staged files past MAX_FILES were not reviewed).
+    Returns: dict with `files` (the staged files that were reviewed), `notes` (str; empty when every check is quiet,
+    and it says how many staged files past MAX_FILES were not reviewed) and `duplicates` (the advisory section of
+    `duplicates_section.review` over the reviewed files; it never blocks a commit), `tests_to_run` (the `staged_impact`
+    section without its `untested` list: the test files and commands for the staged change, with `checked` and `problem`
+    when the code graph is missing or the check failed) and `untouched_by_tests` (the staged functions no test reaches).
     Raises: ValueError when git cannot read the index, RuntimeError or OSError when a check cannot run.
     """
     paths = _staged_paths(root)
@@ -82,7 +90,10 @@ def review(root):
     if left > 0:
         skipped = f"{left} staged file{'s were' if left != 1 else ' was'} not reviewed: the review reads the first {MAX_FILES}."
         notes = f"{notes} {skipped}".strip()
-    return {"files": [rel for rel, *_ in changes], "notes": notes}
+    impact = staged_impact.review(root)
+    return {"files": [rel for rel, *_ in changes], "notes": notes, "duplicates": duplicates_section.review(root, changes),
+            "tests_to_run": {key: value for key, value in impact.items() if key != "untested"},
+            "untouched_by_tests": impact["untested"]}
 
 
 def hook_python():
@@ -104,16 +115,17 @@ def _hook_text():
             "exit 0\n")
 
 
-def _push_hook_text(docs=False):
+def _push_hook_text(docs=False, links=False):
     """The `pre-push` script: it passes git's arguments and, through the inherited stdin, the pushed ranges to the review
     client; the command line ends with the hook origin, the failure line is printed, and the exit status stays 0 (a git
     hook that exits non-zero blocks the push).
 
     Parameters: docs (bool) write the `--docs` flag into the command line, which asks the review for the documentation
-    section; without it the text is the one every earlier install wrote.
+    section; links (bool) write the `--links` flag, which asks it to check the external links the range adds; without
+    them the text is the one every earlier install wrote.
     """
     command = f"{shlex.quote(hook_python())} {shlex.quote(client_hooks._shell_safe(PUSH_HOOK_SCRIPT))}"
-    flag = f" {PUSH_DOCS_FLAG}" if docs else ""
+    flag = (f" {PUSH_DOCS_FLAG}" if docs else "") + (f" {PUSH_LINKS_FLAG}" if links else "")
     return (f"#!/bin/sh\n{PUSH_MARKER}: written by Smart Tool (project_manage action=commit_hook_install hook=pre-push); "
             f"commit_hook_uninstall hook=pre-push removes it\n"
             f'{command} "$@"{flag} {HOOK_ORIGIN}\n'
@@ -186,34 +198,42 @@ def _blockers(root, hook, marker=MARKER):
     return found
 
 
-def install_hook(root, hook=DEFAULT_HOOK, docs=False):
+def install_hook(root, hook=DEFAULT_HOOK, docs=False, links=False):
     """Writes the opt-in git hook `hook` of the repository at `root`, after a backup of an older hook of ours.
 
     Parameters: root (str) project folder, inside a git repository; hook (str) `pre-commit` or `pre-push`; docs (bool)
     for `pre-push`, also list the public functions of the pushed range that lack a docstring or the Feature line; the
-    option is the `--docs` flag of the written command, so installing again without it writes the plain hook.
+    option is the `--docs` flag of the written command, so installing again without it writes the plain hook; links
+    (bool) for `pre-push`, also check the external links the pushed range adds, written as the `--links` flag the same way.
     Returns: dict with `installed`, `changed`, `file` and `backup` (path of the copy of our older hook, None when new), and
-    `docs` true when the option was written.
-    Raises: ValueError, naming everything found and changing nothing, when `hook` is unknown, `docs` is not a boolean or
-    is asked for a hook other than `pre-push`, core.hooksPath is set, husky is used or a hook of that name that is not
-    ours exists.
+    `docs` and `links` true when the option was written.
+    Raises: ValueError, naming everything found and changing nothing, when `hook` is unknown, `docs` or `links` is not a
+    boolean or is asked for a hook other than `pre-push`, core.hooksPath is set, husky is used or a hook of that name that
+    is not ours exists.
     """
     spec = _spec(hook)
     if type(docs) is not bool:
         raise ValueError("docs must be true or false.")
     if docs and hook != PUSH_HOOK_NAME:
         raise ValueError(f"docs=true applies to hook={PUSH_HOOK_NAME} only, not {hook}.")
+    if type(links) is not bool:
+        raise ValueError("links must be true or false.")
+    if links and hook != PUSH_HOOK_NAME:
+        raise ValueError(f"links=true applies to hook={PUSH_HOOK_NAME} only, not {hook}.")
     path = os.path.join(_hooks_dir(root), hook)
     found = _blockers(root, path, spec["marker"])
     if found:
         raise ValueError(f"The {spec['label']} hook was not installed and nothing was changed: " + "; ".join(found) + ".")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     backup = atomic_io.backup_file(path)
-    atomic_io.write_text(path, spec["text"](docs=True) if docs else spec["text"]())
+    options = {name: True for name, on in (("docs", docs), ("links", links)) if on}
+    atomic_io.write_text(path, spec["text"](**options))
     os.chmod(path, 0o755)
     answer = {"installed": True, "changed": True, "file": path, "backup": backup, "note": spec["note"]}
     if docs:
-        answer.update(docs=True, note=spec["note"] + PUSH_DOCS_NOTE)
+        answer.update(docs=True, note=answer["note"] + PUSH_DOCS_NOTE)
+    if links:
+        answer.update(links=True, note=answer["note"] + PUSH_LINKS_NOTE)
     return answer
 
 

@@ -46,21 +46,27 @@ def _git(root, *args):
     return result.stdout.decode("utf-8", "replace")
 
 
-def _changes(root, base):
-    """Project-relative changed paths with their status and the new-side changed lines (None = whole file)."""
+def _changes(root, base, staged=False):
+    """Project-relative changed paths with their status and the new-side changed lines (None = whole file).
+
+    With `staged` the paths are those of `git diff --cached` (what the index holds against HEAD, so a first commit
+    works): `base` is not read, and unstaged and untracked files are not listed."""
     top = _git(root, "rev-parse", "--show-toplevel").strip()
     prefix = os.path.relpath(os.path.realpath(root), os.path.realpath(top)).replace(os.sep, "/")
     prefix = "" if prefix == "." else prefix + "/"
-    _git(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
+    if not staged:
+        _git(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
+    against = ["--cached"] if staged else [base]
     changes = {}
-    fields = _git(root, "diff", "--name-status", "-z", "--no-renames", base, "--", ".").split("\0")
+    fields = _git(root, "diff", "--name-status", "-z", "--no-renames", *against, "--", ".").split("\0")
     for status, path in zip(fields[0::2], fields[1::2]):
         if path.startswith(prefix):
             changes[path[len(prefix):]] = {"status": "deleted" if status == "D" else "changed", "lines": set()}
-    for path in _git(root, "ls-files", "--others", "--exclude-standard", "-z", "--full-name", "--", ".").split("\0"):
-        if path and path.startswith(prefix):
-            changes[path[len(prefix):]] = {"status": "added", "lines": None}
-    diff = _git(root, "diff", "-U0", "--no-renames", "--relative", base, "--", ".")
+    if not staged:
+        for path in _git(root, "ls-files", "--others", "--exclude-standard", "-z", "--full-name", "--", ".").split("\0"):
+            if path and path.startswith(prefix):
+                changes[path[len(prefix):]] = {"status": "added", "lines": None}
+    diff = _git(root, "diff", "-U0", "--no-renames", "--relative", *against, "--", ".")
     for block in re.split(r"^diff --git ", diff, flags=re.M)[1:]:
         target = re.search(r"^\+\+\+ b/(.+)$", block, re.M)
         if target and target.group(1) in changes and changes[target.group(1)]["lines"] is not None:
@@ -308,11 +314,13 @@ def _label(symbol, by_id):
     return f"{symbol['path']}::{symbol['name']}"
 
 
-def affected(root, base="HEAD", limit=30, view_id=None):
-    """Test files to run for the changes since base, most likely failures first, with the command to run them."""
+def affected(root, base="HEAD", limit=30, view_id=None, staged=False):
+    """Test files to run for the changes since base, most likely failures first, with the command to run them.
+
+    With `staged` the changes are the staged ones only (see `_changes`) and `base` is just the label of the answer."""
     if not isinstance(base, str) or not re.fullmatch(r"[\w./@^~{}-]{1,200}", base) or base.startswith("-"):
         raise ValueError("base must be a git revision such as HEAD, main or origin/main.")
-    changes = _changes(root, base)
+    changes = _changes(root, base, staged)
     selected = index_inventory.inspect(root, view_id)["selected"] or {}
     pending = code_graph.pending_changes(root, selected["path"]) if selected.get("current") else {}
     data = code_graph.build_overlay(root, {**pending, **{path: change["status"] for path, change in changes.items()}},

@@ -18,6 +18,7 @@ import paths
 
 ORIGIN = "smart-tool"
 RESTART_WINDOW_S = 10
+WINDOW_ENV = "SMART_TOOL_HOOK_WINDOW_S"
 DOWN_MEMORY_S = 60
 CONNECT_TIMEOUT_S = 2
 QUIET_CONNECT_TIMEOUT_S = 0.4
@@ -90,9 +91,10 @@ def _clear_down():
 def call(route, raw, client="", window_s=None, sleep=time.sleep):
     """`(output, first_failure)` of one hook call. `output` is the daemon's JSON answer ({} when it stayed
     unreachable); `first_failure` is the cause in plain words the first time the daemon is found unreachable, None when
-    it answered or when an earlier call already reported the same outage."""
+    it answered or when an earlier call already reported the same outage. The restart window is `RESTART_WINDOW_S`, or the
+    seconds in the environment variable `SMART_TOOL_HOOK_WINDOW_S` (tests shorten it; the native client reads the same)."""
     query = {"client": client} if client else {}
-    window = RESTART_WINDOW_S if window_s is None else window_s
+    window = float(os.environ.get(WINDOW_ENV) or RESTART_WINDOW_S) if window_s is None else window_s
     quiet = _down_recently()
     deadline = time.monotonic() + (0 if quiet else window)
     attempt = 0

@@ -24,8 +24,6 @@ import threading
 import time
 import urllib.parse
 
-import trafilatura
-
 import document_text
 import model_client
 import research_cache
@@ -67,7 +65,11 @@ _failed = {}
 
 
 class FetchError(RuntimeError):
-    pass
+    """A page that could not be read; `status` is the HTTP status when the server answered one, otherwise None."""
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 def _ip_allowed(ip):
@@ -167,7 +169,7 @@ def _get(url, deadline):
         if response.status in (301, 302, 303, 307, 308):
             return response.status, response.getheader("Location"), None, None
         if response.status >= 400:
-            raise FetchError(f"HTTP {response.status} at {url}")
+            raise FetchError(f"HTTP {response.status} at {url}", response.status)
         body = bytearray()
         while True:
             if sock.fileno() != -1:
@@ -248,6 +250,14 @@ def office_text(body, extension, url):
         raise FetchError(f"{extension} file could not be read ({url}): {exc}"[:300]) from None
 
 
+def _extract_markdown(body, url):
+    """Main text of an HTML page as Markdown ('' when the extractor finds none). `body` is bytes, not str: trafilatura
+    detects the encoding declared in <meta charset> when the header has none."""
+    import trafilatura  # imported here: its 250 modules and 23 MB are only needed by the first HTML page read
+    return trafilatura.extract(body, output_format="markdown", include_links=True, include_tables=True,
+                               include_formatting=True, url=url) or ""
+
+
 def read_page(url, deadline, render):
     """Page text (Markdown) from the 24 h cache, HTTP + trafilatura, or `render(url, deadline)` when HTTP comes thin."""
     url = normalize(url)
@@ -258,9 +268,7 @@ def read_page(url, deadline, render):
     final_url, kind, charset, body = fetch_http(url, deadline)
     rendered, render_error = False, None
     if "html" in kind:
-        # Bytes, not str: trafilatura detects the encoding declared in <meta charset> when the header has none.
-        text = trafilatura.extract(body, output_format="markdown", include_links=True, include_tables=True,
-                                   include_formatting=True, url=final_url) or ""
+        text = _extract_markdown(body, final_url)
         if thin(text):
             try:
                 markdown = render(final_url, deadline)

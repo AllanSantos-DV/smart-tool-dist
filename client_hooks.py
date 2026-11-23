@@ -15,6 +15,8 @@ import hook_call
 
 HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "pretool_router.py")
 MARKER = "pretool_router.py"
+NATIVE_MARKER = "smart-tool-hook.exe"
+NATIVE_HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "native", "bin", NATIVE_MARKER)
 AUDIT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "session_audit.py")
 AUDIT_MARKER = "session_audit.py"
 TURN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "turn_end.py")
@@ -57,7 +59,7 @@ def identify(client_info):
 
 
 def _our_hook(hook):
-    return isinstance(hook, dict) and (MARKER in str(hook.get("command", "")) or TURN_MARKER in str(hook.get("command", "")) or
+    return isinstance(hook, dict) and (any(marker in str(hook.get("command", "")) for marker in (MARKER, NATIVE_MARKER, TURN_MARKER)) or
                                        any(path in str(hook.get("url", "")) for path in LEGACY_URL_PATHS))
 
 
@@ -153,7 +155,7 @@ def inspect(client, trust=True, manager=True):
                 text = stream.read()
         except FileNotFoundError:
             continue
-        if MARKER not in text and not any(path in text for path in LEGACY_URL_PATHS):
+        if not any(marker in text for marker in (MARKER, NATIVE_MARKER, *LEGACY_URL_PATHS)):
             continue
         if not path.endswith(".json"):
             return {"state": "current", "changes": []}
@@ -254,10 +256,18 @@ def _timeout(route):
     return hook_call.ROUTE_TIMEOUT_S[route] + 1 + hook_call.RESTART_WINDOW_S
 
 
+def _native_hook():
+    """Path of the native hook client when this installation has it (Windows only), else None."""
+    return NATIVE_HOOK if sys.platform == "win32" and os.path.isfile(NATIVE_HOOK) else None
+
+
 def _command(client, route):
     """The command of a client for a route (`pretool`, `posttool`, `subagent-start`), signed with HOOK_ORIGIN at the
-    end; it finds the daemon through its run file on every call."""
-    return f"{_shell_safe(sys.executable)} {_shell_safe(HOOK_SCRIPT)} --client {client} --route {route} {HOOK_ORIGIN}"
+    end; it finds the daemon through its run file on every call. It runs the native client when the installation has
+    it and the Python script otherwise."""
+    native = _native_hook()
+    program = _shell_safe(native) if native else f"{_shell_safe(sys.executable)} {_shell_safe(HOOK_SCRIPT)}"
+    return f"{program} --client {client} --route {route} {HOOK_ORIGIN}"
 
 
 def _handler(client, route="pretool"):

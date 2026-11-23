@@ -14,10 +14,14 @@ import affected_tests
 import code_health
 import code_impact
 import config
+import dependencies_section
 import doc_check
+import doc_refs_section
 import doc_scope
 import dossier
+import duplicates_section
 import hook_decision
+import new_links_section
 import removed_callers
 
 MAX_FUNCTIONS = 15
@@ -232,6 +236,38 @@ def _new_dead_lines(dead, note, problem):
     return lines + ([problem] if problem else []) + [""]
 
 
+def _duplicate_lines(section, limit):
+    """The Markdown section on copied functions; left out when the changed files copy nothing, and said when the check could
+    not run."""
+    if section["checked"] and not section["findings"]:
+        return []
+    lines = ["### Duplicated functions", ""]
+    if not section["checked"]:
+        return lines + [f"Not checked: {section['problem']}.", ""]
+    shown = section["findings"][:limit]
+    lines += [f"- {duplicates_section.describe(item)}" for item in shown]
+    if len(section["findings"]) > len(shown):
+        lines.append(f"- ... and {len(section['findings']) - len(shown)} more")
+    return lines + ["", "Advisory: reuse the existing function unless the copy is intentional (a move, a deliberate fork).", ""]
+
+
+def _advisory_lines(title, section, describe, limit, advisory, notes=()):
+    """The Markdown section of one advisory check; left out when it found nothing, unless it could not run or left something
+    unsaid (`notes`)."""
+    if not (section["findings"] or section["problem"] or notes):
+        return []
+    lines = [f"### {title}", ""]
+    shown = section["findings"][:limit]
+    lines += [f"- {describe(item)}" for item in shown]
+    if len(section["findings"]) > len(shown):
+        lines.append(f"- ... and {len(section['findings']) - len(shown)} more")
+    if section["findings"]:
+        lines += ["", advisory]
+    lines += list(notes)
+    lines += [f"Not checked: {section['problem']}."] if section["problem"] else []
+    return lines + [""]
+
+
 def _shape_lines(cycles, cycles_note, cycles_problem, hotspots, hotspots_problem, changed_code):
     """The Markdown sections on import cycles and hotspots of the changed files; a section with nothing to say is left out
     unless the graph was cut or the check could not run, which are said."""
@@ -279,12 +315,17 @@ def _stale(root, view_id, paths):
     return [f for f in found if f["issue"] != "broken_link" and f["id"].rpartition("::")[0] in paths], None
 
 
-def report(root, base="HEAD", limit=30, view_id=None):
+def report(root, base="HEAD", limit=30, view_id=None, links=False):
     """Impact of the changes since base.
 
-    Parameters: root (str) project folder; base (str) git revision; limit (int) rows per list; view_id (str or None).
-    Returns: dict with 'markdown' and the data behind it (touched, tests, stale_anchors, commands, run_all).
+    Parameters: root (str) project folder; base (str) git revision; limit (int) rows per list; view_id (str or None);
+    links (bool) read the external links the diff adds and list the ones that look dead (network use, off by default).
+    Returns: dict with 'markdown' and the data behind it (touched, tests, stale_anchors, commands, run_all, and the sections
+    duplicates, doc_refs, dependencies and new_links).
+    Raises: ValueError when `links` is not a boolean.
     """
+    if type(links) is not bool:
+        raise ValueError("links must be true or false")
     changes = affected_tests.affected(root, base, limit, view_id)
     changed_code = set(changes["changed"]["code"])
     touched = changes["touched_functions"][:MAX_FUNCTIONS]
@@ -293,6 +334,10 @@ def report(root, base="HEAD", limit=30, view_id=None):
     untested = [label for label in touched if callers[label] is None or callers[label][2] == 0]
     versions = _versions(root, base, changes)
     notes, notes_problem = _hook_notes(versions)
+    duplicated = duplicates_section.review(root, versions)
+    stale_refs = doc_refs_section.review(root, versions)
+    dependencies = dependencies_section.review(root, versions, view_id)
+    new_links = new_links_section.review(versions) if links else new_links_section.disabled()
     removed, removed_problem = _removed_callers(root, versions, changed_code)
     resigned, resigned_problem = _signature_callers(root, versions, changed_code)
     coupled, coupled_note = _coupled(root, view_id, changes)
@@ -332,6 +377,15 @@ def report(root, base="HEAD", limit=30, view_id=None):
     else:
         lines += ["No documented entry in the changed files is out of date.", ""]
     lines += ["### Edit checks over the whole diff", "", notes or notes_problem or "The edit checks find nothing to add.", ""]
+    lines += _duplicate_lines(duplicated, limit)
+    lines += _advisory_lines("Documentation that still names removed code", stale_refs, doc_refs_section.describe, limit,
+                             "Advisory: update these lines, or keep the old name if the removal was a mistake.")
+    lines += _advisory_lines("Dependencies", dependencies, dependencies_section.describe, limit,
+                             "Advisory: a package imported under another name than its package name, or loaded by a tool or a "
+                             "config file, is not seen; read the confidence and the reason of each line.", dependencies["notes"])
+    lines += _advisory_lines("New external links that may be dead", new_links, new_links_section.describe, limit,
+                             "Advisory: an error is not proof the page is gone; open the link before changing it.",
+                             [new_links_section.cut_sentence(new_links["not_checked"])] if new_links["not_checked"] else ())
     if touched:
         lines += ["### Decision notes of the touched functions", ""]
         lines += [f"- `{label}`: `{hit['id']}` {hit['title']}" for label, hits in decisions.items() for hit in hits]
@@ -364,7 +418,8 @@ def report(root, base="HEAD", limit=30, view_id=None):
     return {"base": base, "markdown": "\n".join(lines).rstrip("\n") + "\n", "touched": touched,
             "callers": {label: (reached[1] if reached else 0) for label, reached in callers.items()},
             "untested": untested, "coupled": coupled, "cycles": cycles, "hotspots": hotspots, "new_without_caller": new_dead, "decisions": decisions, "decisions_note": decisions_note,
-            "edit_checks": notes or notes_problem,
+            "edit_checks": notes or notes_problem, "duplicates": duplicated,
+            "doc_refs": stale_refs, "dependencies": dependencies, "new_links": new_links,
             "removed_callers": [item for answer in removed for item in answer["findings"]],
             "signature_callers": [item for answer in resigned for item in answer["findings"]],
             "stale_anchors": stale, "stale_note": stale_note, "tests": changes["tests"],

@@ -11,7 +11,7 @@ A local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharpe
 | `web_fetch_many` | Reads up to 8 known URLs in one call with the same prompt, 4 at a time, each exactly as `web_fetch` reads it (24 h cache, browser for JavaScript pages, public addresses only). One block per URL in the order given: the answer, or an `ERROR` line with the reason, so a URL that fails never hides the others; a repeated URL is read once |
 | `read_document` | Reads a PDF, Word, PowerPoint, Excel, HTML, CSV or EPUB file as compact text, a range at a time: type, size, page/slide/sheet/part/chapter count and estimated tokens first, then only the units asked for (`range="3-5"`), so the file never enters the agent's context whole. The path can also be an `http(s)` URL of a PDF, Word, PowerPoint, Excel, CSV or EPUB file: it is downloaded the way `web_fetch` downloads (public addresses only, 5 MB cap), kept for 24 hours and read with the same ranges and token estimate; a URL of a web page fails and points to `web_fetch`. Opt-in: the native Read is not redirected. Scanned PDFs fail with that reason (no OCR) |
 | `read_document_many` | Reads up to 8 documents (local paths or URLs, mixed) in one call, 4 at a time, each exactly as `read_document` reads it. One block per entry in the order given: the `read_document` answer, or an `ERROR` line with the reason. `range`, `max_chars` and `info_only` apply to every document (`range="1-3"` reads those units of each one and fails alone for a document it does not fit; `max_chars` is the cap per document); an entry repeated is read once; the call fails only when every document failed. Opt-in, like `read_document` |
-| `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage; `graph` with `symbol` tells what changing a function touches: callers, calls, the tests that reach it and the files that import it |
+| `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage; `graph` with `symbol` tells what changing a function touches: callers, calls, the tests that reach it and the files that import it; with `brief=true` it also gives the files that usually change with it and the decision notes that name it |
 
 Agents that must click, type or log in also get Microsoft's [Playwright MCP](https://github.com/microsoft/playwright-mcp),
 registered as the `playwright` server where this machine lets a browser be driven (see Set up, step 3).
@@ -19,7 +19,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.86 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.87 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -91,7 +91,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.86 install
+npx @allansantos-dev/smart-tool@0.9.87 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -163,8 +163,12 @@ Redirects) and Maintenance (Setup audit, Startup).
    what an update changes; updating previews the entry and rewrites only Smart Tool's, after a backup. Every
    command hook it writes (the Codex redirect hook and the session-start hook) ends with
    `--hook-origin=smart-tool`, so its command line names Smart Tool as its owner; an entry written before that shows
-   as outdated, and updating replaces it instead of adding a second one. Claude Code's redirect hooks are HTTP
-   entries with no command line. In Codex, installing or updating a hook replaces Smart Tool's entry in place and
+   as outdated, and updating replaces it instead of adding a second one. On Windows, when the installation has
+   `native/bin/smart-tool-hook.exe` (the native client, written in Rust), the PreToolUse, PostToolUse and SubagentStart
+   entries run it instead of the Python script: the same behavior and messages for 15.6 ms of CPU and 2.2 MB of memory per
+   call against 125 to 156 ms and 14 MB (`docs/research/2026-11-22-nativo-tres-achados-resultado.md`). The Python client
+   stays the command where the executable is missing and for the other hooks, and a hook already installed keeps its
+   Python command until it is installed again through the setup screen or `install_hook`. In Codex, installing or updating a hook replaces Smart Tool's entry in place and
    records its approval in `~/.codex/config.toml`, as `/hooks` would, so Codex runs it with no approval step; the
    other hooks keep theirs.
 
@@ -194,7 +198,9 @@ Redirects) and Maintenance (Setup audit, Startup).
    `none`: only the client name is known, which is what Codex gives, since its hook does not cover MCP tools). The
    query text is not stored there. The folder and session come from the installed hook: after an update, "Update hook"
    on the setup page adds `web_search` and `web_fetch` to its matcher. A native WebSearch or WebFetch that the hook
-   redirects is attributed from the hook payload itself (`mcp_session` empty). `integration-metrics.jsonl` carries the
+   redirects is attributed from the hook payload itself (`mcp_session` empty). A client that speaks MCP 2026-07-28
+   (no `initialize`, no `Mcp-Session-Id`; it calls `server/discover`) is named from the `clientInfo` in the request's
+   `_meta` and has `mcp_session` empty. `integration-metrics.jsonl` carries the
    same `requester` on the web events. A `deep` crawl job writes no provider record, so it has none. The hook's note
    waits up to 60 s for its MCP call; an identical query from two sessions at once can swap their notes.
 
@@ -293,7 +299,13 @@ Redirects) and Maintenance (Setup audit, Startup).
    test reaches are listed apart), the documentation anchors left out of date, the decision notes and commits that name
    a touched function (a single-word name counts only as a code reference), the files that usually change in the same
    commits and are missing from the diff, the notes the edit hook would have added to the whole diff (comments, copies,
-   dependency advisories, credentials) and the tests to run with their commands. It reads
+   dependency advisories, credentials) and the tests to run with their commands. Advisory sections follow: the
+   functions the diff adds or edits that copy code the project already has (`duplicates`), the README and `docs` lines
+   that still name a function the diff removed or renamed or a file it deleted or moved, and the imports of the changed
+   code files that no manifest declares with the dependencies of a changed manifest that no code imports (`Dependencies`,
+   each with its confidence and reason); a section that cannot run says why. With `links=true` it also reads the external
+   links the changed HTML and Markdown files add, at most 10 URLs, and lists the ones that look dead; that is the only
+   part that uses the network, and it is off by default. It reads
    only. `project_manage action=pr_impact_comment pr=<number> base=<revision>` posts the same report as a comment on that
    pull request through the `gh` CLI, from the project folder, and returns the comment URL. It writes to GitHub with your
    own `gh` login, so it is off until you turn on "Impact report as a pull request comment" in the setup screen (Agent
@@ -303,7 +315,8 @@ Redirects) and Maintenance (Setup audit, Startup).
 
    **Shape of the project**: `project_manage action=hotspots` ranks the code files by commits times lines (the
    riskiest to change), `dead_code` lists the functions no code calls and those only tests call (static call graph,
-   candidates to read before deleting), `import_cycles` lists the groups of files that import each other, and
+   candidates to read before deleting; each entry carries `name_mentions`, how many unresolved calls and import
+   specifiers of other files still name the function, and the lists are not filtered by it), `import_cycles` lists the groups of files that import each other, and
    `comments` lists comments in the wrong place across the code files (commented-out code, history tags, loose docs,
    long inline blocks), for code written before the edit hook existed. `credentials` lists, per git-tracked text file
    (read from disk, so `.env` files and old commits count), the file and line of each credential shape and never the
@@ -327,8 +340,14 @@ Redirects) and Maintenance (Setup audit, Startup).
    heading above the top version, a clean working tree (untracked files count) on `main` or `develop`, the tag
    `v<version>` still free and no entry of `docs/scope` out of date. A file it needs that is missing, or a git call that
    fails, is a check that is not ok with the reason, never a silent pass. The reply also lists the commit subjects since
-   the latest tag (`limit`); the full notes are `release_notes`, which analyzes the diff and takes seconds. Changes and
+   the latest tag (`limit`); the full notes are `release_notes`, which analyzes the diff and takes seconds. The reply also has `advisories`, in the shape of `checks`:
+   committed credentials, stale documentation references (`doc_refs`), broken relative links and import cycles, local
+   scans that never change `ready`. Changes and
    tags nothing.
+   **Mutation check** (opt-in, run by hand before a release, not by the hooks): `python release/qa/mutation_check.py
+   --venv <venv with cosmic-ray> --module credential_check.py --test test_credential_check` mutates a temporary copy of
+   one pure module, runs its test file per mutant and prints mutants, killed, survived and score; it exits 1 below
+   `--min-score` (default 100) and 2 when cosmic-ray is missing, and never installs anything.
    **Upgrade preview**: `project_manage action=upgrade_preview package=... to=...` says, before a dependency's manifest is
    edited, what bumping it changes: where the manifests declare it and the current version (the lockfile's when it
    satisfies the range), the OSV advisories of the current and the target version with those the target fixes or adds, the
@@ -351,6 +370,50 @@ Redirects) and Maintenance (Setup audit, Startup).
    name it (resolved calls, calls found by name, imports of the name, calls left in the same file, and the methods that
    go with a class) and the tests that reach it. It refuses a `path` that does not exist or is a folder and a `symbol`
    that `path` does not define. Static analysis: search the name as text too. Takes `limit`, deletes and writes nothing.
+   **Whole-project reads**: `project_manage action=untested` lists the functions that no test reaches through static
+   calls (up to 3 hops), the files with the most commits first, with the totals in `counts`; `risky_functions` ranks the
+   functions by `score = (size + 1) * (fan_in + 1) * (commits + 1) * (2 when no test reaches it)`, each row keeping its
+   `size` (end line minus start line), `fan_in` (distinct callers outside the test files), `commits` (of its file) and
+   `tested`, with the formula in `rank_rule`. Both say when the git history could not be read (every file then counts 0
+   commits), fail when the project has no code graph, take `limit` and write nothing.
+   `action=ownership` shows, for each of the `limit` hotspot files, its authors by commits and by surviving lines
+   (`git shortlog` and `git blame`) and flags the files where one author holds at least `threshold` of the lines (0.8
+   by default); `action=complexity` ranks the functions by cyclomatic complexity counted from branch tokens (Python,
+   JavaScript, TypeScript, Go, Java), those at or above `min_complexity` (default 10), as an approximation by tokens.
+   Both take `limit`, read only and write nothing.
+   `action=assertless` lists the test functions whose body holds no assertion (candidates: a test that asserts through a
+   helper looks assertion-less), under `folder` if given; `action=todo_age` lists the TODO, FIXME and HACK markers in
+   comments with the age of their line from `git blame`, oldest first, flagged past `older_than_days` (default 180).
+   Both take `limit`, read only and write nothing.
+   `action=orphan_modules` lists the Python and JavaScript/TypeScript source files that no code imports, no test imports
+   or names in a string and no README, `docs` file, config or script names, and that are not an entry point
+   (`package.json` entries, `__main__`, `__init__`, hook files, files that run themselves). They are candidates, like
+   `dead_code`: a file loaded by config, hooks, console scripts or a package main can be a false positive.
+   `action=undocumented_env` lists the environment variables the code reads with a literal name (`os.environ`,
+   `os.getenv`, `process.env`, `getenv`) that no README or `docs` file names, each with the file and line of its first
+   read and whether only tests read it. Both take `limit`, read only and write nothing.
+   `action=doc_refs` lists, per README and `docs` file, the paths, relative links and functions written in inline code
+   (outside fenced blocks) that no longer exist, each with its line and why; a function name that appears nowhere in
+   the code is stale, so a name invented as an example is listed too, and the generated `docs/scope` is left out.
+   `action=unused_deps` lists the dependencies the manifests declare (`package.json`, `requirements*.txt`,
+   `pyproject.toml`, `go.mod`) that no code imports and the packages the code imports that no manifest declares,
+   matched folder by folder against the external imports of the code graph. Each finding has a `confidence` (`medium`
+   or `low`, never certain) and a `reason`, since a tool or a config file can load a package by name and a package can
+   be imported under another name; for Python the possible names are in `alias_candidates`. A manifest or folder it
+   cannot judge is listed with its reason. `action=ext_links` is the opt-in link rot check of the external http(s) links of
+   those docs: each distinct URL is read once, at most `limit` and never more than 100, through the guarded `web_fetch`
+   download, and every one is `ok`, `dead` (HTTP 404 or 410) or `error` (another status or a failure, not proof the page
+   is gone) with its status and the places that write it. It uses the network only when called. The other actions of
+   this paragraph read the project only, take `limit` and write nothing.
+   **Coverage of the diff and secrets in history**: `project_manage action=diff_coverage [base=main]` reads the coverage
+   report your own last test run wrote (Cobertura `coverage.xml`, `lcov.info` or coverage.py JSON, in the project root or
+   a common report folder; the newest one) and lists, per function, the lines changed since `base` (default `HEAD`,
+   staged, unstaged and untracked files included) that no executed line covers, with the report's modified date against
+   the `HEAD` commit time and a `stale` warning when the report is older. It never runs the tests, and says so plainly
+   when no report is found. `action=history_secrets` is the opt-in, bounded scan of git history for credential shapes:
+   it reads the diffs of the newest `commit_limit` commits (default 500) for at most `budget_seconds` (default 20) and
+   lists the file, line, short commit hash and kind of each credential shape added or removed, never its value; a
+   folder that is not a git repository gets a clear message. Both take `limit` and write nothing.
    **Tree review**: `project_manage action=review_tree` gives the working tree the review `commit_check` gives the staged
    change: the tracked files changed since `HEAD`, staged or not, read from disk, through the same notes. Untracked,
    deleted and binary files are left out, the first 50 files are reviewed and the rest is said, and a tree with no change
@@ -362,7 +425,9 @@ Redirects) and Maintenance (Setup audit, Startup).
    another agent) are reviewed before they reach the commit. `action=commit_hook_install` writes a git `pre-commit` hook
    in the project that prints that review to stderr at every commit; it never blocks: the exit status is always 0, a
    daemon that is down is one line (`Smart Tool is not running, commit not reviewed`) and a check that fails is
-   printed. The hook finds the daemon through its run file, never through a port. The install refuses, naming what it
+   printed. The review also answers `tests_to_run` (the test files and commands for the staged change) and
+   `untouched_by_tests` (the staged functions no test reaches), the two lines the push review gives a pushed range, and the
+   hook prints them after the notes; without a code graph it says so. The hook finds the daemon through its run file, never through a port. The install refuses, naming what it
    found and changing nothing, when `core.hooksPath` is set, husky is used (a `.husky` folder or `husky` in
    `package.json`) or a `pre-commit` that is not Smart Tool's exists; an older hook of ours is backed up first.
    `action=commit_hook_uninstall` removes only that hook (identified by its marker line) and puts back a backed-up hook
@@ -379,6 +444,11 @@ Redirects) and Maintenance (Setup audit, Startup).
    have no docstring or whose technical entry under `docs/scope` has no `Feature` line (or no entry); without `docs/scope`
    it says the Feature lines were not checked. The option is the `--docs` flag of the written command, so installing again
    without it writes the plain hook, which is byte for byte the one written without the option; it never blocks either.
+   `commit_hook_install hook=pre-push links=true` adds the `--links` flag the same way: the summary then also reads the
+   external links each pushed range adds, at most 10 URLs per range, over the network, and lists the ones that look
+   dead (an `error` is not proof the page is gone); `links=true` is refused for `pre-commit`, and without it the hook
+   makes no network call. The summary also carries the `duplicates`, documentation reference and `Dependencies`
+   sections of `pr_impact`, advisory like the rest.
 
    **Layers on edit**: when the project has confirmed layers (`.smart-tool/layers.json`), an edit that adds a call from
    a lower layer to a function of a higher one is flagged to the agent; it never blocks. `layer_mode` in
@@ -424,6 +494,11 @@ Redirects) and Maintenance (Setup audit, Startup).
    the other edit notes (all of them `off` silences the review).
 
    **Dependency check on edit**: an edit of `package.json`, `requirements*.txt`, `pyproject.toml` (`project.dependencies` and `project.optional-dependencies`; Poetry tables are not read), `go.mod`, `Cargo.toml` (crates.io registry dependencies) or `pom.xml` (Maven, plain or property-resolved versions) that adds or changes a dependency lists the OSV advisory IDs of up to 5 of them (exact version, or the lower bound of `^`, `~`, `~=` and `>=`), answered from a 6 h disk cache or one 2.5 s batch call that sends only package names and versions; when OSV cannot answer, the reminder says the check was skipped and the edit goes on. `dependency_mode` in `config.json`: `warn` (default) or `off`.
+
+   **Undeclared imports on edit**: an edit of a Python file that adds an import no manifest of its folder declares is
+   flagged to the agent with the line, the manifest, a `confidence` and a `reason`, and `pr_impact` and `commit_check` give
+   the same note for a finished diff. Only Python files are read, from the code graph when it is already cached, so
+   nothing cached means nothing said; it follows `dependency_mode` and never blocks.
 
    **PDFs** inside a project are indexed as text with `[page N]` markers (20 MiB, 300 pages and 20 s per file; a scanned, password-protected or corrupt PDF is skipped with the reason), so `smart_search` returns the page that holds a passage. **Presentations and workbooks** (`.pptx`, `.xlsx`) are indexed the
    same way: text of each slide under `[slide N]` with the speaker notes under `[notes N]`, each sheet under `[sheet NAME]` with one
@@ -499,9 +574,11 @@ Redirects) and Maintenance (Setup audit, Startup).
    (`hooks/session_audit.py`) only asks the running service and prints nothing when the service is down.
 4. **Embedder**: the embeddings home (casa-de-embeddings, the embedding service of this machine, found through
    `~/.casa-de-embeddings/run/daemon.json`) is the default; the gateway's `embedding_model` and `rerank_model` are used
-   only when you choose **Gateway** here, never in place of a stopped home. With the home chosen, the service installs
-   it when it is missing, brings it to the registry's version when it is older (the engine registry's kit checks the
-   SHA-256 and the Ed25519 signature of the asset) and starts it, looking again once a day and ten minutes after a
+   only when you choose **Gateway** here, never in place of a stopped home. With the home chosen, the service brings an
+   installed one to the registry's version when it is older (the engine registry's kit checks the
+   SHA-256 and the Ed25519 signature of the asset) and starts it at boot, and a machine without it installs it in the
+   background at the first embedder use, not at boot, so until it answers searches are lexical and the warning says why;
+   the Gateway choice never installs it. It looks again once a day and ten minutes after a
    failure; a home that already answers at the registry's version or newer is left alone, and when it cannot be brought
    up, searches stay lexical and the warning names the reason. The home's embedder is identified by the
    `model_sha256` and `dimension` of its `/info`; a home that answers without them is reported as an error, never
@@ -509,7 +586,11 @@ Redirects) and Maintenance (Setup audit, Startup).
    without one, results keep the hybrid order and say so. Switching the embedder re-embeds each project in the
    background, one at a time: the old index keeps answering, the folder switches to the new index when it is complete,
    and the vectors of the old model are then deleted. While the home is not running, a folder indexed with another model
-   keeps answering from that index and is not updated.
+   keeps answering from that index and is not updated. A home on another address, or behind a key, is reached by
+   setting `embeddings_home_url` (an http(s) URL) in `config.json`, which replaces the announce file's address for every
+   call; with the environment variable `CASA_API_KEY` (or `CASA_API_KEY_FILE`, a file holding the key; the variable wins)
+   every request to the home carries `Authorization: Bearer <key>`, read at each request and sent to no other host. An
+   unreadable or empty key file, or a 401 or 403 answer, is reported as an error without the key.
 5. **Web search providers** work without keys on their free public tiers; add your own key for more volume. Set your
    own contact (e-mail or URL) if you want public APIs such as Wikimedia to see it in the User-Agent. The same page lists
    who asked the recent searches (client and project folder, never the text of a search).
@@ -566,7 +647,7 @@ fails to load is listed in the setup screen with its error and does not affect t
 ## Uninstall
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.86 uninstall [--target DIR] [--keep-data]
+npx @allansantos-dev/smart-tool@0.9.87 uninstall [--target DIR] [--keep-data]
 ```
 
 It asks nothing and opens no window. It stops the tray and the daemon, removes the logon task, the hook entries of Smart

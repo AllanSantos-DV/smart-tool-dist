@@ -1,14 +1,19 @@
 """Whether the project can be tagged now, asked without changing anything: the version of `version.py` against the top
 heading of `CHANGELOG.md`, the README status line and the page `site/index.html`, no Unreleased content left in the
 changelog, a clean working tree on `main` or `develop`, a tag name still free and no documentation entry out of date. A
-check that cannot run is reported as not ok with its reason; nothing is tagged, written or published.
+check that cannot run is reported as not ok with its reason; nothing is tagged, written or published. Four local scans
+(credentials, stale doc references, broken relative links, import cycles) are listed apart as advisories and never decide
+`ready`.
 """
 import os
 import re
 import subprocess
 
 import affected_tests
+import code_health
+import doc_refs
 import doc_scope
+import project_scan
 import release_notes
 
 DEFAULT_LIMIT = 30
@@ -150,6 +155,39 @@ def _docs(root, limit):
     return False, f"{found['findings_total']} documentation finding(s): {shown}"
 
 
+def _credentials(root):
+    """Whether no tracked text file holds a credential shape."""
+    found = project_scan.credentials(root, SHOWN)
+    if not found["total"]:
+        return True, f"no credential shape in {found['files_checked']} tracked file(s)"
+    where = ", ".join(f"{item['path']}:{item['line']}" for item in found["findings"])
+    return False, f"{found['total']} credential shape(s) in tracked files: {where}{', ...' if found['total'] > SHOWN else ''}"
+
+
+def _doc_refs(root):
+    """Whether the README and docs name no path, link or function that is gone."""
+    found = doc_refs.check(root, SHOWN)
+    return not found["counts"]["stale"], found["summary"]
+
+
+def _links(root):
+    """Whether the relative links of the tracked HTML and Markdown files all point to a file."""
+    found = project_scan.links(root, SHOWN)
+    if not found["total_broken"]:
+        return True, (f"no broken relative link in {found['files_checked']} file(s); "
+                      f"{found['total_unchecked']} link(s) could not be decided")
+    where = ", ".join(f"{item['path']}:{item['line']}" for item in found["broken"])
+    return False, f"{found['total_broken']} broken relative link(s): {where}{', ...' if found['total_broken'] > SHOWN else ''}"
+
+
+def _cycles(root):
+    """Whether the indexed project has no import cycle."""
+    found = code_health.import_cycles(root, None, SHOWN)
+    if not found["total"]:
+        return True, "no import cycle in the indexed code graph"
+    return False, f"{found['total']} import cycle(s) covering {found['files_in_cycles']} files"
+
+
 def _run(name, function, *args):
     """One check as {"name", "ok", "detail"}; a failure to run it is a not-ok result carrying the cause."""
     try:
@@ -174,7 +212,8 @@ def check(root, limit=DEFAULT_LIMIT):
 
     Parameters: root (str) project folder; limit (int) commit subjects and documentation findings listed.
     Returns: dict {"ready": bool (every check ok), "version": str or None, "checks": [{"name", "ok", "detail"}],
-    "commits_since_last_tag": {"ok": True, "base", "commit_total", "commits": [{"hash", "subject"}]} or {"ok": False,
+    "advisories": [{"name", "ok", "detail"}] (committed credentials, stale doc references, broken relative links and import
+    cycles: local scans that never change `ready`), "commits_since_last_tag": {"ok": True, "base", "commit_total", "commits": [{"hash", "subject"}]} or {"ok": False,
     "error"}, "note": str}. Nothing raises for a missing file or a failed git call: that check is not ok with the reason.
     """
     try:
@@ -190,7 +229,9 @@ def check(root, limit=DEFAULT_LIMIT):
     checks.insert(2, _run("changelog_unreleased_empty", _changelog_unreleased, root))
     checks += [_run("working_tree_clean", _clean, root), _run("branch", _branch, root),
                _run("docs_current", _docs, root, limit)]
-    return {"ready": all(item["ok"] for item in checks), "version": version, "checks": checks,
+    advisories = [_run("credentials", _credentials, root), _run("doc_refs", _doc_refs, root),
+                  _run("relative_links", _links, root), _run("import_cycles", _cycles, root)]
+    return {"ready": all(item["ok"] for item in checks), "version": version, "checks": checks, "advisories": advisories,
             "commits_since_last_tag": _commits(root, limit),
             "note": "The full notes draft, with the touched functions and decision notes, is project_manage action="
                     "release_notes; it analyzes the diff, which takes seconds, so the check lists only the commits."}

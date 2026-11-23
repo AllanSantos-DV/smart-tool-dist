@@ -9,12 +9,14 @@ top 5), MRR@5 0.892; the gateway's text-embedding-3-small 42/35/40, 0.885; lexic
 import http.client
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
 import urllib.parse
 
 import config
+import engine_home
 import indexer
 import model_breaker
 import model_health
@@ -28,6 +30,10 @@ MAX_ATTEMPTS = 3
 HOME_FAILURE_CODES = (*model_breaker.BUSY_CODES, 500)
 REQUEST_TIMEOUT_S = 60
 RERANK_TIMEOUT_S = 15
+URL_SETTING = "embeddings_home_url"
+KEY_VARIABLE = "CASA_API_KEY"
+KEY_FILE_VARIABLE = "CASA_API_KEY_FILE"
+_TOKEN = re.compile(r"[\x21-\x7e]+")
 _lock = threading.Lock()
 _info = {"at": 0.0, "value": None, "error": None}
 
@@ -37,10 +43,58 @@ class IdentityError(ValueError):
     than this client needs, or an `/info` without `model_sha256` or `dimension`."""
 
 
+def _loopback(parsed):
+    """`parsed` with localhost replaced by 127.0.0.1: on Windows ::1 is tried first and a daemon bound to IPv4 only
+    costs about 2 s per connection."""
+    if parsed.hostname == "localhost":
+        parsed = parsed._replace(netloc=parsed.netloc.replace("localhost", "127.0.0.1", 1))
+    return urllib.parse.urlunsplit(parsed)
+
+
+def _configured_url():
+    """The home address set in config `embeddings_home_url`, validated; "" when the setting is empty."""
+    value = config.load_config().get(URL_SETTING)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return ""
+    parsed = urllib.parse.urlsplit(value.strip().rstrip("/") if isinstance(value, str) else "")
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise IdentityError(f"The setting {URL_SETTING} in {config.CONFIG_PATH} is not an http(s) URL with a host name.")
+    return _loopback(parsed)
+
+
+def api_key():
+    """Bearer key for the home: the environment variable CASA_API_KEY, else the stripped content of the file named by
+    CASA_API_KEY_FILE; None when neither is set. Read at every call. A file that is unreadable or empty, and a key that
+    cannot be an HTTP header value, raise IdentityError naming the source and never the key."""
+    key = os.environ.get(KEY_VARIABLE, "").strip()
+    source = KEY_VARIABLE
+    if not key:
+        path = os.environ.get(KEY_FILE_VARIABLE, "").strip()
+        if not path:
+            return None
+        source = f"{KEY_FILE_VARIABLE} ({path})"
+        try:
+            with open(path, encoding="utf-8") as stream:
+                key = stream.read().strip()
+        except (OSError, ValueError) as exc:
+            raise IdentityError(f"The embeddings home key file {path} named by {KEY_FILE_VARIABLE} cannot be read "
+                                f"({type(exc).__name__}).") from None
+        if not key:
+            raise IdentityError(f"The embeddings home key file {path} named by {KEY_FILE_VARIABLE} is empty.")
+    if not _TOKEN.fullmatch(key):
+        raise IdentityError(f"The embeddings home key from {source} must be one run of printable ASCII characters "
+                            "without spaces.")
+    return key
+
+
 def url():
-    """Base URL of the home from its announce file; None when the file does not exist (the home is not installed or
+    """Base URL of the home: the config `embeddings_home_url` when set (validated, IdentityError when it is not an
+    http(s) URL with a host), else the announce file, None when the file does not exist (the home is not installed or
     not running). A file that exists but cannot be read as an announce raises IdentityError. localhost becomes
-    127.0.0.1: on Windows ::1 is tried first and a daemon bound to IPv4 only costs about 2 s per connection."""
+    127.0.0.1 in both."""
+    configured_url = _configured_url()
+    if configured_url:
+        return configured_url
     try:
         with open(ANNOUNCE, encoding="utf-8") as stream:
             data = json.load(stream)
@@ -56,14 +110,13 @@ def url():
     if type(version) is not int or version < MIN_API_VERSION:
         raise IdentityError(f"The embeddings home announces API version {version!r}; Smart Tool needs "
                             f"{MIN_API_VERSION} or later. Update the embeddings home.")
-    if parsed.hostname == "localhost":
-        parsed = parsed._replace(netloc=parsed.netloc.replace("localhost", "127.0.0.1", 1))
-    return urllib.parse.urlunsplit(parsed)
+    return _loopback(parsed)
 
 
 def configured():
-    """Whether an announce file of the home exists (malformed counts: it raises at use, loudly)."""
-    return os.path.isfile(ANNOUNCE)
+    """Whether the home has an address: config `embeddings_home_url` is set, or an announce file exists (malformed
+    counts: it raises at use, loudly)."""
+    return bool(_configured_url()) or os.path.isfile(ANNOUNCE)
 
 
 def _connection(base, timeout):
@@ -73,11 +126,22 @@ def _connection(base, timeout):
 
 
 def _request(conn, method, path, body=None):
+    """One request to the home on `conn`, with the Bearer key when one is set. A 401 or 403 raises IdentityError, a
+    3xx or any status from 400 up raises urllib.error.HTTPError; redirects are never followed, so the key stays with
+    the home."""
     headers = {"Content-Type": "application/json"} if body is not None else {}
+    key = api_key()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
     conn.request(method, path, body=json.dumps(body).encode("utf-8") if body is not None else None, headers=headers)
     response = conn.getresponse()
     data = response.read()
-    if response.status >= 400:
+    if response.status in (401, 403):
+        hint = (f"Check {KEY_VARIABLE} or the file in {KEY_FILE_VARIABLE}." if key
+                else f"Set {KEY_VARIABLE} or {KEY_FILE_VARIABLE}.")
+        raise IdentityError(f"The embeddings home at {conn.host}:{conn.port} refused the request "
+                            f"({response.status}): the API key is missing or wrong. {hint}")
+    if response.status >= 300:
         detail = data[:300].decode("utf-8", "replace").strip()
         raise urllib.error.HTTPError(f"{conn.host}:{conn.port}{path}", response.status,
                                      f"{response.reason}{': ' + detail if detail else ''}", response.headers, None)
@@ -149,6 +213,8 @@ def resolve(cfg=None, current=None):
     available = info()
     if available:
         return available["model"]
+    if not engine_home.installed(engine_home.ENGINES[0]):
+        engine_home.ensure_in_background(engine_home.ENGINES[0])
     if not current or is_local(current) or current == indexer.LEXICAL_MODEL:
         return current or indexer.LEXICAL_MODEL
     return None

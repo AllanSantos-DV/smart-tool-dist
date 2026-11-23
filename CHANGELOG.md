@@ -1,5 +1,149 @@
 # Changelog
 
+## 0.9.87 - beta
+
+- `project_manage action=diff_coverage` reads the coverage report your own last test run wrote (Cobertura
+  `coverage.xml`, `lcov.info` or coverage.py JSON, in the project root or a common report folder; the newest one) and
+  lists the lines changed since `base` (default `HEAD`, staged, unstaged and untracked included, read the way
+  `affected_tests` reads them) that no executed line covers, each range named after its function in the code graph,
+  with the report's modified date against the `HEAD` commit time and a stale warning. It never runs tests or installs
+  anything, answers "No coverage report found" naming the places it looked, refuses XML that declares entities, and
+  writes nothing. Tests: `tests/test_diff_coverage.py`.
+- `project_manage action=history_secrets` is an opt-in, bounded scan of git history for the credential shapes of the
+  edit hook: `git log -G` picks the commits and the exact shapes of `credential_check` decide on each added and removed
+  line, reporting file, line, short commit hash, kind and whether it was added or removed, never the value. It reads the
+  newest `commit_limit` commits (default 500, up to 100000) for at most `budget_seconds` (default 20, up to 300) and says
+  when either cut the read; a folder that is not a git repository gets a clear message. Tests:
+  `tests/test_history_secrets.py`.
+- `project_manage action=orphan_modules` lists the Python and JavaScript/TypeScript source files that no code imports (the
+  resolved import edges of the code graph), no test imports or names in a string, and no README, `docs` file, config or
+  script names by path, file name or module, and that are not an entry point (`package.json` main, bin and exports,
+  `__main__.py`, `__init__.py`, hook folders, a shebang or a file that runs itself). It is the file-level companion of
+  `dead_code` and states the same caveat: files loaded by config, hooks, console scripts or a package main may be false
+  positives. It takes `limit`, reports the totals in `counts` and writes nothing. Tests: `tests/test_orphan_modules.py`.
+- `project_manage action=undocumented_env` lists the environment variables the code reads with a literal name
+  (`os.environ[...]`, `os.environ.get`, `os.getenv`, `process.env.NAME`, `process.env['NAME']`, a destructuring of
+  `process.env`, `getenv`) that no README or `docs` file names, with the file and line of the first read and whether only
+  tests read it; lines that only set or delete a variable are not reads. It takes `limit` and writes nothing. Tests:
+  `tests/test_undocumented_env.py`.
+- `project_manage action=assertless` lists the test functions whose body holds no assertion, so a test that passes
+  whatever the code does is visible: Python and Go tests by name, Java by `@Test`, JavaScript and TypeScript by the `it`
+  or `test` callback, each searched for the assertion forms of its language (`assert`, `self.assert*`, `pytest.raises`,
+  `expect(`, `assert.*`, `t.Error*`, `verify(`, and so on) with comments left out. They are candidates only: a test that
+  asserts through a helper looks assertion-less, and the answer says so. It takes `folder` and `limit`, reports the
+  totals in `counts` and writes nothing. Tests: `tests/test_assertless.py`.
+- `project_manage action=todo_age` lists the TODO, FIXME and HACK markers in the code and test comments, oldest first,
+  each with the age of its line from one `git blame --porcelain` per file that has a marker, and flags the ones older
+  than `older_than_days` (default 180). Strings and docstrings are not read. A folder that is not a git repository, an
+  untracked file or a blame that fails lists the markers without an age and says why (`note`, `skipped`); one failing
+  file never fails the call. It takes `limit` and writes nothing. Tests: `tests/test_todo_age.py`.
+- `project_manage action=ownership` shows, for each of the `limit` most risky code files (the `hotspots` ranking), its
+  authors by commit count (`git shortlog`) and by surviving lines (`git blame`, whitespace-only changes ignored), each
+  with a whole-percent share, and flags the files where one author holds at least `threshold` of the lines (0.5 to 1,
+  default 0.8). Authors are names as git reports them, never addresses; a file git cannot blame carries its own `error`
+  and the rest is still answered, and a folder without git history says why. Tests: `tests/test_ownership.py`.
+- `project_manage action=complexity` ranks the functions of the whole project by cyclomatic complexity, from the branch
+  tokens (`if`, `elif`, `for`, `while`, `except`, `case`, `and`, `or`, the conditional expression, `catch`, `&&`, `||`,
+  `??`, `?:`) inside the line range the code graph gives each function, for Python, JavaScript, TypeScript, Go and Java.
+  It lists the functions at or above `min_complexity` (default 10), up to `limit`, and says in `rule` and `note` that the
+  count is an approximation by tokens, not a syntax tree. Files it cannot read or count are listed under `skipped`. Tests:
+  `tests/test_complexity.py`.
+- `release/qa/mutation_check.py` is an opt-in local mutation check for a pure Python module: it copies the module and
+  its test to a temporary folder, runs cosmic-ray (found with `--venv` or on PATH, never installed by the script; exit
+  code 2 when missing) and prints mutants, killed, survived and score, exiting 1 below `--min-score` (default 100).
+  On `credential_check.py` it found 8 survivors of 40 mutants; four added tests in `tests/test_credential_check.py` kill
+  them all. The commands that re-run the seven technique-family measurements are in
+  `docs/research/data/2026-11-22-familias-comandos.md`. Tests: `tests/test_mutation_check.py`.
+- The embeddings home can be reached at a configured address and behind a key: the config `embeddings_home_url` (http or
+  https, else an error naming the setting) replaces the announce file's address, and `CASA_API_KEY` (or the file named
+  by `CASA_API_KEY_FILE`) is sent as `Authorization: Bearer` on every request to the home and nowhere else. A 401 or 403
+  says the key is missing or wrong, an unreadable or empty key file raises, and neither message holds the key; a 3xx
+  answer from the home is now an error instead of being parsed. Without them nothing changes. Tests:
+  `tests/test_local_embedder_auth.py`.
+- The daemon answers `server/discover` (MCP 2026-07-28: supported versions, `tools` as the only capability, server info,
+  instructions) instead of a -32601 that cost each Claude Code connection one failed request, and a `tools/call`
+  without an `Mcp-Session-Id` is attributed to the `clientInfo` in `params._meta`; `initialize` and its session header
+  work as before, and `subscriptions/listen` keeps its -32601 because the daemon has no event to push. Tests:
+  `tests/test_mcp_discover.py`.
+- `project_manage action=untested` lists the functions of the whole project that no test reaches, the project-wide form
+  of the "no test reaches" list of `pr_impact`: a test reaches a function through static calls, up to 3 hops. The most
+  changed files (commits of the file, as `hotspots` counts them) come first, then path and line, up to `limit`; the answer
+  carries the totals (`counts`), the reason when the git history could not be read (every file then counts 0 commits) and
+  what the graph limits cut. Dunder methods and unnamed callbacks are not candidates. It fails when the project has no
+  code graph and writes nothing. Tests: `tests/test_untested.py`.
+- `project_manage action=doc_refs` lists, per README and `docs` file of the whole project, the paths, relative links and
+  functions it writes in inline code (outside fenced blocks) that no longer exist, each with its line and why, the first
+  `limit` with the totals in `counts`. Paths and links are read the way `move_preview` and `links` read them; a function
+  name that appears nowhere in the code is stale, so a name invented as an example is listed too. The generated
+  `docs/scope` is left out and nothing is written. Tests: `tests/test_doc_refs.py`.
+- `project_manage action=unused_deps` lists the dependencies the manifests declare (`package.json`, `requirements*.txt`,
+  `pyproject.toml`, `go.mod`) that no code imports and the packages the code imports that no manifest declares, matched
+  folder by folder against the external imports of the code graph, up to `limit` with the totals in `counts`. Every
+  finding carries a `confidence` (`medium` or `low`, never certain) and a `reason`, because a tool or a config file can
+  load a package by name and a package can be imported under another name (PyYAML as `yaml`): for Python the possible
+  names are listed as `alias_candidates`. A manifest or folder it cannot judge is listed with its reason. It edits
+  nothing. Tests: `tests/test_unused_deps.py`.
+- `project_manage action=ext_links` is the opt-in link rot check of the external http(s) links of the README and `docs`
+  files: it reads each distinct URL once, at most `limit` and never more than 100, through the guarded download of
+  `web_fetch` (redirects followed, internal addresses refused) and gives every one `ok`, `dead` (HTTP 404 or 410) or
+  `error` (another status or a failure, not proof the page is gone) with its status and the places that write it. The
+  network is used only when the action is called and nothing is written. Tests: `tests/test_ext_links.py`.
+- `project_manage action=graph` with `brief=true` (and `symbol`) returns, besides the callers and the tests that reach the
+  function, the files that usually change with its file (coupling) and the decision notes and commit messages that name
+  it, in one call; each part says why it is empty or cut. Without `brief` the answer is unchanged. Tests:
+  `tests/test_graph_brief.py`.
+- `project_manage action=risky_functions` ranks the functions of the whole project by risk, up to `limit`. Each row keeps
+  its four numbers beside the score: `size` (end line minus start line), `fan_in` (distinct callers outside the test
+  files), `commits` (of its file) and `tested` (a test reaches it through static calls). `score = (size + 1) * (fan_in + 1)
+  * (commits + 1) * (2 when no test reaches the function)`, highest first, and the rule is written in `rank_rule`. It
+  fails when the project has no code graph and writes nothing. Tests: `tests/test_risky_functions.py`.
+- `pr_impact`, `commit_check` and the pre-push summary get a `duplicates` section: the functions the change adds or edits
+  whose body copies code the project already has (the check the edit hook runs, exact or near-identical). It is advisory
+  and blocks nothing; when `duplicate_mode` is off, the project has no code graph yet or the check fails, the section says
+  why it was not checked. Tests: `tests/test_duplicates_section.py`.
+- `project_manage action=release_check` answers with an `advisories` list next to `checks`: committed credentials, stale
+  documentation references (`doc_refs`), broken relative links and import cycles, each with its reason. They never change
+  `ready`. Tests: `tests/test_release_check.py`.
+- `pr_impact` and the pre-push summary get three more sections, all advisory. "Documentation that still names removed
+  code" lists the README and `docs` lines that name a function the change removed or renamed, or a file it deleted or
+  moved. "Dependencies" lists the imports of the changed code files that no manifest declares and the dependencies of a
+  changed manifest that no code imports, each with its confidence and reason (`unused_deps`). "New external links that may
+  be dead" is opt-in and reads the links the changed HTML and Markdown files add: `links=true` on `action=pr_impact`,
+  `commit_hook_install hook=pre-push links=true` (written into the hook as the `--links` flag, like `--docs`) at most 10
+  URLs per range, the rest counted, and the network is used only when it is on; without it the text of the hook and of the
+  report is what it was. `links` is refused for any hook other than `pre-push`. Tests: `tests/test_doc_refs_section.py`,
+  `tests/test_dependencies_section.py`, `tests/test_new_links_section.py`, `tests/test_pre_push_hook.py`.
+- `project_manage action=dead_code` entries carry `name_mentions`: the number of unresolved calls and import specifiers of
+  other files that still name the function, a lead that something may call it. The lists themselves are unchanged. Tests:
+  `tests/test_code_health.py`.
+- The edit hook, `pr_impact` and `commit_check` note an import an edit adds to a Python file that no manifest of its
+  folder declares, with the line, the manifest, a `confidence` and a `reason` (`import_notice.py`). Only Python files are
+  read, from the cached code graph, so nothing cached means nothing said; it follows the existing `dependency_mode`
+  setting in `config.json` (`warn`, the default, or `off`) and never blocks. Tests: `tests/test_import_notice.py`.
+- `commit_check` and the pre-commit hook also give `tests_to_run` (the test files and commands for the staged change, with
+  `checked` and `problem` when the code graph is missing) and `untouched_by_tests` (the staged functions no test reaches),
+  the two lines the pre-push summary prints for a pushed range. The hook prints them after the notes, never blocks, and a
+  staged file with unstaged edits is said, since the graph reads disk. Tests: `tests/test_staged_impact.py`,
+  `tests/test_commit_check.py`.
+- Native hooks client `native/bin/smart-tool-hook.exe` (Rust, 254 KB, source in `native/hook_client`): the same behavior as
+  the Python client (run file read per call, retry over the restart window, down marker, quiet mode, per-route timeouts,
+  identical messages) for the PreToolUse, PostToolUse and SubagentStart hooks. On Windows `install_hook` writes its command
+  when the installation has the executable and the Python command otherwise, which also stays the client of the other
+  hooks. Per call, on the three simulated profiles (`weak`, `weak50`, `none`): 15.6 ms of CPU and 2.2 MB against 125 to
+  156 ms and 14 MB for the Python client. Hooks already installed keep the Python command until they are installed again
+  through `install_hook`. A contract test runs both clients against one stub server and compares requests and printed
+  bytes (`docs/research/2026-11-22-nativo-tres-achados-resultado.md`). Tests: `tests/test_native_hook_contract.py`,
+  `tests/test_native_hook_entries.py`, `tests/test_packaging.py`.
+- The embeddings home is no longer installed at boot when it is missing: a home that is installed still starts (and is
+  brought to the registry's version) at boot, and a machine without it installs it in the background at the first embedder
+  use, with search lexical and the existing warning until it answers. The `gateway` embedder never installs it. The 2.8 GB
+  peak seen while indexing was this installer buffering its download, not the indexer, whose batches are bounded and now
+  have a regression test (`docs/research/2026-11-22-nativo-tres-achados-resultado.md`). Tests: `tests/test_engine_home.py`,
+  `tests/test_index_streaming.py`.
+- `trafilatura` and `yaml` are imported on first use instead of at daemon start: about 12 MB less of idle memory and about
+  0.15 s less CPU at boot (`docs/research/2026-11-22-nativo-tres-achados-resultado.md`); the first HTML extraction pays
+  about 0.18 s once. Tests: `tests/test_idle_footprint.py`.
+
 ## 0.9.86 - beta
 
 - `project_manage action=upgrade_preview` with `package` (and optionally `to`) says what bumping a dependency changes

@@ -3,6 +3,7 @@ registry: installs one that is missing, updates one that is outdated with the si
 and reports why it could not when it cannot. Nothing here raises for a machine without Node, without network or without
 the engine: that is a status the searches and the setup screen show.
 """
+import glob
 import json
 import os
 import subprocess
@@ -12,6 +13,7 @@ import time
 import node_locator
 
 ENGINES = ("casa-de-embeddings", "motor-de-grafo")
+HOME_DIRS = {"casa-de-embeddings": os.path.join(os.path.expanduser("~"), ".casa-de-embeddings")}
 SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_adapters", "node", "engine-home.mjs")
 TIMEOUT_S = 900
 CHECK_EVERY_S = 24 * 3600
@@ -19,12 +21,45 @@ RETRY_AFTER_S = 600
 
 _lock = threading.Lock()
 _last = {}
+_installing = set()
 
 
 def forget():
     """Drops what was learned about every engine (tests)."""
     with _lock:
         _last.clear()
+        _installing.clear()
+
+
+def installed(name):
+    """Whether the engine `name` has an executable on this machine, running or not (the engine's own folder holds
+    `bin/<name>.exe` or one `versions/<version>/<name>.exe`). Raises: ValueError for an engine without a known folder."""
+    if name not in HOME_DIRS:
+        raise ValueError(f"no home folder is known for {name!r}")
+    base = HOME_DIRS[name]
+    return (os.path.isfile(os.path.join(base, "bin", f"{name}.exe"))
+            or bool(glob.glob(os.path.join(glob.escape(base), "versions", "*", f"{name}.exe"))))
+
+
+def ensure_in_background(name):
+    """Starts `ensure_when_due(name)` on a daemon thread unless one is already running for `name`; the first embedder
+    use of a machine without the home calls this instead of installing it at boot. Returns: True when a thread started."""
+    with _lock:
+        if name in _installing:
+            return False
+        _installing.add(name)
+
+    def run():
+        try:
+            ensure_when_due(name)
+        except Exception as exc:
+            remember(name, {"ok": False, "reason": f"{name}: the background install failed ({type(exc).__name__}: {exc})"})
+        finally:
+            with _lock:
+                _installing.discard(name)
+
+    threading.Thread(target=run, daemon=True, name=f"engine-home-{name}").start()
+    return True
 
 
 def remember(name, status):

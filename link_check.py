@@ -11,6 +11,7 @@ import re
 import web_document_graph
 
 EXTENSIONS = (".html", ".htm", ".md", ".markdown")
+MAX_URL_CHARS = 300  # web_document_graph keeps the first 300 characters of a link
 _TEMPLATE = re.compile(r"\{\{|\{%|<%|<\?|\$\{")
 _BASE = re.compile(r"<base[\s>]", re.I)
 
@@ -28,6 +29,25 @@ def _missing(target):
     except (FileNotFoundError, NotADirectoryError):
         return True
     return False
+
+
+def external(path, text):
+    """The http(s) links of an HTML or Markdown file, as `web_document_graph.analyze` reads them.
+
+    Parameters: path (str) path of the file, which only picks the reader; text (str) its contents.
+    Returns: dict {"links": [{"line", "url"}] in document order, "diagnostics": [reason]} (HTML that did not parse); both
+    empty for a file that is not HTML or Markdown.
+    """
+    if os.path.splitext(path)[1].lower() not in EXTENSIONS:
+        return {"links": [], "diagnostics": []}
+    found = web_document_graph.analyze({os.path.abspath(path).replace(os.sep, "/"): text}, ())
+    web = [item for item in found["dependencies"]
+           if item["resolution"] == "external" and item["specifier"].lower().startswith(("http://", "https://"))]
+    cut = [item for item in web if len(item["specifier"]) >= MAX_URL_CHARS]
+    return {"links": [{"line": item["line"], "url": item["specifier"]} for item in web if item not in cut],
+            "diagnostics": [item["reason"] for item in found["diagnostics"]]
+                           + [f"line {item['line']}: a URL of {MAX_URL_CHARS} characters or more was not read whole"
+                              for item in cut]}
 
 
 def review(path, before, after):

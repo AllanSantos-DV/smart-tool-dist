@@ -85,27 +85,24 @@ def _name_test_callbacks(root, by_id, sites):
             site["function"] = f'{match.group(1)} "{match.group(3)[:80]}"'
 
 
-def impact(root, symbol, view_id=None, depth=3, limit=30):
-    if not isinstance(symbol, str) or not symbol.strip():
-        raise ValueError("Pass symbol: a function, method (Class.method) or class name.")
-    if type(depth) is not int or not 1 <= depth <= MAX_DEPTH:
-        raise ValueError(f"depth must be an integer from 1 to {MAX_DEPTH}.")
-    data = code_graph.build_current(root, view_id, shared=True)
-    found = _matches(data.get("symbols") or [], symbol)
-    diagnostics = [d.get("reason") for d in data.get("diagnostics") or [] if d.get("reason")]
-    if not found:
-        cause = f" Analysis problems: {'; '.join(diagnostics)}" if diagnostics else ""
-        close = _closest_names(data.get("symbols") or [], symbol)
-        hint = f" Closest names: {', '.join(close)}." if close else ""
-        raise ValueError(f"No function or class named {symbol!r} in the indexed view; check the name or reindex.{hint}{cause}")
-    profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile"))
-    by_id = {s["id"]: s for s in data["symbols"]}
+def call_index(calls):
+    """The calls of a graph grouped by target and by source: (callers, callees), each a defaultdict of id -> list of call."""
     callers, callees = defaultdict(list), defaultdict(list)
-    for call in data["calls"]:
+    for call in calls:
         callers[call["target"]].append(call)
         callees[call["source"]].append(call)
-    targets = {s["id"] for s in found}
-    label = {s["id"]: f"{s['path']}::{s['name']}" for s in found} if len(found) > 1 else {}
+    return callers, callees
+
+
+def reaching_tests(by_id, callers, profile, targets, depth, label=None):
+    """The test functions that reach `targets` through static calls, searched breadth first from each target.
+
+    Parameters: by_id (dict) symbols by id; callers (dict) the `call_index` callers; profile (dict) the index profile that
+    tells a test file from a code file; targets (set of str) symbol ids; depth (int) call hops searched; label (dict or
+    None) symbol id -> text put in the `of` field of its tests.
+    Returns: dict test symbol id -> site ({id, function, path, line, hops, and of when labelled}), the nearest hop kept.
+    """
+    label = label or {}
     tests = {}
     for origin in targets:
         seen, frontier = set(targets), {origin}
@@ -122,6 +119,28 @@ def impact(root, symbol, view_id=None, depth=3, limit=30):
                     if caller and index_profile.kind(caller["path"], profile) == "test" and source not in tests:
                         tests[source] = {**_site(by_id, source, caller["start_line"], label.get(origin)), "hops": hops}
             frontier = reached
+    return tests
+
+
+def impact(root, symbol, view_id=None, depth=3, limit=30):
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise ValueError("Pass symbol: a function, method (Class.method) or class name.")
+    if type(depth) is not int or not 1 <= depth <= MAX_DEPTH:
+        raise ValueError(f"depth must be an integer from 1 to {MAX_DEPTH}.")
+    data = code_graph.build_current(root, view_id, shared=True)
+    found = _matches(data.get("symbols") or [], symbol)
+    diagnostics = [d.get("reason") for d in data.get("diagnostics") or [] if d.get("reason")]
+    if not found:
+        cause = f" Analysis problems: {'; '.join(diagnostics)}" if diagnostics else ""
+        close = _closest_names(data.get("symbols") or [], symbol)
+        hint = f" Closest names: {', '.join(close)}." if close else ""
+        raise ValueError(f"No function or class named {symbol!r} in the indexed view; check the name or reindex.{hint}{cause}")
+    profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile"))
+    by_id = {s["id"]: s for s in data["symbols"]}
+    callers, callees = call_index(data["calls"])
+    targets = {s["id"] for s in found}
+    label = {s["id"]: f"{s['path']}::{s['name']}" for s in found} if len(found) > 1 else {}
+    tests = reaching_tests(by_id, callers, profile, targets, depth, label)
     direct = [_site(by_id, c["source"], c["line"], label.get(t)) for t in targets for c in callers[t]
               if c["source"] not in targets]
     outgoing = [_site(by_id, c["target"], c["line"], label.get(t)) for t in targets for c in callees[t]

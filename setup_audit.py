@@ -27,8 +27,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-import yaml
-
 import atomic_io
 import dependency_notice
 import client_hooks
@@ -174,6 +172,7 @@ def _frontmatter(text):
     match = re.match(r"^---\s*\n(.*?)\n---", text or "", re.S)
     if not match:
         return {}
+    import yaml  # imported here: only an audit of skills needs it
     try:
         data = yaml.safe_load(match.group(1))
     except yaml.YAMLError:

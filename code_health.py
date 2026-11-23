@@ -4,11 +4,14 @@ comments sit where they should not.
 
 The same tables the `docs/scope` pages hold (`doc_insights`), asked directly by `project_manage`; nothing is written.
 """
+import posixpath
+
 import code_graph
 import comment_check
 import doc_check
 import doc_insights
 import doc_scope
+import removed_callers
 
 DEFAULT_LIMIT = 25
 
@@ -36,23 +39,50 @@ def hotspots(root, view_id=None, limit=DEFAULT_LIMIT):
     return {"files": files, "total": len(rows), "commits_read": len(commits), "note": note or ""}
 
 
+def _mention_index(graph):
+    """The unresolved calls and the imports of a graph, by the last identifier of what they name: {name: [(path, text,
+    target)]}; `target` is the file an import resolves to, None for a call."""
+    found = {}
+    for call in graph.get("unresolved") or []:
+        names = removed_callers._IDENTIFIER.findall(call["expression"])
+        if names:
+            found.setdefault(names[-1], []).append((call["path"], call["expression"], None))
+    for dep in graph.get("dependencies") or []:
+        names = removed_callers._IDENTIFIER.findall(dep.get("specifier") or "")
+        if names and dep.get("target"):
+            found.setdefault(names[-1], []).append((dep["source"], dep["specifier"], dep["target"]))
+    return found
+
+
+def _name_mentions(index, function):
+    """How many unresolved calls and import specifiers outside the function's file still name it (the graph could not tie
+    them to a definition, so they may be calls to it)."""
+    rel, short = function["path"], removed_callers._short(function["name"])
+    stem, method = posixpath.splitext(posixpath.basename(rel))[0], "." in function["name"]
+    return sum(1 for path, text, target in index.get(short, ())
+               if path != rel and (target is None or target == rel) and removed_callers._names(text, short, stem, method and target is None))
+
+
 def dead_code(root, view_id=None, limit=DEFAULT_LIMIT):
     """Functions nothing calls and functions only tests call, from the static call graph.
 
     Parameters: root (str) project folder; view_id (str or None) index view; limit (int) entries per list.
     Returns: dict {"no_caller": [...], "only_tests": [...], "counts": {"no_caller", "only_tests"}, "note": str,
-    "graph_note": str}; each entry is {"name", "path", "line", "public"}; `graph_note` says what the analysis limits cut from
+    "graph_note": str}; each entry is {"name", "path", "line", "public", "name_mentions"}; `name_mentions` counts the unresolved calls
+    and import specifiers of other files that still name the function, a lead that something may call it (the lists are
+    not filtered by it); `graph_note` says what the analysis limits cut from
     the graph, "" when they cut nothing. Candidates only: a call through a framework, a decorator registration,
     reflection or a name built at run time is not seen.
     Raises: ValueError when the code graph is empty.
     """
     model = _model(root, view_id)
     alone, tested = doc_insights.dead_code(model, model.entry_points())
+    index = _mention_index(model.graph)
 
     def entry(anchor):
         function = model.function_of[anchor]
         return {"name": function["name"], "path": function["path"], "line": function["start"],
-                "public": bool(function["required"])}
+                "public": bool(function["required"]), "name_mentions": _name_mentions(index, function)}
 
     return {"no_caller": [entry(a) for a in alone[:limit]], "only_tests": [entry(a) for a in tested[:limit]],
             "counts": {"no_caller": len(alone), "only_tests": len(tested)},

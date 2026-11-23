@@ -41,6 +41,7 @@ DEFAULT_CONFIG = {
     "quick_search_timeout_s": 120,
     "site_memory_similarity_threshold": 0.35,
     "embedder": "home",
+    "embeddings_home_url": "",
     "hook_mode": "redirect",
     "doc_mode": "require",
     "comment_mode": "require",
