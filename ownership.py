@@ -46,16 +46,20 @@ def _shortlog(root, path):
     return sorted(rows, key=lambda row: (-row[1], row[0]))
 
 
-def _blame(root, path):
-    """The (author, surviving lines) of a file at HEAD, most lines first."""
-    out = affected_tests._git(root, "-c", "core.quotepath=false", "blame", "--line-porcelain", "-w", "HEAD", "--", path)
+def _blame(root, path, span=None):
+    """The (author, surviving lines) of a file at HEAD, most lines first; `span` is a (first, last) line range, the whole
+    file when None."""
+    window = ["-L", f"{span[0]},{span[1]}"] if span else []
+    out = affected_tests._git(root, "-c", "core.quotepath=false", "blame", *window, "--line-porcelain", "-w", "HEAD", "--",
+                              path)
     lines = Counter(line[len("author "):] for line in out.splitlines() if line.startswith("author "))
     return sorted(lines.items(), key=lambda row: (-row[1], row[0]))
 
 
-def _shares(rows, key):
+def _shares(rows, key, shown=AUTHORS_SHOWN):
+    """The first `shown` (author, count) rows as {"author", key, "share"}, each share of the count of all the rows."""
     total = sum(count for _name, count in rows)
-    return [{"author": name, key: count, "share": round(100 * count / total)} for name, count in rows[:AUTHORS_SHOWN]]
+    return [{"author": name, key: count, "share": round(100 * count / total)} for name, count in rows[:shown]]
 
 
 def _file_row(root, file, threshold):

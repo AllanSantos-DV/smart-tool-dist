@@ -1,15 +1,16 @@
 """Whether the project can be tagged now, asked without changing anything: the version of `version.py` against the top
 heading of `CHANGELOG.md`, the README status line and the page `site/index.html`, no Unreleased content left in the
 changelog, a clean working tree on `main` or `develop`, a tag name still free and no documentation entry out of date. A
-check that cannot run is reported as not ok with its reason; nothing is tagged, written or published. Four local scans
-(credentials, stale doc references, broken relative links, import cycles) are listed apart as advisories and never decide
-`ready`.
+check that cannot run is reported as not ok with its reason; nothing is tagged, written or published. Five local scans
+(credentials, stale doc references, broken relative links, import cycles, public functions removed or re-signed since the
+latest tag) are listed apart as advisories and never decide `ready`.
 """
 import os
 import re
 import subprocess
 
 import affected_tests
+import api_breaks
 import code_health
 import doc_refs
 import doc_scope
@@ -188,6 +189,21 @@ def _cycles(root):
     return False, f"{found['total']} import cycle(s) covering {found['files_in_cycles']} files"
 
 
+def _api_breaks(root):
+    """Whether no public function was removed or re-signed since the latest tag; a repository without a tag has no release
+    to break."""
+    found = api_breaks.report(root, None, SHOWN)
+    if found["tag"] is None:
+        return True, "no tag yet: there is no release to compare the public API with"
+    total = found["counts"]["removed"] + found["counts"]["resigned"]
+    if not total:
+        return True, f"no public function removed or re-signed since {found['tag']}"
+    rows = [(row, "removed") for row in found["removed"]] + [(row, "new signature") for row in found["resigned"]]
+    shown = ", ".join(f"{row['name']} ({kind}, {row['total']} caller(s))" for row, kind in rows[:SHOWN])
+    return False, (f"{total} public function(s) removed or re-signed since {found['tag']}: {shown}"
+                   f"{', ...' if total > SHOWN else ''}")
+
+
 def _run(name, function, *args):
     """One check as {"name", "ok", "detail"}; a failure to run it is a not-ok result carrying the cause."""
     try:
@@ -212,8 +228,8 @@ def check(root, limit=DEFAULT_LIMIT):
 
     Parameters: root (str) project folder; limit (int) commit subjects and documentation findings listed.
     Returns: dict {"ready": bool (every check ok), "version": str or None, "checks": [{"name", "ok", "detail"}],
-    "advisories": [{"name", "ok", "detail"}] (committed credentials, stale doc references, broken relative links and import
-    cycles: local scans that never change `ready`), "commits_since_last_tag": {"ok": True, "base", "commit_total", "commits": [{"hash", "subject"}]} or {"ok": False,
+    "advisories": [{"name", "ok", "detail"}] (committed credentials, stale doc references, broken relative links, import
+    cycles and the public functions removed or re-signed since the latest tag: local scans that never change `ready`), "commits_since_last_tag": {"ok": True, "base", "commit_total", "commits": [{"hash", "subject"}]} or {"ok": False,
     "error"}, "note": str}. Nothing raises for a missing file or a failed git call: that check is not ok with the reason.
     """
     try:
@@ -230,7 +246,8 @@ def check(root, limit=DEFAULT_LIMIT):
     checks += [_run("working_tree_clean", _clean, root), _run("branch", _branch, root),
                _run("docs_current", _docs, root, limit)]
     advisories = [_run("credentials", _credentials, root), _run("doc_refs", _doc_refs, root),
-                  _run("relative_links", _links, root), _run("import_cycles", _cycles, root)]
+                  _run("relative_links", _links, root), _run("import_cycles", _cycles, root),
+                  _run("api_breaks", _api_breaks, root)]
     return {"ready": all(item["ok"] for item in checks), "version": version, "checks": checks, "advisories": advisories,
             "commits_since_last_tag": _commits(root, limit),
             "note": "The full notes draft, with the touched functions and decision notes, is project_manage action="

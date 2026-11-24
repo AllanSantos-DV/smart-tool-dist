@@ -2,7 +2,7 @@
 
 The function line ranges are those of the code graph; the branches are counted on the tokens of the file (Python) or on the
 text with comments, strings and regex literals blanked out (JavaScript, TypeScript, Go and Java), never on a syntax tree,
-so the number is an approximation. Nothing is written.
+so the number is an approximation. Nothing is written. `growth` compares the same functions in two versions of a file.
 """
 import bisect
 import io
@@ -13,6 +13,7 @@ import tokenize
 from collections import Counter
 
 import code_graph
+import doc_check
 import index_profile
 import index_scope
 
@@ -113,6 +114,34 @@ def _measured(spans, by_line):
     last = max([end for _start, end in spans] + list(by_line)) + 1
     cumulative = [0] + list(itertools.accumulate(by_line.get(line, 0) for line in range(1, last + 1)))
     return [1 + cumulative[min(end, last)] - cumulative[start - 1] for start, end in spans]
+
+
+def _of_named(path, text, names):
+    """The complexity of each of the named functions that `text` defines: {name: complexity}; the first definition of a name
+    counts."""
+    by_line = branches_by_line(path, text)
+    found = {}
+    for function in doc_check.functions(path, text):
+        if function["name"] in names:
+            found.setdefault(function["name"], function)
+    ordered = list(found)
+    if not ordered:
+        return {}
+    return dict(zip(ordered, _measured([(found[name]["start"], found[name]["end"]) for name in ordered], by_line)))
+
+
+def growth(path, before, after, names):
+    """The named functions of a file whose complexity is higher in the new text than in the old one.
+
+    Parameters: path (str) file name, whose suffix picks the language; before, after (str) the two texts; names (iterable of
+    str) function names as `doc_check.functions` gives them (`Class.method`); a name missing from either text is left out.
+    Returns: list of {"name", "before", "after"} in the order of `names`.
+    Raises: ValueError naming the file when the suffix has no counting or a text does not tokenize.
+    """
+    wanted = set(names)
+    old, new = _of_named(path, before, wanted), _of_named(path, after, wanted)
+    return [{"name": name, "before": old[name], "after": new[name]} for name in dict.fromkeys(names)
+            if name in old and name in new and new[name] > old[name]]
 
 
 def report(root, view_id=None, limit=30, min_complexity=DEFAULT_MIN):

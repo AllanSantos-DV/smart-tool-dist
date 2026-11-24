@@ -11,7 +11,7 @@ A local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharpe
 | `web_fetch_many` | Reads up to 8 known URLs in one call with the same prompt, 4 at a time, each exactly as `web_fetch` reads it (24 h cache, browser for JavaScript pages, public addresses only). One block per URL in the order given: the answer, or an `ERROR` line with the reason, so a URL that fails never hides the others; a repeated URL is read once |
 | `read_document` | Reads a PDF, Word, PowerPoint, Excel, HTML, CSV or EPUB file as compact text, a range at a time: type, size, page/slide/sheet/part/chapter count and estimated tokens first, then only the units asked for (`range="3-5"`), so the file never enters the agent's context whole. The path can also be an `http(s)` URL of a PDF, Word, PowerPoint, Excel, CSV or EPUB file: it is downloaded the way `web_fetch` downloads (public addresses only, 5 MB cap), kept for 24 hours and read with the same ranges and token estimate; a URL of a web page fails and points to `web_fetch`. Opt-in: the native Read is not redirected. Scanned PDFs fail with that reason (no OCR) |
 | `read_document_many` | Reads up to 8 documents (local paths or URLs, mixed) in one call, 4 at a time, each exactly as `read_document` reads it. One block per entry in the order given: the `read_document` answer, or an `ERROR` line with the reason. `range`, `max_chars` and `info_only` apply to every document (`range="1-3"` reads those units of each one and fails alone for a document it does not fit; `max_chars` is the cap per document); an entry repeated is read once; the call fails only when every document failed. Opt-in, like `read_document` |
-| `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage; `graph` with `symbol` tells what changing a function touches: callers, calls, the tests that reach it and the files that import it; with `brief=true` it also gives the files that usually change with it and the decision notes that name it |
+| `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage; `graph` with `symbol` tells what changing a function touches: callers, calls, the tests that reach it and the files that import it; with `brief=true` it also gives the files that usually change with it and the decision notes that name it; with `format=mermaid` it draws the callers and the calls as a Mermaid flowchart |
 
 Agents that must click, type or log in also get Microsoft's [Playwright MCP](https://github.com/microsoft/playwright-mcp),
 registered as the `playwright` server where this machine lets a browser be driven (see Set up, step 3).
@@ -19,7 +19,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.87 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.88 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -91,7 +91,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.87 install
+npx @allansantos-dev/smart-tool@0.9.88 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -305,7 +305,15 @@ Redirects) and Maintenance (Setup audit, Startup).
    code files that no manifest declares with the dependencies of a changed manifest that no code imports (`Dependencies`,
    each with its confidence and reason); a section that cannot run says why. With `links=true` it also reads the external
    links the changed HTML and Markdown files add, at most 10 URLs, and lists the ones that look dead; that is the only
-   part that uses the network, and it is off by default. It reads
+   part that uses the network, and it is off by default. Three more sections read the code of the diff against its base:
+   the unsafe calls the diff adds (`Risky calls the diff adds`: file, line and kind of what `risky_calls` finds in the new
+   text and not in the old, never the code of the line), the touched functions whose cyclomatic complexity is higher than
+   at the base (`Complexity that grew`, with both numbers, counted by tokens like `complexity`) and, with `reach=true`,
+   for each touched function, one shortest static call chain from an entry point of the project (`How it is reached`, the
+   search of `call_path` from the functions `entry_points` lists, capped by `limit`; it says plainly when no static path
+   was found, which does not prove none exists). `reach` is off by default because the chains build the documentation
+   model (seconds, up to 25 s on the first use) and the pre-push hook calls this report; without it the report says in
+   one line that `reach=true` adds them. Each appears only when it has something to say. It reads
    only. `project_manage action=pr_impact_comment pr=<number> base=<revision>` posts the same report as a comment on that
    pull request through the `gh` CLI, from the project folder, and returns the comment URL. It writes to GitHub with your
    own `gh` login, so it is off until you turn on "Impact report as a pull request comment" in the setup screen (Agent
@@ -392,9 +400,65 @@ Redirects) and Maintenance (Setup audit, Startup).
    `action=undocumented_env` lists the environment variables the code reads with a literal name (`os.environ`,
    `os.getenv`, `process.env`, `getenv`) that no README or `docs` file names, each with the file and line of its first
    read and whether only tests read it. Both take `limit`, read only and write nothing.
+   `action=stack_trace` reads a pasted Python, Node or Java traceback (`text`) and lists, for each frame inside the
+   project, the function whose lines hold the frame line, its direct callers with the line of the call and the tests
+   that reach it; absolute paths lose the project folder, frames outside the project are counted and ignored, and Java
+   frames are matched by package and file name. `action=call_path` (`symbol`, `target`, `max_hops`, 6 by default) finds
+   the shortest static call chain from one function to another with the line of each call site, and says plainly when
+   there is no static path (calls through dynamic dispatch are invisible) or when the cap cut the search.
+   `action=symbol_history` (`symbol`) lists the commits that changed the function's own lines (`git log -L`) with date,
+   author name and subject, including commits that never name it; the line ranges describe the working tree, so a file
+   with uncommitted edits is refused. `stack_trace` and `symbol_history` take `limit`; all three read only and write
+   nothing.
    `action=doc_refs` lists, per README and `docs` file, the paths, relative links and functions written in inline code
    (outside fenced blocks) that no longer exist, each with its line and why; a function name that appears nowhere in
    the code is stale, so a name invented as an example is listed too, and the generated `docs/scope` is left out.
+   `action=agent_refs` does the same for the tracked `CLAUDE.md` and `AGENTS.md` files, at the root and in folders, with
+   the paths of a nested file read from its own folder. `action=risky_calls` lists, with file and line and never the
+   source, the unsafe calls that are almost never safe in the tracked Python, JavaScript and TypeScript files:
+   `shell=True` or `os.system` on a command that is not a literal, `pickle.load(s)`, `yaml.load` without a safe loader, an
+   HTTP call with `verify=False`, `eval` and `exec` on a non-literal and an `innerHTML` assignment of a non-literal; test
+   folders are left out unless they are the only code, and a call that is unsafe through a variable or a wrapper is not
+   seen. `action=env_unread` is the reverse of `undocumented_env`: the variables a README or `docs` file names (`export`,
+   `set`, `$env:`, `process.env`, `os.environ`, `getenv`, or a snake-case name in inline code on a line that says
+   environment) that no code or test reads with a literal name, each with the doc file and line and the first other file
+   that holds the name. All three take `limit`, read only and write nothing.
+   `action=stack_trace` with `history=true` also gives each frame that sits in a function `last_commit`, the latest commit
+   that changed that function's own lines (the `symbol_history` answer, limited to one); a frame whose file has
+   uncommitted edits, is not committed or has no git history carries the reason in `history_refused` and the rest of the
+   answer is unchanged, and without `history` the answer is the same as before.
+   `action=risky_reach` (`limit`, `max_hops`, 6 by default) takes the findings of `risky_calls` and gives, for each, the
+   shortest static call chain from an entry point of `entry_points` to the function that holds the call, with the line of
+   each call (the search of `call_path`); a finding with no chain says whether the search ran out of calls to follow or
+   was cut by `max_hops`, and that a missing path is not proof that the call is safe, because calls through dynamic
+   dispatch are invisible; a call outside every function says so. It reads only and writes nothing.
+   `action=symbol_owner` (`symbol`, `limit`) lists the authors of a function by the lines inside its range that still
+   stand at HEAD (`git blame -L`, names only, with each author's lines and whole-percent share, as `ownership` does per
+   file); the range describes the working tree, so a file with uncommitted edits, a file git does not track and a folder
+   with no git history are refused. It reads only and writes nothing.
+   `action=cli_undocumented` (`limit`) reads the command lines the tracked Python files define with argparse (flags and
+   subcommands, from the syntax tree) against the README and `docs` text and lists, with file and line, the ones no doc
+   names (a flag counts when any of its names appears in the text; a subcommand only in inline code or a fenced line) and
+   the flags and subcommands that a doc command line gives to one of those scripts (its path, or its module after `-m`)
+   and that script does not define. Only argparse is seen; click and typer are not. It reads only and writes nothing.
+   `action=config_unread` (`limit`) lists the top-level keys of the `DEFAULT_CONFIG` of the project's `config.py` that no
+   README or `docs` file names, and the keys the docs name in a config context (a snake-case name in inline code on a
+   line that names a config file that `config.py` reads, or `DEFAULT_CONFIG`, and the keys of a json block that follows
+   such a line) that `DEFAULT_CONFIG` does not have, each with file and line; it fails when no `config.py` holds a
+   `DEFAULT_CONFIG` dict. It reads only and writes nothing.
+   `graph` with `symbol` and `format=mermaid` returns the callers and the calls of that function, the data `impact`
+   answers with, as Mermaid flowchart text in `mermaid` (at most `limit` functions around the definition, the call line on
+   each edge, the count left out in `counts.omitted`); `format` is `json` by default and the answer is then unchanged.
+   `action=api_breaks` lists the public functions removed or given another signature since the latest tag, each with its
+   callers outside the file that defined it (the same finding is an advisory row of `release_check` that never changes
+   `ready`); it says so when the repository has no tag. `action=entry_points` lists where execution starts, grouped by
+   layer: `main` functions and `__main__` blocks, functions with a route annotation, the public functions of the highest
+   declared layer (the roots of the call graph without layers) and the `main` and `bin` files of `package.json`, each
+   function with the size of its flow and the stamp `docs/scope` records; it reads the model `docs generate=true` starts
+   from and generates nothing. `action=signature_preview` (`path`, `symbol`, `params`) lists, before you change the
+   parameters of a function, the call sites whose arguments cannot bind to the new list (Python by its binding rules, the
+   other languages by a count that reports nothing when it is unsure; a call matched by name only says `resolved: false`).
+   All three take `limit`, read only and write nothing.
    `action=unused_deps` lists the dependencies the manifests declare (`package.json`, `requirements*.txt`,
    `pyproject.toml`, `go.mod`) that no code imports and the packages the code imports that no manifest declares,
    matched folder by folder against the external imports of the code graph. Each finding has a `confidence` (`medium`
@@ -458,6 +522,14 @@ Redirects) and Maintenance (Setup audit, Startup).
    a Markdown link target) to a file that does not exist is flagged to the agent, with the links it could not check
    (a path from the site root, a template expression, a `<base>` element); it never blocks. `link_mode` in
    `config.json`: `warn` (default) or `off`, also on the setup screen.
+
+   **Unsafe calls on edit**: an edit that adds a Python, JavaScript or TypeScript line holding one of the shapes of
+   `project_manage action=risky_calls` (`shell=True` or `os.system` on a command that is not a literal, `pickle.load`,
+   `yaml.load` without a safe loader, `verify=False`, `eval` or `exec` on a non-literal, an `innerHTML` assignment of a
+   non-literal) is flagged to the agent with the file, the line and the kind, never the code of the line. Lines that were
+   already in the file are left alone, and a call that only moved is not new. It never blocks. `risky_mode` in
+   `config.json`: `warn` (default) or `off`, also on the setup screen.
+
    **Recorded decisions on edit**: for the first three functions an edit touches in a code file, the hook names up to two
    notes of the project (`docs/research`, the backlog, `CLAUDE.md`, `AGENTS.md`) that name the function, as `path:line` and
    the title, so the agent reads what was decided before undoing it. A single-word function name counts only when a note
@@ -647,7 +719,7 @@ fails to load is listed in the setup screen with its error and does not affect t
 ## Uninstall
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.87 uninstall [--target DIR] [--keep-data]
+npx @allansantos-dev/smart-tool@0.9.88 uninstall [--target DIR] [--keep-data]
 ```
 
 It asks nothing and opens no window. It stops the tray and the daemon, removes the logon task, the hook entries of Smart

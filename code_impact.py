@@ -33,6 +33,24 @@ def _closest_names(symbols, name, limit=3):
     return [by_lower[key] for key in difflib.get_close_matches(wanted, list(by_lower), n=limit, cutoff=0.6)]
 
 
+def resolve(data, name, argument=None):
+    """The symbols of a graph that `name` designates.
+
+    Raises: ValueError when none does, with the closest indexed names and the analysis problems; `argument` names the
+    parameter that held `name` when the caller takes more than one.
+    """
+    symbols = data.get("symbols") or []
+    found = _matches(symbols, name)
+    if found:
+        return found
+    diagnostics = [d.get("reason") for d in data.get("diagnostics") or [] if d.get("reason")]
+    cause = f" Analysis problems: {'; '.join(diagnostics)}" if diagnostics else ""
+    close = _closest_names(symbols, name)
+    hint = f" Closest names: {', '.join(close)}." if close else ""
+    given = f" (the {argument})" if argument else ""
+    raise ValueError(f"No function or class named {name!r}{given} in the indexed view; check the name or reindex.{hint}{cause}")
+
+
 def _site(by_id, symbol_id, line, of=None):
     symbol = by_id.get(symbol_id) or {}
     site = {"id": symbol_id, "function": symbol.get("name", symbol_id), "path": symbol.get("path"), "line": line}
@@ -128,13 +146,8 @@ def impact(root, symbol, view_id=None, depth=3, limit=30):
     if type(depth) is not int or not 1 <= depth <= MAX_DEPTH:
         raise ValueError(f"depth must be an integer from 1 to {MAX_DEPTH}.")
     data = code_graph.build_current(root, view_id, shared=True)
-    found = _matches(data.get("symbols") or [], symbol)
+    found = resolve(data, symbol)
     diagnostics = [d.get("reason") for d in data.get("diagnostics") or [] if d.get("reason")]
-    if not found:
-        cause = f" Analysis problems: {'; '.join(diagnostics)}" if diagnostics else ""
-        close = _closest_names(data.get("symbols") or [], symbol)
-        hint = f" Closest names: {', '.join(close)}." if close else ""
-        raise ValueError(f"No function or class named {symbol!r} in the indexed view; check the name or reindex.{hint}{cause}")
     profile = index_profile.current((index_scope.load_scope(root) or {}).get("profile"))
     by_id = {s["id"]: s for s in data["symbols"]}
     callers, callees = call_index(data["calls"])

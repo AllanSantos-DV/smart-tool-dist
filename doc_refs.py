@@ -187,13 +187,13 @@ def _scan_doc(rel, text, root, tree, code_of):
     return sorted(rows, key=lambda row: (row["line"], row["kind"], row["ref"]))
 
 
-def check(root, limit=DEFAULT_LIMIT):
-    """The paths, links and functions the project docs write that no longer exist.
+def scan(root, limit, label, extensions, wanted, note):
+    """The stale references of the tracked text files that `wanted` accepts.
 
-    Parameters: root (str) project folder, a git repository; limit (int) stale references listed.
-    Returns: dict {"files": [{"path", "stale": [{"line", "kind": "path", "link" or "symbol", "ref", "why"}]}] with the
-    first `limit` references in file and line order, "counts": {"docs_checked", "docs_unreadable", "files_with_stale",
-    "stale", "paths", "links", "symbols"} (totals), "summary": str, "note": str}.
+    Parameters: root (str) project folder, a git repository; limit (int) stale references listed; label (str) noun for the
+    files in the counts and the summary; extensions (tuple of str) suffixes read; wanted (callable) whether a path is read;
+    note (str) the caveat returned.
+    Returns: the dict `check` documents, with `{label}s_checked` and `{label}s_unreadable` in "counts".
     Raises: ValueError when git cannot list the folder; RuntimeError or OSError when the code analyzers cannot run.
     """
     tree = _Tree(root, project_scan.tracked_files(root))
@@ -205,8 +205,8 @@ def check(root, limit=DEFAULT_LIMIT):
         return built[0]
 
     per_doc, unreadable, checked = [], 0, 0
-    for rel, text in project_scan.tracked_texts(root, rename_preview.DOC_EXTENSIONS):
-        if not rename_preview._is_doc(rel):
+    for rel, text in project_scan.tracked_texts(root, extensions):
+        if not wanted(rel):
             continue
         if text is None:
             unreadable += 1
@@ -225,10 +225,23 @@ def check(root, limit=DEFAULT_LIMIT):
             break
         files.append({"path": rel, "stale": rows[:left]})
         left -= len(rows)
-    counts = {"docs_checked": checked, "docs_unreadable": unreadable, "files_with_stale": len(per_doc), "stale": total,
+    counts = {f"{label}s_checked": checked, f"{label}s_unreadable": unreadable, "files_with_stale": len(per_doc),
+              "stale": total,
               "paths": by_kind["path"], "links": by_kind["link"], "symbols": by_kind["symbol"]}
-    summary = (f"{total} stale reference(s) in {len(per_doc)} of {checked} doc file(s)" if total
-               else f"No stale reference in {checked} doc file(s)")
+    summary = (f"{total} stale reference(s) in {len(per_doc)} of {checked} {label} file(s)" if total
+               else f"No stale reference in {checked} {label} file(s)")
     if total > limit:
         summary += f"; the first {limit} are listed, raise limit for the rest"
-    return {"files": files, "counts": counts, "summary": summary + ".", "note": NOTE}
+    return {"files": files, "counts": counts, "summary": summary + ".", "note": note}
+
+
+def check(root, limit=DEFAULT_LIMIT):
+    """The paths, links and functions the project docs write that no longer exist.
+
+    Parameters: root (str) project folder, a git repository; limit (int) stale references listed.
+    Returns: dict {"files": [{"path", "stale": [{"line", "kind": "path", "link" or "symbol", "ref", "why"}]}] with the
+    first `limit` references in file and line order, "counts": {"docs_checked", "docs_unreadable", "files_with_stale",
+    "stale", "paths", "links", "symbols"} (totals), "summary": str, "note": str}.
+    Raises: ValueError when git cannot list the folder; RuntimeError or OSError when the code analyzers cannot run.
+    """
+    return scan(root, limit, "doc", rename_preview.DOC_EXTENSIONS, rename_preview._is_doc, NOTE)

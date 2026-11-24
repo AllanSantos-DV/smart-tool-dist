@@ -62,14 +62,46 @@ def _reads(path, text):
     return found
 
 
+def doc_texts(root):
+    """The git-tracked README and `docs` files of the project that are readable text.
+
+    Parameters: root (str) project folder, a git repository.
+    Returns: list of (path, text) in git's order.
+    Raises: ValueError when git cannot list the folder.
+    """
+    return [(rel, text) for rel, text in project_scan.tracked_texts(root, rename_preview.DOC_EXTENSIONS)
+            if text is not None and rename_preview._is_doc(rel)]
+
+
+def words_of(texts):
+    """The set of words of (path, text) pairs, as `_documented` counts them."""
+    words = set()
+    for _rel, text in texts:
+        words.update(_WORD.findall(text))
+    return words
+
+
 def _documented(root):
     """The words of the README and `docs` files of the project, and how many files were read."""
-    words, checked = set(), 0
-    for rel, text in project_scan.tracked_texts(root, rename_preview.DOC_EXTENSIONS):
-        if text is not None and rename_preview._is_doc(rel):
-            checked += 1
-            words.update(_WORD.findall(text))
-    return words, checked
+    texts = doc_texts(root)
+    return words_of(texts), len(texts)
+
+
+def read_sites(model):
+    """The literal environment reads of the code and test files of an index model.
+
+    Parameters: model (object) the index model `code_health._model` returns.
+    Returns: dict {name: [(in_test, path, line)]} with the sites of each variable in file order.
+    """
+    sites = {}
+    for path in model.files():
+        kind = model.kind_of(path)
+        if kind not in ("code", "test") or not doc_check.supported(path):
+            continue
+        text = model.read(path)
+        for name, line in _reads(path, text) if text else ():
+            sites.setdefault(name, []).append((kind == "test", path, line))
+    return sites
 
 
 def report(root, view_id=None, limit=DEFAULT_LIMIT):
@@ -82,15 +114,7 @@ def report(root, view_id=None, limit=DEFAULT_LIMIT):
     "note": str}.
     Raises: ValueError when the code graph is empty or git cannot list the folder.
     """
-    model = code_health._model(root, view_id)
-    sites = {}
-    for path in model.files():
-        kind = model.kind_of(path)
-        if kind not in ("code", "test") or not doc_check.supported(path):
-            continue
-        text = model.read(path)
-        for name, line in _reads(path, text) if text else ():
-            sites.setdefault(name, []).append((kind == "test", path, line))
+    sites = read_sites(code_health._model(root, view_id))
     words, checked = _documented(root)
     rows = []
     for name, found in sites.items():

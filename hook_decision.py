@@ -42,6 +42,7 @@ import project_store
 import redirect_rule
 import removed_callers
 import requester
+import risky_calls
 import router
 import scout_access
 import shell_reads
@@ -338,6 +339,20 @@ def _credential_lines(findings):
             "variable or a secret store. If it is a fake value for a test, go ahead.")
 
 
+def _risky_lines(findings):
+    """The note that names the unsafe calls an edit adds, by file, line and kind, never the source text.
+
+    Parameters: findings (list of (rel, item)) the `risky_calls.added` items with the file that was edited.
+    Returns: str, one entry per call, cut at MAX_DOC_FINDINGS.
+    """
+    lines = [f"{rel}:{item['line']} {item['kind']}" for rel, item in findings[:MAX_DOC_FINDINGS]]
+    if len(findings) > MAX_DOC_FINDINGS:
+        lines.append(f"{len(findings) - MAX_DOC_FINDINGS} more line(s) in the same situation")
+    return ("Smart Tool risky calls: " + "; ".join(lines) + ". Calls that are almost never safe on input the code does not "
+            "control: use the safe form (a list of arguments, safe_load, a verified connection, a parser or textContent); if "
+            "the input is trusted, go ahead.")
+
+
 def _cycle_lines(findings):
     """The note that names the import cycles an edit's added imports close.
 
@@ -478,7 +493,7 @@ def _read_note(payload, decision_mode):
 
 
 def _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode="off", layer_mode="off",
-                 link_mode="off", decision_mode="off"):
+                 link_mode="off", decision_mode="off", risky_mode="off"):
     """Checks of an edit before it runs. Docstrings follow doc_mode, in code files of registered projects only (tests,
     docs and files outside a project are left out, as in the docs coverage): missing ones deny the edit in require mode and become a reminder in remind mode; a
     documented function whose signature changed always gets a reminder. Comments the edit adds in the wrong place
@@ -486,10 +501,11 @@ def _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mod
     functions follow duplicate_mode and only add context, never deny. An edit of a package.json, requirements*.txt or go.mod follows dependency_mode: advisories
     of the added or changed dependencies are added as context, never a denial. Local links an edit of an HTML or Markdown
     file adds or changes follow link_mode: missing targets and links that cannot be checked are added as context. The notes
-    and commit messages that name a touched function follow decision_mode and only add context."""
+    and commit messages that name a touched function follow decision_mode and only add context, and so do the unsafe calls
+    the edit adds (risky_mode)."""
     with code_graph.pending_scope():
         return _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode, link_mode,
-                                   decision_mode)
+                                   decision_mode, risky_mode)
 
 
 def _dependency_part(before, after, ecosystem):
@@ -525,10 +541,10 @@ def _history_findings(edited, failures):
 
 
 def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode="off", link_mode="off",
-                    decision_mode="off", shape=False):
+                    decision_mode="off", risky_mode="off", shape=False):
     """The checks of an edit over (path, before, after) triples: docstrings, comments, documentation anchors, copies,
-    dependency advisories and the imports added that no manifest declares (both follow dependency_mode), local links, layers
-    and the decisions recorded about the touched functions, each following its mode.
+    dependency advisories and the imports added that no manifest declares (both follow dependency_mode), local links, layers,
+    the decisions recorded about the touched functions and the unsafe calls the edit adds, each following its mode.
     With `shape`, two more notes read only the cached code graph and history: the import cycle an added Python import
     closes and the hotspots or usual change partners among the edited files.
 
@@ -539,7 +555,7 @@ def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_
     """
     doc_findings, scope_findings, duplicate_findings, failures, dependency_parts = [], [], [], [], []
     comment_findings, layer_findings, credential_findings, caller_answers = [], [], [], []
-    broken_links, unchecked_links = [], []
+    broken_links, unchecked_links, risky_findings = [], [], []
     decision_findings, decisions_asked = [], 0
     cycle_findings, import_findings, edited_files = [], [], {}
     for path, before, after in changes:
@@ -555,6 +571,11 @@ def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_
                 unchecked_links += [(rel, item) for item in found["unchecked"]]
             except (ValueError, RuntimeError, OSError) as exc:
                 failures.append(f"Smart Tool links check skipped: {exc}")
+        if risky_mode != "off":
+            try:
+                risky_findings += [(rel, item) for item in risky_calls.added(rel, before, after)]
+            except ValueError as exc:
+                failures.append(f"Smart Tool risky calls check skipped: {exc}")
         ecosystem = dependency_notice.ecosystem_of(path)
         if dependency_mode != "off" and ecosystem:
             dependency_parts += [part for part in (_dependency_part(before, after, ecosystem),) if part]
@@ -615,6 +636,7 @@ def _review_changes(changes, doc_mode, duplicate_mode, dependency_mode, comment_
         ([_decision_lines(decision_findings)] if decision_findings else []) + \
         ([_callers_lines(caller_answers)] if caller_answers else []) + \
         ([_credential_lines(credential_findings)] if credential_findings else []) + \
+        ([_risky_lines(risky_findings)] if risky_findings else []) + \
         ([_history_lines(hotspots, coupled)] if hotspots or coupled else []) + \
         _link_lines(broken_links, unchecked_links) + failures + dependency_parts
     return parts, doc_findings, comment_findings
@@ -627,7 +649,7 @@ def review_diff(changes, cfg):
     Returns: str, the hook's message for the whole set; empty when every check is quiet or off.
     """
     modes = (config.doc_mode(cfg), config.duplicate_mode(cfg), config.dependency_mode(cfg), config.comment_mode(cfg),
-             config.layer_mode(cfg), config.link_mode(cfg), config.decision_mode(cfg))
+             config.layer_mode(cfg), config.link_mode(cfg), config.decision_mode(cfg), config.risky_mode(cfg))
     with code_graph.pending_scope():
         return " ".join(_review_changes(changes, *modes)[0])
 
@@ -697,7 +719,7 @@ def _shell_review(payload):
     cwd = payload.get("cwd")
     cfg = config.load_config()
     modes = (config.doc_mode(cfg), config.duplicate_mode(cfg), config.dependency_mode(cfg), config.comment_mode(cfg),
-             config.layer_mode(cfg), config.link_mode(cfg), config.decision_mode(cfg))
+             config.layer_mode(cfg), config.link_mode(cfg), config.decision_mode(cfg), config.risky_mode(cfg))
     if set(modes) == {"off"}:
         return {}
     if not isinstance(cwd, str) or not os.path.isdir(cwd) or not _in_git_repository(cwd):
@@ -731,11 +753,11 @@ def _shell_note(reason):
 
 
 def _edit_review_scoped(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode="off", layer_mode="off",
-                        link_mode="off", decision_mode="off"):
+                        link_mode="off", decision_mode="off", risky_mode="off"):
     """`_edit_review` inside one `code_graph.pending_scope`, so the pending-changes scan runs once per review."""
     parts, doc_findings, comment_findings = _review_changes(
         edit_preview.preview(payload.get("tool_name"), payload.get("tool_input"), payload.get("cwd")),
-        doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode, link_mode, decision_mode, shape=True)
+        doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode, link_mode, decision_mode, risky_mode, shape=True)
     if not parts:
         return {}
     message = " ".join(parts)
@@ -759,13 +781,14 @@ def decide(payload, client, web_route, jobs):
     if isinstance(payload, dict):
         requester.note_origin(payload.get("session_id"), payload.get("cwd"))
     if isinstance(payload, dict) and payload.get("tool_name") in EDIT_TOOLS:
-        doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode, link_mode, decision_mode = (
+        doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode, link_mode, decision_mode, risky_mode = (
             config.doc_mode(cfg), config.duplicate_mode(cfg), config.dependency_mode(cfg), config.comment_mode(cfg),
-            config.layer_mode(cfg), config.link_mode(cfg), config.decision_mode(cfg))
-        if "off" == doc_mode == duplicate_mode == dependency_mode == comment_mode == layer_mode == link_mode == decision_mode:
+            config.layer_mode(cfg), config.link_mode(cfg), config.decision_mode(cfg), config.risky_mode(cfg))
+        if "off" == doc_mode == duplicate_mode == dependency_mode == comment_mode == layer_mode == link_mode == decision_mode \
+                == risky_mode:
             return {}
         return _edit_review(payload, doc_mode, duplicate_mode, dependency_mode, comment_mode, layer_mode, link_mode,
-                            decision_mode)
+                            decision_mode, risky_mode)
     if isinstance(payload, dict) and payload.get("tool_name") == "Read":
         routed = _route(payload, client, web_route, cfg) if config.hook_mode(cfg) != "off" else {}
         return _read_note(payload, config.decision_mode(cfg)) or routed

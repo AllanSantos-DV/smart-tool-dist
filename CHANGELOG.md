@@ -1,5 +1,111 @@
 # Changelog
 
+## 0.9.88 - beta
+
+- `project_manage action=cli_undocumented` (`limit`) reads the argparse command lines of the tracked Python files
+  (`doc_cli.definitions`; test and vendored folders left out) against the README and `docs` text `undocumented_env`
+  reads, and lists with file and line the flags and subcommands no doc names (a flag counts when any of its names appears
+  in the text, a subcommand only in inline code or a fenced line) and the flags and subcommands a doc command line gives
+  to one of those scripts (its path, or its module after `-m`, up to a pipe, `&&`, `;` or a shell comment) and that
+  script does not define; a flag of another program, `-h` and `--help` are left alone. It says that only argparse is
+  seen (click and typer are not), totals in `counts` and writes nothing. `undocumented_env` gains `doc_texts` and
+  `words_of`, the doc reading it shared only by name before. Tests: `tests/test_cli_undocumented.py`.
+- `project_manage action=config_unread` (`limit`, `view_id`) lists the top-level keys of the `DEFAULT_CONFIG` dict of the
+  project's `config.py` that no README or `docs` text names as a whole word, and the keys the docs name in a config
+  context (a snake-case name in inline code on a line that names a config file the `config.py` reads, found by the scan
+  of the Configuration page, now `doc_extras.config_reads`, or `DEFAULT_CONFIG`, and the top-level keys of a json block
+  that follows such a line) that `DEFAULT_CONFIG` does not have, each with file and line. A project with no
+  `DEFAULT_CONFIG` dict fails naming it. It writes nothing. Tests: `tests/test_config_unread.py`.
+- `project_manage action=graph` takes `format` (`json`, the default and the unchanged answer, or `mermaid`): with
+  `symbol`, `format=mermaid` returns the callers and the calls `impact` answers with as Mermaid flowchart text, drawn by
+  `doc_extras.flowchart` (the writer of the Modules page, now shared), at most `limit` functions around the definition
+  with callers and calls taking turns, the call line on each edge and the number left out in `counts.omitted`. It needs
+  `symbol` and cannot be combined with `brief`. Tests: `tests/test_graph_mermaid.py`.
+- `risky_mode` in `config.json` (`warn`, default, or `off`, on the Agent rules page of the setup screen): the edit hook
+  names the unsafe calls an edit adds (the shapes `risky_calls` lists) with file, line and kind, only for lines the edit
+  adds (a call that only moved, or one already there, is not new), never the code of the line, as context that never
+  blocks. `pr_impact` leaves them out of its edit-checks note because it has a section for them. Tests:
+  `tests/test_risky_added.py`.
+- `pr_impact` has a `Risky calls the diff adds` section: the unsafe calls the current text has and the text at the base
+  did not (file, line and kind, never the code), and `risky_calls`, `complexity_growth` and `reached` keys in the answer.
+  The section appears only with findings, or to say a file could not be read. Tests: `tests/test_pr_impact.py`.
+- `pr_impact` has a `Complexity that grew` section: the touched functions whose cyclomatic count (`complexity`) is higher
+  than at the base, with both numbers; a function new in the diff has nothing to compare and is left out. Appears only
+  with findings. Tests: `tests/test_pr_impact.py`, `tests/test_complexity.py`.
+- `pr_impact` has a `How it is reached` section, asked for with `reach=true` (off by default: it builds the documentation
+  model, 5 to 25 s, and the pre-push hook and `pr_impact_comment` never wait for it; without it the report says in one
+  line that `reach=true` adds it): for each touched function, one shortest static call chain from an entry point of
+  `entry_points` (the search of `call_path`, 6 hops), the call site of each step, capped by `limit`; when no chain exists
+  it says so plainly and that dynamic calls are not seen, and when the search was cut by the hop cap, that. Tests:
+  `tests/test_pr_impact.py`, `tests/test_pre_push_hook.py`.
+- `project_manage action=stack_trace` reads a pasted Python, Node or Java traceback (`text`) and answers, for each
+  frame inside the project, the function whose lines hold the frame line (the innermost indexed symbol), its direct
+  callers with the line of the call and the tests that reach it (3 hops), up to `limit` per list. Absolute frame paths
+  lose the project folder, frames outside the project are counted in `ignored`, and Java frames, which carry no folder,
+  are matched by package and file name. It is static analysis over the code graph and writes nothing. Tests:
+  `tests/test_stack_trace.py`.
+- `project_manage action=call_path` (`symbol`, `target`, `max_hops`, default 6, up to 10) finds the shortest static
+  call chain between two functions, breadth first over the call edges `graph` reads, with the line of each call site.
+  When there is no chain it says whether the search ran out of calls to follow or was cut by the cap, and that calls
+  through dynamic dispatch are invisible. It writes nothing. Tests: `tests/test_call_path.py`.
+- `project_manage action=symbol_history` lists the commits that changed a function's own lines (`git log -L` on the
+  range the code graph gives), newest first, with date, author name and subject, including commits whose message never
+  names the function, up to `limit`. The ranges describe the working tree, so a function in a file with uncommitted edits
+  (or not yet committed) is refused, naming the file. It writes nothing. Tests: `tests/test_symbol_history.py`.
+- `project_manage action=agent_refs` is `doc_refs` pointed at the agent instruction files every session reads: for each
+  tracked `CLAUDE.md` and `AGENTS.md`, at the root and in folders, it lists the paths, relative links and functions
+  written in inline code that no longer exist, each with its line and why, resolving the paths of a nested file from its
+  own folder. It takes `limit`, says so when the project tracks no such file and writes nothing. Tests:
+  `tests/test_agent_refs.py`.
+- `project_manage action=risky_calls` lists, with file and line and never the source text, the unsafe calls that are
+  almost never safe in the tracked Python, JavaScript and TypeScript files: `shell=True` or `os.system` on a command that
+  is not a literal, `pickle.load` and `pickle.loads`, `yaml.load` with no loader or an unsafe one, an HTTP call with
+  `verify=False`, `eval` and `exec` on a non-literal, and an `innerHTML` assignment of a non-literal. Python is read from
+  its syntax tree (strings and comments never match; a file that does not parse is named in `unparsed`). Test folders and
+  test-named files are skipped unless they are the only code. It takes `limit`, totals the kinds in `by_kind` and writes
+  nothing. Tests: `tests/test_risky_calls.py`.
+- `project_manage action=stack_trace` takes `history` (boolean, default false; the default answer is unchanged): each
+  frame inside a function also gets `last_commit`, the latest commit that changed that function's own lines (the
+  `symbol_history` answer limited to one: hash, date, author name, subject). A frame whose file has uncommitted edits, is
+  not committed or has no git history carries the reason in `history_refused` instead of failing the call. Tests:
+  `tests/test_stack_trace.py`.
+- `project_manage action=risky_reach` (`limit`, `max_hops`, default 6, up to 10) takes the findings of `risky_calls` and
+  gives, for each, the shortest static call chain from an entry point of `entry_points` to the function that holds the
+  call, with the line of each call (the search of `call_path`, started from all the entry points at once). A finding with
+  no chain says whether the search ran out of calls to follow or was cut by `max_hops`, and that a missing path is not
+  proof that the call is safe; a call outside every function, or a project with no entry point, says so. It writes
+  nothing. Tests: `tests/test_risky_reach.py`.
+- `project_manage action=symbol_owner` (`symbol`, `limit`) lists the authors of a function by the lines inside its range
+  that still stand at HEAD (`git blame -L` on the range the code graph gives, whitespace-only changes ignored, names
+  only), each with its lines and whole-percent share, per definition; it shares the blame and share computation of
+  `ownership`. A file with uncommitted edits, one git does not track and a folder with no git history are refused, naming
+  the cause. It writes nothing. Tests: `tests/test_symbol_owner.py`.
+- `project_manage action=env_unread` is the reverse of `undocumented_env`: it lists the environment variables a README or
+  `docs` file names (`export`, `set`, `$env:`, an assignment before a command, `process.env`, `os.environ`, `getenv`, or a
+  snake-case name in inline code on a line that says env or environment) that no code or test reads with a literal name,
+  each with the file and line where it was found and the first other file that holds the name, the names found in no other
+  file first. It takes `limit` and writes nothing. Tests: `tests/test_env_unread.py`.
+- `project_manage action=api_breaks` lists the public functions removed or given another signature since the latest tag
+  (the diff, the removed names and the changed signatures are those `pr_impact` reads, restricted to names with no
+  private segment), each with the callers outside the file that defined it and the calls a removed function leaves in its
+  own file; a function nothing calls is listed with no caller. `release_check` carries the same finding as a fifth
+  advisory, `api_breaks`, that never changes `ready`. A repository with no tag is told so plainly, a folder that is not
+  a git repository fails. It takes `limit`, reports whole totals in `counts` and writes nothing. Tests:
+  `tests/test_api_breaks.py`.
+- `project_manage action=entry_points` lists where execution starts, grouped by layer: the functions a `__main__` block or
+  the name `main` starts, the `__main__` blocks that run no function, the functions with a route annotation (the entry
+  annotations of `layers`), the public functions of the highest declared layer (the roots of the call graph when no layers
+  are declared) and the `main` and `bin` files of `package.json`; each function carries the size of its flow and the stamp
+  `docs/scope` records for it. It reads the same model `docs generate=true` starts from, without generating anything,
+  takes `limit` and writes nothing. Tests: `tests/test_entry_points.py`.
+- `project_manage action=signature_preview` (`path`, `symbol`, `params`) lists, before a signature edit, the call sites of
+  the function whose arguments cannot bind to the proposed parameter list: Python through the interpreter's own binding
+  rules (defaults, keyword-only, `*args`, `**kwargs`, the receiver of a method), the other languages through a count of
+  the call's arguments that reports nothing when it is unsure (a spread argument, generics, a method called through its
+  class, a call it cannot find on its line; those are counted in `unsure`). A call the graph matched by name only says
+  `resolved: false`. It refuses an overloaded name, a class and a `params` that is not a parameter list, takes `limit`
+  and edits nothing. Tests: `tests/test_signature_preview.py`.
+
 ## 0.9.87 - beta
 
 - `project_manage action=diff_coverage` reads the coverage report your own last test run wrote (Cobertura

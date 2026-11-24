@@ -144,8 +144,12 @@ def _tests(model, covering, entries):
     return _done(lines)
 
 
-def _configuration(model):
-    """README of the configuration the code reads: environment variables, config files and ports found by pattern."""
+def config_reads(model):
+    """The environment variables, config files and ports the code files of a model name, found by pattern.
+
+    Parameters: model (object) the index model `doc_scope._Model` builds, with `files`, `kind_of` and `root`.
+    Returns: dict {"Environment variables" | "Files" | "Ports": {name: ["path:line", ...]}}.
+    """
     found = {"Environment variables": defaultdict(list), "Files": defaultdict(list), "Ports": defaultdict(list)}
     paths = [p for p in model.files() if model.kind_of(p) == "code"][:MAX_SOURCE_FILES]
     for path in paths:
@@ -162,6 +166,12 @@ def _configuration(model):
                 for port in pattern.findall(line):
                     if int(port) <= 65535:
                         found["Ports"][port].append(f"{path}:{number}")
+    return found
+
+
+def _configuration(model):
+    """README of the configuration the code reads: environment variables, config files and ports found by pattern."""
+    found = config_reads(model)
     lines = _head(model, "Configuration")
     lines += ["Found by pattern in the code files: a name built at run time is not listed.", ""]
     for title, hits in found.items():
@@ -376,6 +386,19 @@ def _coverage(model):
     return _done(lines)
 
 
+def flowchart(labels, edges):
+    """Mermaid flowchart lines, without a fence: a node per label and an edge per (from, to, text or None) triple.
+
+    Parameters: labels (list of str) the node texts, in node order; edges (list of tuple) labels from `labels`.
+    """
+    node = {label: f"m{i}" for i, label in enumerate(labels)}
+    lines = ["flowchart LR"]
+    lines += [f'  {node[label]}["{label.replace(chr(34), "#quot;")}"]' for label in labels]
+    lines += [f"  {node[a]} -->|{text}| {node[b]}" if text is not None else f"  {node[a]} --> {node[b]}"
+              for a, b, text in edges]
+    return lines
+
+
 def _modules(model):
     """Mermaid flowchart of the calls between code modules (files), the strongest edges first."""
     weights = defaultdict(int)
@@ -386,14 +409,12 @@ def _modules(model):
                 weights[(a, b)] += 1
     edges = sorted(weights.items(), key=lambda item: (-item[1], item[0]))[:doc_scope.MAX_FLOW_EDGES]
     names = sorted({m for edge, _n in edges for m in edge})
-    node = {name: f"m{i}" for i, name in enumerate(names)}
     lines = _head(model, "Modules")
     if not edges:
         return _done(lines + ["No call between two code modules in the graph."])
     lines += ["The calls between modules, the strongest " + str(doc_scope.MAX_FLOW_EDGES) + " edges; the number is how "
-              "many functions call across.", "", "```mermaid", "flowchart LR"]
-    lines += [f'  {node[name]}["{name}"]' for name in names]
-    lines += [f"  {node[a]} -->|{n}| {node[b]}" for (a, b), n in edges]
+              "many functions call across.", "", "```mermaid"]
+    lines += flowchart(names, [(a, b, n) for (a, b), n in edges])
     lines.append("```")
     return _done(lines)
 

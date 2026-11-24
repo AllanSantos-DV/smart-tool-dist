@@ -322,6 +322,10 @@ def handle_integration_get():
     except ValueError as exc:
         decision_mode, decision_error = "", str(exc)
     try:
+        risky_mode, risky_error = config.risky_mode(), ""
+    except ValueError as exc:
+        risky_mode, risky_error = "", str(exc)
+    try:
         proposals_mode, proposals_error = config.pattern_proposals(), ""
     except ValueError as exc:
         proposals_mode, proposals_error = "", str(exc)
@@ -341,6 +345,7 @@ def handle_integration_get():
             "pr_comment": pr_comment, "pr_comment_error": pr_comment_error, "pr_comment_modes": list(config.PR_COMMENT_MODES),
             "decision_mode": decision_mode, "decision_mode_error": decision_error,
             "decision_modes": list(config.DECISION_MODES),
+            "risky_mode": risky_mode, "risky_mode_error": risky_error, "risky_modes": list(config.RISKY_MODES),
             "pattern_proposals": proposals_mode, "pattern_proposals_error": proposals_error,
             "block_patterns": {"proposals": stored["proposals"], "accepted": stored["accepted"],
                                "rejected": len(stored["rejected"]), "error": patterns_error},
@@ -359,12 +364,12 @@ def handle_integration_save(body):
         except (OSError, ValueError) as exc:
             raise SetupError(str(exc))
         return handle_integration_get()
-    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "comment_mode", "duplicate_mode", "dependency_mode", "layer_mode", "link_mode", "pr_comment", "decision_mode", "pattern_proposals"):
+    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "comment_mode", "duplicate_mode", "dependency_mode", "layer_mode", "link_mode", "pr_comment", "decision_mode", "risky_mode", "pattern_proposals"):
         action = body["action"]
         allowed = {"hook_mode": config.HOOK_MODES, "doc_mode": config.DOC_MODES, "comment_mode": config.COMMENT_MODES,
                    "duplicate_mode": config.DUPLICATE_MODES, "dependency_mode": config.DEPENDENCY_MODES,
                    "layer_mode": config.LAYER_MODES, "link_mode": config.LINK_MODES, "pr_comment": config.PR_COMMENT_MODES,
-                   "decision_mode": config.DECISION_MODES,
+                   "decision_mode": config.DECISION_MODES, "risky_mode": config.RISKY_MODES,
                    "pattern_proposals": config.PATTERN_PROPOSAL_MODES}[action]
         if body.get("mode") not in allowed:
             raise SetupError(f"Invalid mode: use {', '.join(allowed)}.")
@@ -1492,6 +1497,10 @@ const RULES = [
     intro: "Looks up the notes of the project (docs/research, the backlog, CLAUDE.md and AGENTS.md) and its commit messages for the functions an edit touches, and names the ones that record a decision about them. A single-word function name counts only when a note qualifies it with its module or class. It never blocks.",
     options: [["warn", "Warn", "The edit runs; the agent is told which notes and commits record a decision about a touched function.", true],
               ["off", "Off", "No decision lookup."]] },
+  { key: "risky_mode", title: "Unsafe calls on edit", applies: "Applies on the next edit.",
+    intro: "Names the file, line and kind of the unsafe calls an edit adds to a Python, JavaScript or TypeScript file: shell=True or os.system on a command that is not a literal, pickle.load, yaml.load without a safe loader, verify=False, eval and exec on a non-literal, innerHTML set to a non-literal. Lines that were already there are left alone and the code of the line is never repeated. It never blocks.",
+    options: [["warn", "Warn", "The edit runs; the agent is told which added lines hold an unsafe call.", true],
+              ["off", "Off", "No unsafe-call checks."]] },
   { key: "pattern_proposals", title: "Block patterns proposed by a model", applies: "Applies to the next review.",
     intro: "Afterwards, never delaying a call, the scope model (else the router model) reviews searches the fixed rule let through and may propose block patterns. Nothing blocks until you accept it on the Redirects page.",
     options: [["on", "On", "Review in the background and list proposals for you.", true],

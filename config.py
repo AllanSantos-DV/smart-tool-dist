@@ -51,6 +51,7 @@ DEFAULT_CONFIG = {
     "link_mode": "warn",
     "pr_comment": "off",
     "decision_mode": "warn",
+    "risky_mode": "warn",
     "document_converter": "off",
     "document_converter_python": "",
     "docs_extras": {key: True for key in DOCS_EXTRAS},
@@ -97,6 +98,9 @@ PR_COMMENT_MODES = ("off", "on")
 # Edit hook on the functions an edit touches: warn = let the edit run and name the notes and commit messages of the project
 # that record a decision about them; off = say nothing. Never blocks.
 DECISION_MODES = ("warn", "off")
+# Edit hook on the unsafe calls an edit adds (shell=True, os.system, pickle.load, yaml.load, verify=False, eval, exec, innerHTML on
+# a non-literal): warn = let the edit run and name file, line and kind of each added call; off = say nothing. Never blocks.
+RISKY_MODES = ("warn", "off")
 # External converter read_document falls back to for a file type or a scanned PDF its native reader refuses: off = never;
 # auto = the first of kreuzberg and docling found installed; or one of them by name. The engine is looked for in the
 # interpreter named by `document_converter_python` (empty = the one Smart Tool runs on).
@@ -167,6 +171,14 @@ def decision_mode(cfg=None):
     value = (cfg if cfg is not None else load_config()).get("decision_mode") or DEFAULT_CONFIG["decision_mode"]
     if value not in DECISION_MODES:
         raise ValueError(f"Invalid decision_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
+    return value
+
+
+def risky_mode(cfg=None):
+    """The edit hook's risky-calls mode, `warn` or `off`; raises ValueError for any other value in the config file."""
+    value = (cfg if cfg is not None else load_config()).get("risky_mode") or DEFAULT_CONFIG["risky_mode"]
+    if value not in RISKY_MODES:
+        raise ValueError(f"Invalid risky_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
     return value
 
 

@@ -5,7 +5,9 @@ callers of each touched function and the tests that reach it (code_impact), the 
 out of date (doc_scope), the files that usually change with the diff's files and are missing from it, the import cycles
 through the changed files and the changed files that are hotspots (code_health), the new functions no caller or test reaches (code_health), the callers that still name a function
 the diff removed or renamed and the callers of those whose signature changed (removed_callers), the decision notes that name a touched function (dossier) and the notes the
-edit hook would have added to the whole diff (hook_decision).
+edit hook would have added to the whole diff (hook_decision), the unsafe calls the diff adds, the touched functions whose complexity grew and
+the call chain that reaches each touched function from an entry point (diff_sections), which only a caller that asks for
+it gets because it builds the whole documentation model.
 Nothing is published: the agent pastes the report where it belongs.
 """
 import os
@@ -13,8 +15,10 @@ import os
 import affected_tests
 import code_health
 import code_impact
+import complexity
 import config
 import dependencies_section
+import diff_sections
 import doc_check
 import doc_refs_section
 import doc_scope
@@ -72,11 +76,13 @@ def _hook_notes(versions):
     """The edit hook's notes over the changed files of the diff, which commits made without the hook never got.
 
     Parameters: versions (list) `_versions` of the diff.
-    Returns: tuple (str notes, "" when nothing is worth saying; str problem, "" when the checks ran).
+    Returns: tuple (str notes, "" when nothing is worth saying; str problem, "" when the checks ran). The unsafe calls are left
+    out: the report has a section of their own.
     """
     triples = [(full, before, after) for _rel, full, before, after in versions if after is not None]
+    cfg = {**config.load_config(), "risky_mode": "off"}
     try:
-        return hook_decision.review_diff(triples, config.load_config()), ""
+        return hook_decision.review_diff(triples, cfg), ""
     except (OSError, ValueError, RuntimeError) as exc:
         return "", f"the edit checks could not run: {exc}"
 
@@ -315,17 +321,22 @@ def _stale(root, view_id, paths):
     return [f for f in found if f["issue"] != "broken_link" and f["id"].rpartition("::")[0] in paths], None
 
 
-def report(root, base="HEAD", limit=30, view_id=None, links=False):
+def report(root, base="HEAD", limit=30, view_id=None, links=False, reach=False):
     """Impact of the changes since base.
 
     Parameters: root (str) project folder; base (str) git revision; limit (int) rows per list; view_id (str or None);
-    links (bool) read the external links the diff adds and list the ones that look dead (network use, off by default).
+    links (bool) read the external links the diff adds and list the ones that look dead (network use, off by default);
+    reach (bool) add the entry-point chain of each touched function (seconds long, off by default, so the pre-push hook
+    and the comment never wait for it).
     Returns: dict with 'markdown' and the data behind it (touched, tests, stale_anchors, commands, run_all, and the sections
-    duplicates, doc_refs, dependencies and new_links).
-    Raises: ValueError when `links` is not a boolean.
+    duplicates, doc_refs, dependencies, new_links, risky_calls, complexity_growth and reached, which is empty unless
+    `reach`).
+    Raises: ValueError when `links` or `reach` is not a boolean.
     """
     if type(links) is not bool:
         raise ValueError("links must be true or false")
+    if type(reach) is not bool:
+        raise ValueError("reach must be true or false")
     changes = affected_tests.affected(root, base, limit, view_id)
     changed_code = set(changes["changed"]["code"])
     touched = changes["touched_functions"][:MAX_FUNCTIONS]
@@ -345,6 +356,9 @@ def report(root, base="HEAD", limit=30, view_id=None, links=False):
     cycles, cycles_note, cycles_problem = _cycles(root, view_id, changed_code) if changed_code else ([], "", "")
     hotspots, hotspots_problem = _hotspots(root, view_id, changed_code) if changed_code else ([], "")
     new_dead, new_dead_note, new_dead_problem = _new_dead(root, view_id, versions, changed_code)
+    risky = diff_sections.risky(versions)
+    complex_growth = diff_sections.grown(versions, touched)
+    chains = diff_sections.reached(root, view_id, touched if reach else [])
     lines = [f"## Impact of the change against `{base}`", "",
              f"{changes['counts']['changed_files']} changed file(s), {len(changes['touched_functions'])} touched "
              f"function(s), {changes['counts']['tests']} test file(s) to run.", ""]
@@ -402,6 +416,17 @@ def report(root, base="HEAD", limit=30, view_id=None, links=False):
         lines += ["No file that usually changes with these is missing from the diff.", ""]
     lines += _shape_lines(cycles, cycles_note, cycles_problem, hotspots, hotspots_problem, changed_code)
     lines += _new_dead_lines(new_dead, new_dead_note, new_dead_problem)
+    lines += _advisory_lines("Risky calls the diff adds", risky, diff_sections.describe_risky, limit,
+                             "Advisory: calls that are almost never safe on input the code does not control; use the safe form "
+                             "(a list of arguments, safe_load, a verified connection) or confirm the input is trusted. A call "
+                             "that is unsafe through a variable or a wrapper is not seen.")
+    lines += _advisory_lines("Complexity that grew", complex_growth, diff_sections.describe_grown, limit,
+                             f"Advisory: {complexity.NOTE}")
+    lines += _advisory_lines("How it is reached", chains, diff_sections.describe_reached, limit,
+                             "Advisory: one shortest static chain from an entry point; other chains may exist.",
+                             [chains["note"]] if chains["note"] and chains["findings"] else ())
+    if touched and not reach:
+        lines += ["The entry-point chains of the touched functions are not computed by default: `reach=true` adds them.", ""]
     lines += ["### Tests to run", ""]
     if changes["tests"]:
         lines += [f"- `{t['path']}`: {t['why']}" for t in changes["tests"]]
@@ -419,7 +444,8 @@ def report(root, base="HEAD", limit=30, view_id=None, links=False):
             "callers": {label: (reached[1] if reached else 0) for label, reached in callers.items()},
             "untested": untested, "coupled": coupled, "cycles": cycles, "hotspots": hotspots, "new_without_caller": new_dead, "decisions": decisions, "decisions_note": decisions_note,
             "edit_checks": notes or notes_problem, "duplicates": duplicated,
-            "doc_refs": stale_refs, "dependencies": dependencies, "new_links": new_links,
+            "doc_refs": stale_refs, "dependencies": dependencies, "new_links": new_links, "risky_calls": risky,
+            "complexity_growth": complex_growth, "reached": chains,
             "removed_callers": [item for answer in removed for item in answer["findings"]],
             "signature_callers": [item for answer in resigned for item in answer["findings"]],
             "stale_anchors": stale, "stale_note": stale_note, "tests": changes["tests"],
