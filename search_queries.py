@@ -4,6 +4,7 @@ Each query runs through the ordinary smart_search path with the arguments the ca
 detail, layer, single_language_reason, decision_notes, and `folder` as the default), so a query is answered exactly as the
 same search sent alone.
 """
+import web_fetch_many
 
 MAX_QUERIES = 5
 QUERY_TEXTS = ("query_identifiers", "query_comments", "doc_query")
@@ -53,9 +54,4 @@ def render(results):
     """The text the agent reads: a count line, then one numbered section per query with its answer or `ERROR: reason`.
 
     Parameters: results ([{"label", "ok", "text" or "error"}], one per query, in order)."""
-    failed = sum(not result["ok"] for result in results)
-    blocks = [f"smart_search: {len(results)} queries, {len(results) - failed} answered, {failed} failed."]
-    for number, result in enumerate(results, 1):
-        body = result["text"] if result["ok"] else f"ERROR: {result['error']}"
-        blocks.append(f"[{number}/{len(results)}] {result['label']}\n{str(body).rstrip()}")
-    return "\n\n".join(blocks)
+    return web_fetch_many.render_batch("smart_search", "queries", "answered", results, "label")

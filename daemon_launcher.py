@@ -31,7 +31,6 @@ LOCK_PATH = os.path.join(RUN_DIR, "daemon.lock")
 LOCK_STALE_SECONDS = 30
 UPDATE_MARKER = os.path.join(RUN_DIR, "updating")
 UPDATE_STALE_SECONDS = 900
-DEFAULT_PORT = int(os.environ.get("SMART_TOOL_PORT", "8765"))
 DAEMON_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smart_tool_daemon.py")
 
 

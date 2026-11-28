@@ -1,5 +1,92 @@
 # Changelog
 
+## 0.9.90 - beta
+
+- Leftovers on edit. The edit hook warns about conflict markers, focused or skipped tests and debugger lines in the lines an edit adds (file, line and kind, never the code); `leftover_mode` is `warn` (default) or `off`, never blocks.
+- `smart_search` takes `projects` (`all` or a list of roots): one labelled section per project, each ranked in its own index; a project without an index, with an index of another embedding model or not registered is skipped with the reason, and results of two models are never mixed.
+- `project_manage action=diagnostics` writes one scrubbed JSON bundle (versions, audit counts, model and web health, usage, log tails) to the data folder's `diagnostics`; credentials, home paths, URLs, e-mails, queries and project folders are left out.
+- `read_document` takes `query`: only the 3 most similar pages, slides or sheets come back, labelled and in order; without an embedder it fails loudly.
+- `web_fetch` says what changed since the previous read of a refreshed page (`changed since <date> (+A -R lines)` or `unchanged`, at most 20 changed lines).
+- Untrusted content notice. `web_fetch` and `read_document` add one warning line when the text matches a prompt-injection pattern; the text itself is never altered.
+- `web_search` result URLs end with `# (accessed YYYY-MM-DD)`, a YAML comment, so the URL value stays intact.
+- Documentation chain on by default. The docstring of every public function ends with `Technical doc: <page>#<anchor>`;
+  the edit hook asks for the line when it is missing or stale (`require` denies, `remind` warns). `SMART_TOOL_DOCS=off`
+  turns the edit hook and the end-of-turn documentation step off, over `config.json`; any other value fails loudly.
+- Dependencies without known advisories. `pypdf` 6.20.0 -> 6.21.4 (16 advisories fixed) and `@angular/compiler`
+  20.3.0 -> 20.3.35 (7 fixed); the transitive `lodash`, `lodash-es` and `zod` of the Java parser and open-websearch
+  are held at fixed versions by `overrides` in `web_adapters/node/package.json`, and `npm audit` reports 0
+  vulnerabilities for the Node adapters.
+- A web source that keeps failing is skipped for a while. After 5 plain failures in a row (a pause does not count; a
+  success, a rate limit or a captcha ends the streak) the source stays out of the next searches for 10 minutes, then it
+  is tried again: one more failure starts another window, one success clears it. The skip is read from the same health
+  log as everything else, so there is nothing to reset. It is never applied to every source at once (when all of them
+  fail, all run), and a source that answered with nothing, such as Wikipedia without an article, counts as healthy. The
+  result's warnings and the daemon log name it, for example `duckduckgo (skipped: failed 5 times in a row, tried again
+  in 7 min)`.
+- The Camoufox browser download shows what it does. Its start, progress, completion and failure are lines in
+  `~/.smart-tool/data/browser-fetch.log` (each with the reason and the next step), Windows notifications announce the
+  start, the completion and a failure, and the last state is kept in `browser-fetch.json`. A download has a hard time
+  limit of 45 minutes on top of its bounded retries. When a refresh fails and a browser build is already on disk, that
+  build is kept and the update goes on (state "degraded", reported in the setup audit as `browser_fetch_degraded`); a
+  release lookup that fails (the library prints it and goes on) counts as a failed refresh too; with
+  no build on disk the step fails (`browser_fetch_failed`, an error finding with the step to take). The resident browser
+  no longer starts a 1.3 GB download of its own when the build is missing: it stops with the step to take.
+- Web reads and searches survive a block by browser identity. A refusal that keys on the client (HTTP 202 anomaly
+  challenge, 403, 429, or a challenge page served with 200) is retried, inside the same call, with up to two other
+  identities from a pool of six browsers (`web_adapters/identities.json`: User-Agent plus the headers that browser sends
+  with it, such as `sec-ch-ua` for Chromium and none for Firefox); only when all are refused does the call fail, with
+  the reason, and the next source takes over. It covers the DuckDuckGo adapter (now the form POST a browser sends, which
+  the challenge accepts where the GET was refused), the ddgs library adapter (a fresh client gets another TLS, HTTP/2 and
+  header profile), the keyless calls of the API providers on a 403, and `web_fetch` on a 403 or 429. A 403 with your own
+  key is still a rejected key and is not rotated. Wikimedia hosts (`wikipedia.org`, `wikimedia.org`, `mediawiki.org`...)
+  get the descriptive agent their policy asks for (`SmartTool/x.y.z (local MCP search tool; <your contact or the project
+  address>)`) and are never rotated, since they treat a browser agent used by a bot as malicious. Each block and each
+  recovery writes one line (`provider`, `identity`, `reason`, `outcome`) to `web-identity.log` in the data folder; nothing
+  is sent anywhere, and `project_manage action=web_sources` adds `identity_blocks` (per provider: blocks and recoveries per
+  identity, and how often all were refused). Rotation cannot help when the address itself is blocked. Tests:
+  `tests/test_web_identity.py`.
+- `project_manage action=web_sources` (`limit`) reports the web search sources of the whole machine, without a project:
+  per source the calls ok, failed, rate_limited, captcha and paused from the recent health log with the success rate
+  (paused calls are not misses), the keyless quota of Exa and Parallel, and the busiest requesters. It writes nothing.
+- The web search page of the setup screen shows `Quota: N of M calls used today` (or `this hour`, with `held until HH:MM`
+  when the source is held out) on the Exa and Parallel rows while they run keyless.
+- `web_search` says when a source drops. When a source fails, is paused or misses the time budget, the `warnings` of the
+  answer and the daemon log carry one line, `Degraded web sources: exa (quota used up until 2026-11-27 00:00), ...; 7 of
+  9 sources answered.`, and the call is marked degraded; a source that answered in either language is not listed. Before,
+  the error was dropped whenever other sources answered. A search where every source fails still fails loud with each
+  reason.
+- Free quotas are remembered and paced (`web_search_quota.py`, `web-search-quota.json` in the data folder, kept across
+  restarts). Exa (150 calls a day without a key, 2 per bilingual search) and Parallel (about 60 an hour) are counted from
+  their published caps: the last 20% runs on alternate calls and the cap holds the source out until the local midnight (Exa)
+  or the next hour (Parallel). Three provider rate limits in one window also hold it until the window ends, where the
+  circuit used to reopen every minute. A key of your own is never counted: its limit is your account's.
+- Wikipedia is launched only for a query that reads as a topic name (up to six words, no digits, code characters,
+  time-bound or how-to words); it failed 238 of 240 calls before.
+- New fallbacks, tried after Tavily and Firecrawl when coverage is still short: Yandex through the ddgs library, and
+  Marginalia (shared public key, often rate limited; its results are CC-BY-NC-SA 4.0, non-commercial). Brave, Mojeek and
+  your own SearXNG instance are supported when you give their key or address in the setup screen (Brave: US$ 5 of credit
+  a month and a card; Mojeek: paid; SearXNG: its settings must allow `format=json`); without it they are not asked.
+  Bing scraping stays out. Tests: `tests/test_web_reserve.py`.
+- The notice also warns before a source drops: `Free quota running low: exa 130 of 150 calls used today.` when a counted
+  source answers inside the last 20% of its free quota. A source that answers with nothing is not listed as dropped. A
+  quota store that cannot be read is set aside as `web-search-quota.json.damaged` with a line on stderr and counting
+  restarts, instead of taking Exa and Parallel down; a malformed SearXNG address is redacted from errors.
+- The web search page of the setup screen has a `Test all sources` button (`POST /setup/web-search/probe`) that runs one
+  real search per source, one at a time, and shows `ok` with the result count and time, `rate_limited`, `key_rejected`,
+  `needs_key` or `failed` per source. Brave, Mojeek and SearXNG without your key are not called, and Exa and Parallel
+  without your key are skipped, so the probe never spends their counted free quota. Before, a key was tested only when saved.
+- A Claude Code `settings.json` that still holds the old `http` hook entries of Smart Tool (a literal port in the URL,
+  which end in "connection refused" once the daemon runs elsewhere or is down) is migrated when the daemon starts, which
+  the installer's restart also triggers: each such entry becomes the command of the same route, signed
+  `--hook-origin=smart-tool`, that reads the daemon address from the run file on every call. A backup is kept, matchers
+  and other tools' hooks stay as they are, and a profile without old entries is not touched. The setup screen no longer
+  assumes a port when the run file is missing (it says the daemon is not running), and the launcher and the tray no
+  longer carry a default port.
+
+## 0.9.89 - beta
+
+- The setup audit runs the `headersHelper` command of an HTTP MCP entry (Claude Code's way to deliver a token) with a 10 s timeout and merges the headers it prints over the static ones, so the audit no longer calls a server such as the mcp-gateway without its token. A helper that fails, times out or prints something other than a JSON object of headers is reported as `token helper failed` (time, start, exit code or output shape; never the output) and no request goes out without a token. A refused sign-in (401/403) or a failed helper is kept for 15 minutes in the periodic audit instead of being asked again every round; a changed entry or a manual audit asks at once. The token never appears in a report.
+
 ## 0.9.88 - beta
 
 - `project_manage action=cli_undocumented` (`limit`) reads the argparse command lines of the tracked Python files

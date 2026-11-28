@@ -26,6 +26,8 @@ GO_COMMON_METHODS = {"Error", "Read", "ServeHTTP", "String", "Write", "Unwrap"}
 GO_SORT_METHODS = {"Len", "Less", "Swap"}
 GO_ARTICLES = ("A ", "An ", "The ", "This ")
 MAX_PARSED = 64
+LINK_LABEL = "Technical doc: "
+DOC_LINK = re.compile(rf"^[ \t]*{LINK_LABEL}(.+?)[ \t]*$", re.M)
 _SPACE = re.compile(r"\s+")
 _PARSED = OrderedDict()
 _PARSED_LOCK = threading.Lock()
@@ -312,11 +314,19 @@ def written(path, before, after):
     return {"all": found, "touched": [f for f in found if lines.intersection(range(f["start"], f["end"] + 1))]}
 
 
-def review(path, before, after, edited=None):
+def _links_in(docstring):
+    """The technical-doc link lines of a docstring, in order."""
+    return [f"{LINK_LABEL}{target}" for target in DOC_LINK.findall(docstring)]
+
+
+def review(path, before, after, edited=None, links=None):
     """Functions the edit from before to after touched that are left without a docstring although the language
-    convention expects one ('missing': public, not nested, not an override) or keep one while their signature changed
+    convention expects one ('missing': public, not nested, not an override), keep one that lacks the link line to its
+    technical entry or carries a stale one ('unlinked', only with links) or keep one while their signature changed
     ('signature_changed'). Untouched functions and body-only edits are not reported. edited is written() of the same
-    edit when the caller already has it."""
+    edit when the caller already has it; links maps a function's start line to the link line it must carry (see
+    doc_scope.docstring_links), and each finding of a function in it carries that line as 'link' (and, for
+    'unlinked', the link line it has now as 'found', None when it has none)."""
     if not supported(path):
         return []
     edited = edited or written(path, before, after)
@@ -326,11 +336,16 @@ def review(path, before, after, edited=None):
     findings = []
     for function in edited["touched"]:
         previous = old.get(function["name"])
+        link = (links or {}).get(function["start"])
+        extra = {"link": link} if link else {}
         if not function["documented"]:
             if function["required"]:
-                findings.append({**function, "issue": "missing"})
+                findings.append({**function, **extra, "issue": "missing"})
+        elif link and function["required"] and link not in _links_in(function["docstring"]):
+            found = _links_in(function["docstring"])
+            findings.append({**function, **extra, "issue": "unlinked", "found": found[0] if found else None})
         elif previous and _SPACE.sub("", previous["signature"]) != _SPACE.sub("", function["signature"]):
-            findings.append({**function, "issue": "signature_changed"})
+            findings.append({**function, **extra, "issue": "signature_changed"})
     return findings
 
 

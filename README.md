@@ -4,12 +4,12 @@ A local MCP server that gives coding agents (Claude Code, Codex) cheaper, sharpe
 
 | Tool | What it does |
 |---|---|
-| `smart_search` / `smart_search_result` | Semantic + lexical search over an indexed project, results split into code, tests and docs, with the likeliest functions per chunk; `queries` (up to 5 objects with their own `query_identifiers`, `query_comments`, `doc_query` and `folder`, the other arguments shared) runs several searches in one call, one after the other, one section per query, an `ERROR` line for one that fails; without `queries` the answer is unchanged |
+| `smart_search` / `smart_search_result` | Semantic + lexical search over an indexed project, results split into code, tests and docs, with the likeliest functions per chunk; `queries` (up to 5 objects with their own `query_identifiers`, `query_comments`, `doc_query` and `folder`, the other arguments shared) runs several searches in one call, one after the other, one section per query, an `ERROR` line for one that fails; `projects` (`"all"` for every registered project, or a list of project roots) searches several projects in one call, one section per project labelled with its project, ranked inside that project's own index and never merged across indexes (a project with no index, or an index built with another embedding model than the current one, is not searched and its section says why); without `queries` and `projects` the answer is unchanged |
 | `smart_scout` | Answers a question about the code with the lines that answer it: reads the candidate files inside Smart Tool and returns `path:lines` with the literal text, so the files never enter the agent's context; with a `scout_model`, a small model also writes a short answer and keeps only the lines that support it; a question about why something is as it is (why, reason, decided) also lists up to three decision notes from the notes the project keeps about its intent, as ids with one excerpt each |
-| `web_search` / `web_search_result` | Web search across several sources in parallel, in the query language and in English, with a cache shared across sessions; `depth="research"` runs a multi-round research loop; with `fetch_top` (1 to 8) and `fetch_prompt`, `depth="quick"` also reads the first results the way `web_fetch_many` does and appends the pages after the unchanged results (a page that fails shows its `ERROR` line; off by default) |
-| `web_fetch` | Reads a known URL and returns only the answer to your prompt, written by a small model; pages are cached for 24 h. Pages over 60,000 characters are not cut: the model reads the parts closest to the prompt (needs an `embedding_model`) |
+| `web_search` / `web_search_result` | Web search across several sources in parallel, in the query language and in English, with a cache shared across sessions; `depth="research"` runs a multi-round research loop; with `fetch_top` (1 to 8) and `fetch_prompt`, `depth="quick"` also reads the first results the way `web_fetch_many` does and appends the pages after the unchanged results (a page that fails shows its `ERROR` line; off by default). In a `depth="quick"` answer every result `url:` line ends with a YAML comment `# (accessed YYYY-MM-DD)`, the day the result was retrieved, for citations |
+| `web_fetch` | Reads a known URL and returns only the answer to your prompt, written by a small model; pages are cached for 24 h. Pages over 60,000 characters are not cut: the model reads the parts closest to the prompt (needs an `embedding_model`). When an older copy of the URL is still in the cache, the `Source:` line says whether the page changed since that read (with its date) and a short diff (changed line counts, at most 20 diff lines) follows it. A page or document whose text holds a prompt-injection candidate ("ignore previous instructions", "you are now", a request to read `~/.ssh`, in English or Portuguese) gets one warning line saying the content is data, not instructions; the text is never stripped or blocked |
 | `web_fetch_many` | Reads up to 8 known URLs in one call with the same prompt, 4 at a time, each exactly as `web_fetch` reads it (24 h cache, browser for JavaScript pages, public addresses only). One block per URL in the order given: the answer, or an `ERROR` line with the reason, so a URL that fails never hides the others; a repeated URL is read once |
-| `read_document` | Reads a PDF, Word, PowerPoint, Excel, HTML, CSV or EPUB file as compact text, a range at a time: type, size, page/slide/sheet/part/chapter count and estimated tokens first, then only the units asked for (`range="3-5"`), so the file never enters the agent's context whole. The path can also be an `http(s)` URL of a PDF, Word, PowerPoint, Excel, CSV or EPUB file: it is downloaded the way `web_fetch` downloads (public addresses only, 5 MB cap), kept for 24 hours and read with the same ranges and token estimate; a URL of a web page fails and points to `web_fetch`. Opt-in: the native Read is not redirected. Scanned PDFs fail with that reason (no OCR) |
+| `read_document` | Reads a PDF, Word, PowerPoint, Excel, HTML, CSV or EPUB file as compact text, a range at a time: type, size, page/slide/sheet/part/chapter count and estimated tokens first, then only the units asked for (`range="3-5"`), so the file never enters the agent's context whole. The path can also be an `http(s)` URL of a PDF, Word, PowerPoint, Excel, CSV or EPUB file: it is downloaded the way `web_fetch` downloads (public addresses only, 5 MB cap), kept for 24 hours and read with the same ranges and token estimate; a URL of a web page fails and points to `web_fetch`. With `query` instead of guessing ranges, only the 3 units most similar to it come back (inside `range` when given), labelled with their numbers and in document order; it uses the embedder like a long `web_fetch` page and fails loudly without one. Opt-in: the native Read is not redirected. Scanned PDFs fail with that reason (no OCR) |
 | `read_document_many` | Reads up to 8 documents (local paths or URLs, mixed) in one call, 4 at a time, each exactly as `read_document` reads it. One block per entry in the order given: the `read_document` answer, or an `ERROR` line with the reason. `range`, `max_chars` and `info_only` apply to every document (`range="1-3"` reads those units of each one and fails alone for a document it does not fit; `max_chars` is the cap per document); an entry repeated is read once; the call fails only when every document failed. Opt-in, like `read_document` |
 | `project_manage` | Registers and indexes projects, shows coverage, code maps, duplicated functions and index storage; `graph` with `symbol` tells what changing a function touches: callers, calls, the tests that reach it and the files that import it; with `brief=true` it also gives the files that usually change with it and the decision notes that name it; with `format=mermaid` it draws the callers and the calls as a Mermaid flowchart |
 
@@ -19,7 +19,7 @@ registered as the `playwright` server where this machine lets a browser be drive
 An optional hook routes the agent's native Grep/Glob/Read/Bash/WebSearch/WebFetch calls to these tools when they
 are cheaper, or just tells the agent what Smart Tool would do.
 
-**Status:** 0.9.88 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+**Status:** 0.9.90 beta. Windows only. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -60,7 +60,11 @@ fails, saying why, outside a git repository, with a `base` that is not a commit,
 
 **Searching the web.** `web_search` asks several free search sources in parallel (DuckDuckGo, Wikipedia, Yahoo,
 Exa, Google and others), in the language of the question and in English, and merges what comes back. Search APIs with a
-free quota (Tavily, Firecrawl) and a real browser are tried only when those results are not enough. Answers are cached and shared by every agent
+free quota (Tavily, Firecrawl, Marginalia, Yandex) and a real browser are tried only when those results are not enough; Brave, Mojeek or your own
+SearXNG join them when you give a key or an address in the setup screen. Free quotas are counted and remembered, and the answer
+names any source that dropped and how many answered. The Web search page of the setup screen has a Test all sources
+button that runs one real search per source and shows which answer, are rate limited, reject your key or fail (Exa and Parallel
+without your key are skipped, so the test never spends their free quota). Answers are cached and shared by every agent
 session on the machine, so the same question asked twice costs nothing the second time.
 
 **Reading a page.** `web_fetch` takes a URL and a question. It downloads the page over plain HTTP; when the page only
@@ -91,7 +95,7 @@ gateway such as Ollama, nothing about your code leaves the machine.
 ## Install
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.88 install
+npx @allansantos-dev/smart-tool@0.9.90 install
 ```
 
 Updates install themselves, on by default: the tray checks npm when it starts (at logon) and every 24 h, and when there
@@ -236,11 +240,23 @@ Redirects) and Maintenance (Setup audit, Startup).
    Codex patches. Private (`_name`, `#name`, `private`), nested and override (`@Override`,
    `@override`) functions are exempt, as in pydocstyle, eslint-plugin-jsdoc and Checkstyle, and a JSDoc above a set of
    TypeScript overloads documents the implementation:
-   - **Require** (default): an edit that leaves a touched function without a docstring is blocked until it adds one.
-   - **Remind**: the edit runs and the agent is told which touched functions have no docstring, and which
+   - **Require** (default): an edit that leaves a touched function without a docstring, or with a docstring that lacks
+     the link line to its technical entry, is blocked until it adds it; the message gives the exact line.
+   - **Remind**: the edit runs and the agent is told which touched functions have no docstring or no link line, and which
      documented ones changed their signature, with their callers, the tests calling them and the command that runs those tests
   (from the code graph, only when it is already cached: the hook never waits for an analysis).
-   - **Off**: no checks.
+   - **Off**: no checks. The environment variable `SMART_TOOL_DOCS=off` forces this mode over `config.json`, so
+     nothing is checked, injected or written by the documentation hooks; any other value of the variable is an error. The
+     hooks run inside the Smart Tool daemon, so the variable counts in the environment the daemon was started in;
+     a setting saved on the setup screen applies at once.
+
+   Every public function's docstring ends with one line that links it to its entry in the technical documentation:
+   `Technical doc: docs/scope/technical/<page>.md#<anchor>` (a `//` or ` *` line in the doc comment of Go, JavaScript,
+   TypeScript and Java). The path is relative to the project root and follows the page and anchor naming of
+   `docs/scope`, so the line is known before the documents are generated; a folder with more than 150 public
+   functions has a page per module, which the line names once that folder has been generated. A function whose
+   docstring has the line right passes, and a line that points to an old anchor (the function was renamed or moved) is
+   reported with the right one.
 
    **Comments in the wrong place** keeps the documentation in the docstring, where `action=docs` reads it. Of the
    comments an edit adds or changes in a code file (not tests), it blocks four kinds: commented-out code (the ruff
@@ -250,7 +266,8 @@ Redirects) and Maintenance (Setup audit, Startup).
    (`# noqa`, `//go:build`, `// eslint-disable`), dividers and comments the edit did not touch. `comment_mode` in
    `config.json`: `require` (default, the edit is blocked until the comment is fixed), `remind` (the edit runs and the
    agent is told) or `off`. To turn the whole rule off set `"doc_mode": "off"` and `"comment_mode": "off"` in
-   `~/.smart-tool/config.json`, or pick Off on both cards of the setup screen. A setting you already saved stays as
+   `~/.smart-tool/config.json`, or pick Off on both cards of the setup screen (`SMART_TOOL_DOCS=off` in the daemon's environment
+   also turns the documentation checks off, whatever the file says). A setting you already saved stays as
    saved; only a config without the key follows the new default.
 
    A documented function edited only in its body is not mentioned. `project_manage` with `action=docs` lists the
@@ -281,7 +298,9 @@ Redirects) and Maintenance (Setup audit, Startup).
    point reaches gets up to two "possible" features from the embeddings home (never confirmed by it), and the agent is
    asked once to check a docstring whose function body changed; a per-function registry
    (`~/.smart-tool/data/doc_registry.db`) keeps that work across crashes. `action=docs validate=true` checks every claim of `docs/scope` against the code and writes `docs/scope/validation.md`, `action=docs symbol=NAME` tells where a function is documented, and the documentation hook warns
-   when an edit makes a documented entry out of date. The link lives in the documents, never inside docstrings.
+   when an edit makes a documented entry out of date. The link runs both ways: the documents link to the entries, and
+   each docstring ends with the `Technical doc:` line to its entry (the docstring stamp of an entry leaves that line
+   out, so adding or fixing it never makes an entry out of date).
    The same run writes fifteen optional documents under `docs/scope/extras`, all from the graph and the git log: folder
    structure, docstring coverage per folder, module Mermaid, tests README, configuration read by the code, dependencies
    with the licenses of installed packages, decision index with an ADR template and the decision candidates found in the
@@ -446,6 +465,18 @@ Redirects) and Maintenance (Setup audit, Startup).
    line that names a config file that `config.py` reads, or `DEFAULT_CONFIG`, and the keys of a json block that follows
    such a line) that `DEFAULT_CONFIG` does not have, each with file and line; it fails when no `config.py` holds a
    `DEFAULT_CONFIG` dict. It reads only and writes nothing.
+   `action=web_sources` (`limit`) needs no project and reports the web search sources of the whole machine from the
+   recent health log: per source the calls `ok`, `failed`, `rate_limited`, `captcha` and `paused` and the success rate
+   (paused calls, which the quota held out, are not counted as misses), the keyless quota of Exa and Parallel (`used`,
+   `cap`, `window`, `held_until`; `null` with your own key) and the busiest requesters (client and project folder, up to
+   `limit` rows, 10 by default, with the total in `rows_total`). It reads only and writes nothing.
+   `action=diagnostics` needs no project and writes one redacted JSON file for a bug report, `diagnostics-<time>.json` in
+   the `diagnostics` folder of the Smart Tool data folder (`~/.smart-tool/data`), and returns its path. It holds the
+   versions, the setup audit counts, the model failures and use, the web source health and quota and the last 200 lines
+   of `daemon.log` and `browser-fetch.log`. API keys and tokens (the shapes of the credential check, bearer tokens,
+   `key=value` secrets), the home path (shown as `~`), e-mail addresses and URLs are scrubbed, and search queries,
+   project folders and requesters are never collected. Nothing is sent anywhere: read the file and attach it yourself.
+   A part that cannot be read is named in the file and in the answer.
    `graph` with `symbol` and `format=mermaid` returns the callers and the calls of that function, the data `impact`
    answers with, as Mermaid flowchart text in `mermaid` (at most `limit` functions around the definition, the call line on
    each edge, the count left out in `counts.omitted`); `format` is `json` by default and the answer is then unchanged.
@@ -529,6 +560,16 @@ Redirects) and Maintenance (Setup audit, Startup).
    non-literal) is flagged to the agent with the file, the line and the kind, never the code of the line. Lines that were
    already in the file are left alone, and a call that only moved is not new. It never blocks. `risky_mode` in
    `config.json`: `warn` (default) or `off`, also on the setup screen.
+
+   **Leftovers on edit**: an edit that adds a line holding a git conflict marker (`<<<<<<<` and `>>>>>>>` at the start of
+   a line, and `=======` only inside a block still open, since it is also the underline of a Markdown heading), a focused
+   test (`it.only`, `describe.only`, `fdescribe`, `fit`), a skipped or disabled test (`xit`, `xdescribe`,
+   `@pytest.mark.skip`, `@pytest.mark.xfail`, `@Disabled`, `t.Skip(`) or a debugger line (`debugger;`, `breakpoint()`,
+   `import pdb`, `pdb.set_trace()`) is flagged to the agent with the file, the line and the kind, never the code of the
+   line. The test and debugger shapes count only in the files of their language, comment lines are skipped, and lines that
+   were already in the file are left alone. The same note comes with the review of a commit or a pull request
+   (`pr_impact`, the commit review). It never blocks. `leftover_mode` in `config.json`: `warn` (default) or `off`, also
+   on the setup screen.
 
    **Recorded decisions on edit**: for the first three functions an edit touches in a code file, the hook names up to two
    notes of the project (`docs/research`, the backlog, `CLAUDE.md`, `AGENTS.md`) that name the function, as `path:line` and
@@ -719,7 +760,7 @@ fails to load is listed in the setup screen with its error and does not affect t
 ## Uninstall
 
 ```powershell
-npx @allansantos-dev/smart-tool@0.9.88 uninstall [--target DIR] [--keep-data]
+npx @allansantos-dev/smart-tool@0.9.90 uninstall [--target DIR] [--keep-data]
 ```
 
 It asks nothing and opens no window. It stops the tray and the daemon, removes the logon task, the hook entries of Smart

@@ -41,7 +41,6 @@ BALLOON_TEXT_MAX = 255
 BALLOON_TITLE_MAX = 63
 LOG_PATH = os.path.join(paths.DATA_DIR, "tray.log")
 LOG_MAX_BYTES = 256 * 1024
-SETUP_URL = "http://127.0.0.1:8765/setup"
 
 _STATE_LOCK = threading.Lock()
 _state = {"health": "starting", "update": None}
@@ -397,19 +396,23 @@ def _open_log(icon, item):
         _notify(icon, "Could not open the log: {error}", error=exc)
 
 
+def _open_daemon_page(page, on_failure):
+    """Opens `page` of the daemon in the browser, starting the daemon first when it is down; `on_failure(error_text)`
+    reports a failure."""
+    def run():
+        try:
+            webbrowser.open(daemon_launcher.ensure_daemon_running().rstrip("/") + page)
+        except Exception as exc:
+            on_failure(i18n.t(str(exc)))
+    threading.Thread(target=run, daemon=True).start()
+
+
 def _open_setup(icon, item):
-    registry = daemon_launcher.read_registry()
-    webbrowser.open((registry["url"].rstrip("/") + "/setup") if registry else SETUP_URL)
+    _open_daemon_page("/setup", lambda error: _notify(icon, "Could not open the settings: {error}", error=error))
 
 
 def _open_projects(icon, item):
-    def run():
-        try:
-            url = daemon_launcher.ensure_daemon_running()
-            webbrowser.open(url.rstrip("/") + "/projects")
-        except Exception as exc:
-            _notify(icon, "Could not open the projects: {error}", error=i18n.t(str(exc)))
-    threading.Thread(target=run, daemon=True).start()
+    _open_daemon_page("/projects", lambda error: _notify(icon, "Could not open the projects: {error}", error=error))
 
 
 def _add_project(icon, item):

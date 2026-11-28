@@ -13,8 +13,10 @@ simple README) is written between prose markers by the Docs model (doc_prose) or
 regenerations, as terraform-docs keeps the text around its generated block. Each anchor records the signature it was generated from; `check` and the edit
 hook flag a document that no longer matches the code, like Swimm's smart tokens. The prose block of an entry point
 records the code of the function it was written for (`code="..."`), so `check` and `validate` flag a paragraph left
-behind by a body change that kept the signature. The link lives in the documents and in the `anchors` query, never
-inside docstrings."""
+behind by a body change that kept the signature. Each public function's docstring ends with a link line to its
+technical entry (`Technical doc: docs/scope/technical/<page>.md#<anchor>`, see `docstring_links`), which the edit hook
+asks for; the docstring stamp leaves that line out. The documents also link to the entries and the `anchors` query finds
+where a function is documented."""
 import hashlib
 import html
 import json
@@ -87,7 +89,12 @@ def function_stamps(source, function):
     body = [line for number, line in enumerate(source.split("\n")[function["start"] - 1:function["end"]], function["start"])
             if not first <= number <= last]
     return {"signature": signature_hash(function["signature"]), "body": signature_hash("\n".join(body)),
-            "docstring": signature_hash(function.get("docstring") or "")}
+            "docstring": signature_hash(without_link(function.get("docstring") or ""))}
+
+
+def without_link(docstring):
+    """The docstring without its technical-doc link line, so adding or fixing the link is not a docstring change."""
+    return doc_check.DOC_LINK.sub("", docstring).rstrip()
 
 
 def symbol_marker(anchor, stamps):
@@ -166,6 +173,30 @@ def _slug(folder):
     return folder.replace("/", "--") if folder else "_root"
 
 
+def _page_name(path, split):
+    """Technical page of the functions of one file: the folder's page, or the file's own page in a subfolder named after
+    the folder's page when the folder is split."""
+    folder = posixpath.dirname(path)
+    return f"technical/{_slug(folder)}/{posixpath.basename(path)}.md" if split else f"technical/{_slug(folder)}.md"
+
+
+def docstring_links(root, path, functions):
+    """The link line each public-shaped function of one file carries in its docstring, from the page and anchor naming
+    of the generated documents, so it is known before docs/scope exists. A folder counts as split into module pages when
+    its split subfolder is already generated; before the first generation the folder's own page is assumed.
+
+    Parameters: root (str) project folder; path (str) project-relative path of the file; functions (list) doc_check
+    functions of the whole file (repeated names get their @n anchor from the full list).
+    Returns: dict function start line -> `Technical doc: docs/scope/technical/<page>.md#<anchor>`, for functions and
+    methods only.
+    """
+    found = [f for f in functions if f.get("kind", "function") in ("function", "method")]
+    ids = anchor_ids(found, path)
+    split = os.path.isdir(os.path.join(root, DOCS_DIR, "technical", _slug(posixpath.dirname(path))))
+    page = f"{DOCS_DIR}/{_page_name(path, split)}"
+    return {f["start"]: f"{doc_check.LINK_LABEL}{page}#{ids[f['start']]}" for f in found}
+
+
 def _pages(model, public):
     """Technical page of each public function: one page per folder, split into one page per module (in a subfolder
     named after the folder's page) when the folder has more than MAX_PAGE_ENTRIES entries."""
@@ -177,7 +208,7 @@ def _pages(model, public):
         split = len(anchors) > MAX_PAGE_ENTRIES
         for anchor in anchors:
             path = model.function_of[anchor]["path"]
-            page = f"technical/{_slug(folder)}/{posixpath.basename(path)}.md" if split else f"technical/{_slug(folder)}.md"
+            page = _page_name(path, split)
             page_of[anchor] = page
             title = path if split else folder or "(project root)"
             if titles.setdefault(page, title) != title:

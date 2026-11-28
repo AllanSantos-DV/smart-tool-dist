@@ -14,6 +14,7 @@ import unicodedata
 
 import document_converter
 import document_text
+import web_fetch
 
 KINDS = {'.pdf': 'pdf', '.docx': 'docx', '.pptx': 'pptx', '.xlsx': 'xlsx', '.xlsm': 'xlsx', '.html': 'html', '.htm': 'html',
          '.csv': 'csv', '.epub': 'epub'}
@@ -26,6 +27,7 @@ DOCX_PART_CHARS = 6_000
 CHARS_PER_TOKEN = 4
 CACHE_DOCUMENTS = 4
 LONG_LINE = 60
+QUERY_TOP_UNITS = 3
 
 _cache = collections.OrderedDict()
 _cache_lock = threading.Lock()
@@ -306,26 +308,91 @@ def check_max_chars(max_chars):
         raise ValueError(f'max_chars must be an integer from 1000 to {MAX_CHARS_LIMIT}')
 
 
-def read(path, range_spec=None, max_chars=DEFAULT_MAX_CHARS, info_only=False, shown_as=None):
+def check_query(query):
+    """The query of read_document in the form read uses.
+
+    Parameters: query (None or an empty string for no query, otherwise the text). Returns: the stripped text, or None
+    for no query. Raises: ValueError for a query that is not text or is blank.
+
+    Technical doc: docs/scope/technical/_root.md#document_read.py::check_query"""
+    if query is None or query == '':
+        return None
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError('query must be non-blank text')
+    return query.strip()
+
+
+def _piece(document, number):
+    """The text of one unit as read shows it: under a `[page N]`-style label for the kinds whose text carries none."""
+    label = f'[{UNIT_NAMES[document.kind]} {number}]\n' if document.kind in LABELLED_KINDS else ''
+    return label + document.units[number - 1].text
+
+
+def rank_units(document, numbers, query, embed):
+    """Unit numbers ordered from the most to the least similar to the query. A unit is cut in the pieces of
+    web_fetch.chunks and scores as its best piece (cosine of web_fetch), so a match late in a long unit counts; equal
+    scores keep the unit order.
+
+    Parameters: document; numbers (the unit numbers that compete); query (text); embed (texts to one vector each, as the
+    `embed` of web_fetch.select: it raises when no embedding model works). Returns: the numbers, best first. Raises: as
+    embed, RuntimeError when it answers a different number of vectors than texts.
+
+    Technical doc: docs/scope/technical/_root.md#document_read.py::rank_units"""
+    pieces = [(number, part) for number in numbers for part in web_fetch.chunks(document.units[number - 1].text)]
+    vectors = embed([part for _, part in pieces] + [query])
+    if len(vectors) != len(pieces) + 1:
+        raise RuntimeError('The embedding model returned a different number of vectors than document pieces.')
+    best = {}
+    for (number, _), vector in zip(pieces, vectors):
+        best[number] = max(best.get(number, -1.0), web_fetch._cosine(vector, vectors[-1]))
+    return sorted(numbers, key=lambda number: (-best.get(number, -1.0), number))
+
+
+def _most_relevant(document, numbers, query, embed, max_chars):
+    """The QUERY_TOP_UNITS units most similar to the query that fit max_chars together (the best one always).
+
+    Parameters: as rank_units, plus max_chars. Returns: (chosen unit numbers in unit order, the top units left out for
+    size in unit order)."""
+    chosen, left_out, size = [], [], 0
+    for number in rank_units(document, numbers, query, embed)[:QUERY_TOP_UNITS]:
+        length = len(_piece(document, number))
+        if chosen and size + length > max_chars:
+            left_out.append(number)
+            continue
+        chosen.append(number)
+        size += length + 1
+    return sorted(chosen), sorted(left_out)
+
+
+def read(path, range_spec=None, max_chars=DEFAULT_MAX_CHARS, info_only=False, shown_as=None, query=None, embed=None):
     """The answer of read_document: the metadata block, then the chosen units as markdown, a note naming the next range
     when the text was cut.
 
     Parameters: path (see load), range_spec (see parse_range; None reads from the first unit up to max_chars),
     max_chars (cap of the text returned, 1000-MAX_CHARS_LIMIT; a single unit over the cap is cut at a line with a
-    notice), info_only (only the metadata block), shown_as (see header). Returns: the text. Raises: as load and
-    parse_range, ValueError for a max_chars out of bounds."""
+    notice), info_only (only the metadata block), shown_as (see header), query (see check_query: instead of reading from
+    the start, only the QUERY_TOP_UNITS units, inside range_spec when given, most similar to it, in unit order and
+    labelled with their numbers) and embed (see rank_units; required with a query). Returns: the text. Raises: as load
+    and parse_range, ValueError for a max_chars out of bounds, a bad query or a query without embed, and whatever embed
+    raises.
+
+    Technical doc: docs/scope/technical/_root.md#document_read.py::read"""
     check_max_chars(max_chars)
+    query = check_query(query)
     document = load(path)
     head = header(document, shown_as)
     if info_only:
         return head
+    if query and embed is None:
+        raise ValueError('read_document query needs an embedder, none was given')
     numbers = parse_range(range_spec, document) if range_spec else list(range(1, len(document.units) + 1))
+    pool, left_out = len(numbers), []
+    if query:
+        numbers, left_out = _most_relevant(document, numbers, query, embed, max_chars)
     unit = UNIT_NAMES[document.kind]
     body, shown, size, cut = [], [], 0, None
     for number in numbers:
-        text = document.units[number - 1].text
-        label = f'[{unit} {number}]\n' if document.kind in LABELLED_KINDS else ''
-        piece = label + text
+        piece = _piece(document, number)
         if shown and size + len(piece) > max_chars:
             break
         if len(piece) > max_chars:
@@ -347,6 +414,10 @@ def read(path, range_spec=None, max_chars=DEFAULT_MAX_CHARS, info_only=False, sh
     returned = '\n\n'.join(body)
     notes = [f'returned: {unit}s {_spans(shown)} (est. {estimate_tokens(returned):,} tokens)']
     remaining = [number for number in numbers if number > shown[-1]]
+    if query:
+        notes.append(f'query {query[:80]!r}: the {unit}s most similar to it, of {pool} read, in {unit} order')
+    if left_out:
+        notes.append(f'not returned: {unit}s {_spans(left_out)} (max_chars); ask for them with range')
     if cut:
         notes.append(cut)
     if remaining:

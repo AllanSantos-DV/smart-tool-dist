@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import tomllib
+import urllib.parse
 
 import atomic_io
 import codex_config
@@ -350,6 +351,61 @@ def install(client_info, token, confirm):
             raise RuntimeError(f"Codex does not trust the hook in {path} after recording its approval.")
     return {"client": client, "installed": True, "changed": True, "file": path, "backup": backup,
             "after_install": spec.get("after_install")}
+
+
+def _legacy_route(hook):
+    """The route (`pretool`, `posttool`, `subagent-start`) of one of our old `http` entries, None for any other hook."""
+    if not isinstance(hook, dict) or hook.get("type") != "http":
+        return None
+    try:
+        url = urllib.parse.urlsplit(str(hook.get("url", "")))
+        port = url.port
+    except ValueError:
+        return None
+    if url.hostname != "127.0.0.1" or not port:
+        return None
+    return url.path.removeprefix("/hooks/") if url.path in LEGACY_URL_PATHS else None
+
+
+def migrate_legacy(client="claude"):
+    """Replaces, in place, each old `http` entry of ours (a literal port in its URL) in the client's hooks file with the
+    command entry of the same route, after a backup; matchers, other hooks and entries that are already commands stay
+    as they are. Returns {client, changed, file, backup}; a file that does not exist or holds no old entry changes
+    nothing."""
+    path = os.path.realpath(CLIENTS[client]["files"][0])
+    try:
+        with open(path, encoding="utf-8") as stream:
+            data = json.load(stream)
+    except FileNotFoundError:
+        return {"client": client, "changed": False, "file": path, "backup": None}
+    if isinstance(data, dict) and "hooks" not in data:
+        return {"client": client, "changed": False, "file": path, "backup": None}
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict):
+        raise ValueError(f"{path} does not have the expected format (object with 'hooks'); nothing was changed.")
+    found = list(_legacy_entries(hooks))
+    for group, index, route in found:
+        group["hooks"][index] = _handler(client, route)
+    if not found:
+        return {"client": client, "changed": False, "file": path, "backup": None}
+    backup = _write_checked(path, data, lambda: not list(_legacy_entries(_read_hooks(path))), "The migration")
+    return {"client": client, "changed": True, "file": path, "backup": backup, "migrated": len(found)}
+
+
+def _legacy_entries(hooks):
+    """(group, index, route) of each old `http` entry of ours in a hooks object."""
+    for groups in hooks.values():
+        for group in groups if isinstance(groups, list) else []:
+            for index, hook in enumerate(group.get("hooks") or [] if isinstance(group, dict) else []):
+                route = _legacy_route(hook)
+                if route:
+                    yield group, index, route
+
+
+def _read_hooks(path):
+    """The `hooks` object of the JSON file at `path`."""
+    with open(path, encoding="utf-8") as stream:
+        return json.load(stream)["hooks"]
 
 
 def remove(client):

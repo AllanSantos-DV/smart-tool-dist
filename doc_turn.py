@@ -17,6 +17,7 @@ import os
 import threading
 from collections import defaultdict
 
+import config
 import doc_candidates
 import doc_check
 import doc_prose
@@ -50,6 +51,8 @@ def project_root(path):
 def note_tool(payload):
     """PreToolUse: note the file an Edit, MultiEdit or Write touches for the session's next Stop, and on the session's
     first call resume the documentation work a stopped run left behind (doc_registry.recover)."""
+    if config.doc_mode() == "off":
+        return
     session, cwd = payload.get("session_id") or "", payload.get("cwd") or ""
     tool, given = payload.get("tool_name"), (payload.get("tool_input") or {}).get("file_path")
     with _LOCK:
@@ -77,6 +80,8 @@ def resume(root):
 
 def resume_all():
     """Daemon start: resume every tracked project that still has its generated documents. Returns: int rows recovered."""
+    if config.doc_mode() == "off":
+        return 0
     conn = doc_registry.connect()
     try:
         return sum(doc_registry.recover(conn, root) for root in doc_registry.projects(conn)
@@ -88,7 +93,7 @@ def resume_all():
 def on_stop(payload, view_id=None):
     """Stop hook answer: {} when there is nothing to do; {decision: block, reason} once per turn with the functions whose
     docstring the session agent must check against their new body; a systemMessage with what the step could not do."""
-    if payload.get("stop_hook_active"):
+    if payload.get("stop_hook_active") or config.doc_mode() == "off":
         return {}
     cwd = payload.get("cwd") or ""
     root = project_root(cwd) if cwd else None

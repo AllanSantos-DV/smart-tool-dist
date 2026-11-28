@@ -171,6 +171,58 @@ ADAPTERS = [
                 "rate-limited, so use only when cheaper results remain insufficient",
     },
     {
+        "name": "brave",
+        "executable": sys.executable,
+        "script": EXTERNAL_SEARCH_SCRIPT,
+        "extra_args": ["--provider", "brave"],
+        "timeout_s": EXTERNAL_TIMEOUT_S,
+        "fan_out": False,
+        "fallback_group": "http",
+        "hint": "Brave Search API (the user's own key): Brave's own large independent index, strong general quality; only runs when a key is configured",
+    },
+    {
+        "name": "mojeek",
+        "executable": sys.executable,
+        "script": EXTERNAL_SEARCH_SCRIPT,
+        "extra_args": ["--provider", "mojeek"],
+        "timeout_s": EXTERNAL_TIMEOUT_S,
+        "fan_out": False,
+        "fallback_group": "http",
+        "hint": "Mojeek Search API (the user's own key): independent crawler and index, privacy-oriented; only runs when a key is configured",
+    },
+    {
+        "name": "searxng",
+        "executable": sys.executable,
+        "script": EXTERNAL_SEARCH_SCRIPT,
+        "extra_args": ["--provider", "searxng"],
+        "timeout_s": EXTERNAL_TIMEOUT_S,
+        "fan_out": False,
+        "fallback_group": "http",
+        "hint": "the user's own SearXNG instance: a metasearch of several engines under the user's control; only runs when its address is configured",
+    },
+    {
+        "name": "marginalia",
+        "executable": sys.executable,
+        "script": EXTERNAL_SEARCH_SCRIPT,
+        "extra_args": ["--provider", "marginalia"],
+        "timeout_s": EXTERNAL_TIMEOUT_S,
+        "fan_out": False,
+        "fallback_group": "http",
+        "hint": "Marginalia independent index of small and personal sites (shared public key, often rate "
+                "limited; CC-BY-NC-SA results) — good for non-commercial long-tail pages, weak on news and docs",
+    },
+    {
+        "name": "yandex",
+        "executable": sys.executable,
+        "script": DDGS_SEARCH_SCRIPT,
+        "extra_args": ["--backend", "yandex"],
+        "timeout_s": DDGS_TIMEOUT_S,
+        "fan_out": False,
+        "fallback_group": "http",
+        "hint": "Yandex SERP via the ddgs library — an index independent of the DuckDuckGo and Bing tiers, "
+                "keyless, a few seconds; may answer with a captcha instead of results",
+    },
+    {
         "name": "camoufox",
         "service_engine": "duckduckgo",
         "timeout_s": BROWSER_TIMEOUT_S,
@@ -194,10 +246,36 @@ ADAPTERS = [
 # Merge order of the round-robin. Measured 2026-10-03 (docs/spikes/merge_order_spike.py, 40 real queries, same
 # collected results): this order beat the previous random order 16 x 5 (19 ties), SearXNG consensus scoring 14 x 13.
 MERGE_PRIORITY = ["exa", "parallel", "google", "tavily", "firecrawl", "camoufox", "startpage", "keenable", "yahoo",
-                  "duckduckgo", "open-websearch", "wikipedia", "memoria"]
+                  "brave", "mojeek", "searxng", "yandex", "marginalia", "duckduckgo", "open-websearch", "wikipedia", "memoria"]
 DEFAULT_TIER_ORDER = [a["name"] for a in ADAPTERS]
 SPECS = {a["name"]: a for a in ADAPTERS}
 FAN_OUT_TIERS = [a["name"] for a in ADAPTERS if a["fan_out"]]
 FALLBACK_TIERS = [a["name"] for a in ADAPTERS if not a["fan_out"]]
 HTTP_FALLBACK_TIERS = [a["name"] for a in ADAPTERS if a.get("fallback_group") == "http"]
 BROWSER_FALLBACK_TIERS = [a["name"] for a in ADAPTERS if a.get("fallback_group") == "browser"]
+
+
+_ENCYCLOPEDIC_MAX_WORDS = 6
+_NOT_ENCYCLOPEDIC_CHARS = frozenset("/\\()=:_<>{}[]\"'`.")
+_NOT_ENCYCLOPEDIC_WORDS = frozenset({
+    "hoje", "agora", "today", "now", "latest", "news", "notícias", "noticias", "preço", "preco", "price",
+    "cotação", "cotacao", "weather", "clima", "versão", "versao", "version", "release", "changelog",
+    "erro", "error", "bug", "how", "como", "why", "tutorial", "example", "exemplo"})
+
+
+def wikipedia_fits(query):
+    """Whether `query` reads as a topic name Wikipedia can answer: short, no digits, no code or operator
+    characters, no time-bound or how-to wording. Measured 2026-11-26: the tier failed 238 of 240 calls on
+    queries that are none of that."""
+    words = str(query or "").split()
+    if not words or len(words) > _ENCYCLOPEDIC_MAX_WORDS:
+        return False
+    text = " ".join(words)
+    if any(char.isdigit() or char in _NOT_ENCYCLOPEDIC_CHARS for char in text):
+        return False
+    return not any(word.casefold() in _NOT_ENCYCLOPEDIC_WORDS for word in words)
+
+
+def tiers_for_query(query):
+    """The fan-out tiers worth launching for `query`: all of them, minus Wikipedia when it does not fit."""
+    return [name for name in FAN_OUT_TIERS if name != "wikipedia" or wikipedia_fits(query)]

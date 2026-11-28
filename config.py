@@ -52,6 +52,7 @@ DEFAULT_CONFIG = {
     "pr_comment": "off",
     "decision_mode": "warn",
     "risky_mode": "warn",
+    "leftover_mode": "warn",
     "document_converter": "off",
     "document_converter_python": "",
     "docs_extras": {key: True for key in DOCS_EXTRAS},
@@ -75,9 +76,11 @@ EMBEDDERS = ("home", "gateway")
 # PreToolUse hook: redirect = deny the native tool and point to Smart Tool; advise = let it run and add the tip to the
 # agent's context; off = no routing at all.
 HOOK_MODES = ("redirect", "advise", "off")
-# Edit hook on functions without a docstring: require = deny the edit until it adds one; remind = let it run and tell
-# the agent; off = say nothing. Independent of hook_mode, which only routes searches and reads.
+# Edit hook on functions without a docstring or without the technical-doc link line it ends with: require = deny the edit
+# until it adds it; remind = let it run and tell the agent; off = say nothing. Independent of hook_mode, which only routes
+# searches and reads. The environment variable SMART_TOOL_DOCS=off forces off over this setting.
 DOC_MODES = ("require", "remind", "off")
+DOCS_ENV = "SMART_TOOL_DOCS"
 # Edit hook on comments an edit adds in the wrong place (commented-out code, ticket or history tags, a loose block above
 # a function instead of its docstring, a long block inside a body): require = deny the edit until they are gone;
 # remind = let it run and tell the agent; off = say nothing. A short comment explaining a non-obvious reason is allowed.
@@ -101,6 +104,9 @@ DECISION_MODES = ("warn", "off")
 # Edit hook on the unsafe calls an edit adds (shell=True, os.system, pickle.load, yaml.load, verify=False, eval, exec, innerHTML on
 # a non-literal): warn = let the edit run and name file, line and kind of each added call; off = say nothing. Never blocks.
 RISKY_MODES = ("warn", "off")
+# Edit hook on the leftovers an edit adds (git conflict markers, focused tests, skipped or disabled tests, debugger lines): warn =
+# let the edit run and name file, line and kind of each one; off = say nothing. Never blocks.
+LEFTOVER_MODES = ("warn", "off")
 # External converter read_document falls back to for a file type or a scanned PDF its native reader refuses: off = never;
 # auto = the first of kreuzberg and docling found installed; or one of them by name. The engine is looked for in the
 # interpreter named by `document_converter_python` (empty = the one Smart Tool runs on).
@@ -117,6 +123,13 @@ STRUCTURED_OUTPUT_MODES = ("auto", "response_format", "output_config")
 
 
 def doc_mode(cfg=None):
+    """The edit hook's documentation mode: `off` when the environment variable SMART_TOOL_DOCS says so, whatever the
+    config file holds; otherwise `require`, `remind` or `off` from `doc_mode`. Any other value of either fails loudly."""
+    forced = os.environ.get(DOCS_ENV)
+    if forced:
+        if forced != "off":
+            raise ValueError(f"Invalid {DOCS_ENV} ({forced!r}): set it to off or unset it.")
+        return "off"
     value = (cfg if cfg is not None else load_config()).get("doc_mode") or DEFAULT_CONFIG["doc_mode"]
     if value not in DOC_MODES:
         raise ValueError(f"Invalid doc_mode ({value!r}) in {CONFIG_PATH}: use require, remind or off.")
@@ -179,6 +192,17 @@ def risky_mode(cfg=None):
     value = (cfg if cfg is not None else load_config()).get("risky_mode") or DEFAULT_CONFIG["risky_mode"]
     if value not in RISKY_MODES:
         raise ValueError(f"Invalid risky_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
+    return value
+
+
+def leftover_mode(cfg=None):
+    """The edit hook's leftovers mode, `warn` or `off`; raises ValueError for any other value in the config file.
+
+    Technical doc: docs/scope/technical/_root.md#config.py::leftover_mode
+    """
+    value = (cfg if cfg is not None else load_config()).get("leftover_mode") or DEFAULT_CONFIG["leftover_mode"]
+    if value not in LEFTOVER_MODES:
+        raise ValueError(f"Invalid leftover_mode ({value!r}) in {CONFIG_PATH}: use warn or off.")
     return value
 
 
@@ -278,7 +302,8 @@ def embedder(cfg=None):
 RESEARCH_MAX_ITERATIONS_RANGE = (1, 10)
 QUICK_SEARCH_TIMEOUT_RANGE = (30, 360)
 SITE_MEMORY_SIMILARITY_THRESHOLD_RANGE = (0.0, 1.0)
-WEB_PROVIDER_NAMES = ("exa", "parallel", "keenable", "tavily", "firecrawl")
+WEB_PROVIDER_NAMES = ("exa", "parallel", "keenable", "tavily", "firecrawl", "marginalia", "brave", "mojeek", "searxng")
+WEB_PROVIDER_KEY_REQUIRED = ("brave", "mojeek", "searxng")
 
 
 def _within(value, cast, bounds, key):

@@ -2,6 +2,15 @@
 // Uso: node ddg-search.mjs "consulta" [--num 8] [--region br-pt]
 // Saída: JSON no stdout — [{ title, url, snippet }, ...]
 import { parseArgs, stripTags } from './adapter-common.mjs';
+import { BLOCK_STATUSES, requestHeaders, withIdentities } from './identity.mjs';
+
+/**
+ * Whether the page is DuckDuckGo's anomaly challenge: it carries the anomaly modal and no result block (a
+ * legitimate search without results has no modal).
+ */
+function isChallengePage(html) {
+  return !html.includes('class="result__a"') && /anomaly-modal|anomaly\.js|bots use DuckDuckGo too/i.test(html);
+}
 
 function realUrlFromDdgHref(href) {
   const match = /uddg=([^&]+)/.exec(href);
@@ -19,21 +28,34 @@ async function main() {
 
   const params = new URLSearchParams({ q: query });
   if (region) params.set('kl', region);
-  const url = `https://html.duckduckgo.com/html/?${params.toString()}`;
+  const url = process.env.SMART_TOOL_DDG_HTML_URL || 'https://html.duckduckgo.com/html/';
+  const origin = new URL(url).origin;
 
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36',
-      'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
-    },
-    signal: AbortSignal.timeout(15000),
+  // O formulário da própria página é um POST; o GET com parâmetros é o que o desafio de anomalia (HTTP 202) pega.
+  const { html } = await withIdentities('duckduckgo', async (identity, remainingMs) => {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: requestHeaders(identity, {
+        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Origin: origin,
+        Referer: `${origin}/`,
+        'Sec-Fetch-Site': 'same-origin',
+      }),
+      body: params.toString(),
+      signal: AbortSignal.timeout(Math.max(1000, Math.min(10000, remainingMs))),
+    });
+    if (BLOCK_STATUSES.has(res.status)) {
+      await res.arrayBuffer();
+      return { blocked: `HTTP ${res.status}` };
+    }
+    if (!res.ok) {
+      throw new Error(`DuckDuckGo answered HTTP ${res.status}`);
+    }
+    const body = await res.text();
+    if (isChallengePage(body)) return { blocked: 'anomaly challenge page' };
+    return { html: body };
   });
-
-  if (!res.ok) {
-    throw new Error(`DuckDuckGo answered HTTP ${res.status}`);
-  }
-
-  const html = await res.text();
 
   // Um resultado patrocinado usa a mesma classe `result__a` no link de título que um
   // resultado orgânico — só o container (`<div class="result ... result--ad ...">`)

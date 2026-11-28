@@ -43,6 +43,7 @@ import integration_metrics
 import version
 import web_search_external
 import web_search_health
+import web_search_quota
 
 SETUP_TOKEN = secrets.token_urlsafe(24)
 
@@ -50,9 +51,16 @@ AGENT_CLIENTS = {"claude": {"name": "claude-code"}, "codex": {"name": "codex"}}
 
 
 def setup_origin():
-    """The port the daemon announced in daemon.json (it may fall back from 8765 when another program holds it)."""
+    """The address the daemon announced in its run file, else the one SMART_TOOL_PORT names; raises when neither exists,
+    since no port is assumed."""
     registry = daemon_launcher.read_registry()
-    return registry["url"] if registry else f"http://127.0.0.1:{os.environ.get('SMART_TOOL_PORT', '8765')}"
+    if registry:
+        return registry["url"]
+    port = os.environ.get("SMART_TOOL_PORT")
+    if not port:
+        raise RuntimeError(f"the daemon run file {daemon_launcher.REGISTRY_PATH} is missing and SMART_TOOL_PORT is not set; "
+                           "the daemon is not running")
+    return f"http://127.0.0.1:{port}"
 
 
 def gateway_state():
@@ -272,6 +280,13 @@ def handle_embedder_save(body):
 
 
 def handle_integration_get():
+    """The state of the integration page: the registered clients, the hook modes with the error of each unreadable one,
+    the block patterns and the redirect metrics.
+
+    Returns: dict the setup screen renders; a mode whose stored value is invalid comes back empty with its `*_error` text.
+
+    Technical doc: docs/scope/technical/_root.md#setup_ui.py::handle_integration_get
+    """
     registered = endpoint_sync.registrations()
     try:
         browser, browser_error = browser_control.status(), ""
@@ -326,6 +341,10 @@ def handle_integration_get():
     except ValueError as exc:
         risky_mode, risky_error = "", str(exc)
     try:
+        leftover_mode, leftover_error = config.leftover_mode(), ""
+    except ValueError as exc:
+        leftover_mode, leftover_error = "", str(exc)
+    try:
         proposals_mode, proposals_error = config.pattern_proposals(), ""
     except ValueError as exc:
         proposals_mode, proposals_error = "", str(exc)
@@ -346,6 +365,7 @@ def handle_integration_get():
             "decision_mode": decision_mode, "decision_mode_error": decision_error,
             "decision_modes": list(config.DECISION_MODES),
             "risky_mode": risky_mode, "risky_mode_error": risky_error, "risky_modes": list(config.RISKY_MODES),
+            "leftover_mode": leftover_mode, "leftover_mode_error": leftover_error, "leftover_modes": list(config.LEFTOVER_MODES),
             "pattern_proposals": proposals_mode, "pattern_proposals_error": proposals_error,
             "block_patterns": {"proposals": stored["proposals"], "accepted": stored["accepted"],
                                "rejected": len(stored["rejected"]), "error": patterns_error},
@@ -354,7 +374,10 @@ def handle_integration_get():
 
 def handle_integration_save(body):
     """`hook_mode` sets redirect/advise/off for every client; `register_mcp` runs the client's CLI; hook in two steps:
-    `preview` shows the exact change, `install` writes it (with backup)."""
+    `preview` shows the exact change, `install` writes it (with backup).
+
+    Technical doc: docs/scope/technical/_root.md#setup_ui.py::handle_integration_save
+    """
     if isinstance(body, dict) and body.get("action") == "block_patterns":
         ids = body.get("ids")
         if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
@@ -364,12 +387,13 @@ def handle_integration_save(body):
         except (OSError, ValueError) as exc:
             raise SetupError(str(exc))
         return handle_integration_get()
-    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "comment_mode", "duplicate_mode", "dependency_mode", "layer_mode", "link_mode", "pr_comment", "decision_mode", "risky_mode", "pattern_proposals"):
+    if isinstance(body, dict) and body.get("action") in ("hook_mode", "doc_mode", "comment_mode", "duplicate_mode", "dependency_mode", "layer_mode", "link_mode", "pr_comment", "decision_mode", "risky_mode", "leftover_mode", "pattern_proposals"):
         action = body["action"]
         allowed = {"hook_mode": config.HOOK_MODES, "doc_mode": config.DOC_MODES, "comment_mode": config.COMMENT_MODES,
                    "duplicate_mode": config.DUPLICATE_MODES, "dependency_mode": config.DEPENDENCY_MODES,
                    "layer_mode": config.LAYER_MODES, "link_mode": config.LINK_MODES, "pr_comment": config.PR_COMMENT_MODES,
                    "decision_mode": config.DECISION_MODES, "risky_mode": config.RISKY_MODES,
+                   "leftover_mode": config.LEFTOVER_MODES,
                    "pattern_proposals": config.PATTERN_PROPOSAL_MODES}[action]
         if body.get("mode") not in allowed:
             raise SetupError(f"Invalid mode: use {', '.join(allowed)}.")
@@ -437,11 +461,82 @@ def handle_audit(body):
 
 
 def handle_providers_get():
+    """Every web search provider with its key status, quota and `needs_key` (true when it cannot run without
+    the user's own key), plus the saved contact and the User-Agent sent."""
     return {"providers": {
-        name: {**web_search_external.PROVIDERS[name], "status": config.provider_key_status(name)}
+        name: {**web_search_external.PROVIDERS[name], "status": config.provider_key_status(name),
+                "quota": web_search_quota.provider_status(name),
+                "needs_key": name in config.WEB_PROVIDER_KEY_REQUIRED}
         for name in config.WEB_PROVIDER_NAMES
     }, "contact": config.load_config().get("contact") or "", "user_agent": version.user_agent(
         config.load_config().get("contact"))}
+
+
+PROBE_MESSAGE_LIMIT = 300
+
+
+def _probe_row(status, results=0, seconds=0.0, detail=""):
+    return {"status": status, "results": results, "seconds": seconds, "detail": detail}
+
+
+def _probe_secret(name):
+    """The key saved for `name`, only to redact it from an error message; empty when none can be read."""
+    try:
+        return config.get_provider_api_key(name)
+    except (secret_store.SecretProtectionError, ValueError, OSError, config.ConfigCorruptedError):
+        return ""
+
+
+def circuit_wait(name):
+    """Seconds left in the rate-limit pause of provider `name`; the daemon replaces this with its own circuit."""
+    return 0
+
+
+def _probe_one(name):
+    """One provider's row for the probe: a real one-result search, except where it would need a missing key or spend
+    the counted free quota."""
+    keyless = config.provider_key_status(name) == "keyless"
+    if keyless and name in config.WEB_PROVIDER_KEY_REQUIRED:
+        return _probe_row("needs_key", detail="Save your own key to test this source")
+    if keyless and name in web_search_quota.WINDOWS:
+        quota = web_search_quota.provider_status(name)
+        if quota["window"] == "day":
+            detail = f"The probe does not spend counted free quota: {quota['used']} of {quota['cap']} calls used today"
+        else:
+            detail = f"The probe does not spend counted free quota: {quota['used']} of {quota['cap']} calls used this hour"
+        return _probe_row("skipped", detail=detail)
+    pause = circuit_wait(name)
+    if pause:
+        return _probe_row("skipped", detail=f"The source is in its rate-limit pause for {int(pause) + 1} s more; "
+                                            "the probe does not call it")
+    started = time.monotonic()
+    try:
+        found = web_search_external.search(name, web_search_external.VALIDATION_QUERY, 1)
+    except web_search_external.ProviderRateLimited:
+        return _probe_row("rate_limited", seconds=round(time.monotonic() - started, 1),
+                          detail="The source asked to slow down; try again later")
+    except web_search_external.ProviderAuthError:
+        elapsed = round(time.monotonic() - started, 1)
+        if keyless:
+            return _probe_row("failed", seconds=elapsed, detail="The source refused the request with HTTP 401 or 403")
+        return _probe_row("key_rejected", seconds=elapsed, detail="The source rejected the saved key")
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        secret = _probe_secret(name)
+        for text in sorted({secret, secret.rstrip("/")} - {""}, key=len, reverse=True):
+            message = message.replace(text, "***")
+        return _probe_row("failed", seconds=round(time.monotonic() - started, 1),
+                          detail=message[:PROBE_MESSAGE_LIMIT])
+    return _probe_row("ok", results=len(found), seconds=round(time.monotonic() - started, 1))
+
+
+def handle_web_sources_probe(body):
+    """Probes every web search provider one at a time and returns `{"providers": {name: row}}` with row
+    `{label, status, results, seconds, detail}`; status is ok, rate_limited, key_rejected, needs_key, skipped or failed.
+    A provider that needs the user's key and has none is not called; a provider with a counted free quota used without
+    the user's key is not called either, so the probe never spends that quota."""
+    return {"providers": {name: {"label": web_search_external.PROVIDERS[name]["label"], **_probe_one(name)}
+                          for name in config.WEB_PROVIDER_NAMES}}
 
 
 def handle_contact_save(body):
@@ -912,6 +1007,8 @@ __I18N__
         <h3>Providers</h3>
         <p class="lede">A key is tested with a real search before it is saved, and is protected by DPAPI in this Windows profile.</p>
         <div id="provider-list"><p class="lede">Loading…</p></div>
+        <div class="actions"><button type="button" id="btn-probe-sources">Test all sources</button></div>
+        <div id="probe-result" role="status"></div>
       </div>
       <div class="card" id="requesters-card">
         <h3>Who asked the searches</h3>
@@ -1093,9 +1190,10 @@ function overviewItems() {
     const list = Object.values(loaded.providers.providers);
     const unreadable = list.filter((info) => info.status === "unreadable");
     const keyed = list.filter((info) => info.status === "configured").length;
+    const free = list.filter((info) => !info.needs_key);
     items.push(unreadable.length
       ? { tone: "bad", label: "Key unreadable", title: "Web search", page: "web", action: "Fix", text: unreadable.map((info) => info.label).join(", ") + ": the saved key cannot be opened in this Windows profile. Paste it again." }
-      : { tone: "ok", label: "Ready", title: "Web search", page: "web", action: "Open", text: plural(list.length, "provider") + " on their free tier" + (keyed ? ", " + keyed + " with your key." : "; no key needed.") });
+      : { tone: "ok", label: "Ready", title: "Web search", page: "web", action: "Open", text: plural(free.length, "provider") + " on their free tier" + (keyed ? ", " + keyed + " with your key." : "; no key needed.") });
   }
   if (failed.audit) items.push({ tone: "bad", label: "Unavailable", title: "Setup audit", page: "audit", action: "Open", text: failed.audit });
   else if (loaded.audit && loaded.audit.projects.length) {
@@ -1464,9 +1562,9 @@ const RULES = [
               ["advise", "Advise only", "Let the native tool run and tell the agent what Smart Tool would have done."],
               ["off", "Off", "No routing; agents use their native tools as usual."]] },
   { key: "doc_mode", title: "Documentation on edit", applies: "Applies on the next edit.",
-    intro: "Checks the public functions an edit touches. Private, nested and override functions are exempt, as in pydocstyle, eslint-plugin-jsdoc and Checkstyle. A documented function comes up again only when its signature changes.",
-    options: [["require", "Require", "An edit that leaves a touched function without a docstring is blocked until it adds one.", true],
-              ["remind", "Remind", "The edit runs; the agent is told which touched functions lack a docstring."],
+    intro: "Checks the public functions an edit touches. Private, nested and override functions are exempt, as in pydocstyle, eslint-plugin-jsdoc and Checkstyle. A documented function comes up again when its signature changes or when its docstring lacks the last line that links it to its technical entry (Technical doc: docs/scope/technical/...). The environment variable SMART_TOOL_DOCS=off turns these checks off whatever is chosen here.",
+    options: [["require", "Require", "An edit that leaves a touched function without a docstring and its technical-doc link line is blocked until it adds them.", true],
+              ["remind", "Remind", "The edit runs; the agent is told which touched functions lack a docstring or its link line."],
               ["off", "Off", "No documentation checks."]] },
   { key: "comment_mode", title: "Comments in the wrong place", applies: "Applies on the next edit.",
     intro: "Checks the comments an edit adds: commented-out code, ticket or history tags, a loose block above a function instead of its docstring, and a long block inside a function body. A short comment that says why stays allowed.",
@@ -1501,6 +1599,10 @@ const RULES = [
     intro: "Names the file, line and kind of the unsafe calls an edit adds to a Python, JavaScript or TypeScript file: shell=True or os.system on a command that is not a literal, pickle.load, yaml.load without a safe loader, verify=False, eval and exec on a non-literal, innerHTML set to a non-literal. Lines that were already there are left alone and the code of the line is never repeated. It never blocks.",
     options: [["warn", "Warn", "The edit runs; the agent is told which added lines hold an unsafe call.", true],
               ["off", "Off", "No unsafe-call checks."]] },
+  { key: "leftover_mode", title: "Leftovers on edit", applies: "Applies on the next edit.",
+    intro: "Names the file, line and kind of the leftovers an edit adds: git conflict markers (<<<<<<<, =======, >>>>>>>), focused tests (.only, fdescribe, fit), skipped or disabled tests (xit, xdescribe, @pytest.mark.skip and xfail, @Disabled, t.Skip) and debugger lines (debugger;, breakpoint(), import pdb, pdb.set_trace()). Lines that were already there and comment lines are left alone and the code of the line is never repeated. It never blocks.",
+    options: [["warn", "Warn", "The edit runs; the agent is told which added lines are leftovers.", true],
+              ["off", "Off", "No leftover checks."]] },
   { key: "pattern_proposals", title: "Block patterns proposed by a model", applies: "Applies to the next review.",
     intro: "Afterwards, never delaying a call, the scope model (else the router model) reviews searches the fixed rule let through and may propose block patterns. Nothing blocks until you accept it on the Redirects page.",
     options: [["on", "On", "Review in the background and list proposals for you.", true],
@@ -1953,15 +2055,25 @@ $("btn-updates-toggle").addEventListener("click", async () => {
   }
 });
 
-const PROVIDER_STATES = { keyless: ["ok", "Free tier, no key"], configured: ["ok", "Your key"], unreadable: ["bad", "Key unreadable"] };
+const PROVIDER_STATES = { keyless: ["ok", "Free tier, no key"], needs_key: ["warn", "Needs your own key"], configured: ["ok", "Your key"], unreadable: ["bad", "Key unreadable"] };
+function quotaLine(quota) {
+  const line = node("div", "", quota.window === "day" ? `Quota: ${quota.used} of ${quota.cap} calls used today` : `Quota: ${quota.used} of ${quota.cap} calls used this hour`);
+  if (quota.held_until) {
+    const until = new Date(quota.held_until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    line.append(", ", node("span", "", "held until " + until));
+  }
+  return line;
+}
 function providerRow(name, info) {
   const entry = node("div", "provider-row");
-  const [tone, label] = PROVIDER_STATES[info.status] || ["bad", info.status];
+  const state = info.status === "keyless" && info.needs_key ? "needs_key" : info.status;
+  const [tone, label] = PROVIDER_STATES[state] || ["bad", info.status];
   const title = node("div", "row-title");
   title.append(node("span", "", info.label), pill(tone, label));
   const text = node("div", "row-text");
   text.append(node("div", "", "Without a key: " + info.free), node("div", "", "With your key: " + info.keyed));
   if (info.status === "unreadable") text.appendChild(node("div", "msg error", "The saved key cannot be opened in this Windows profile; paste it again."));
+  if (info.quota) text.appendChild(quotaLine(info.quota));
   const side = node("div", "row-side");
   const form = node("div", "key-form");
   form.hidden = true;
@@ -2031,6 +2143,27 @@ async function loadProviders(provider, message) {
   }
   renderOverview();
 }
+const PROBE_LINES = {
+  ok: row => `${row.label}: ok, ${plural(row.results, "result")} in ${row.seconds} s`,
+  skipped: row => `${row.label}: skipped (${row.detail})`,
+  rate_limited: row => `${row.label}: rate limited (${row.detail})`,
+  key_rejected: row => `${row.label}: key rejected (${row.detail})`,
+  needs_key: row => `${row.label}: needs your key (${row.detail})`,
+  failed: row => `${row.label}: failed (${row.detail})`,
+};
+const PROBE_TONES = { ok: "ok", rate_limited: "warn", needs_key: "warn", key_rejected: "error", failed: "error" };
+$("btn-probe-sources").addEventListener("click", async () => {
+  const probe = $("btn-probe-sources");
+  probe.disabled = true;
+  $("probe-result").replaceChildren(node("div", "msg", "Testing every source with a real search…"));
+  try {
+    const data = await post("/setup/web-search/probe", {});
+    $("probe-result").replaceChildren(...Object.values(data.providers).map(row => node("div", "msg " + (PROBE_TONES[row.status] || ""), PROBE_LINES[row.status](row))));
+  } catch (error) {
+    $("probe-result").replaceChildren(node("div", "msg error", error.message));
+  }
+  probe.disabled = false;
+});
 $("btn-save-contact").addEventListener("click", async () => {
   try {
     const data = await post("/setup/contact", { contact: $("contact-input").value.trim() });

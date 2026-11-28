@@ -252,7 +252,9 @@ def emit(message):
 
 async def main():
     from camoufox.async_api import AsyncCamoufox
+    import fetch_camoufox
 
+    fetch_camoufox.require_installed()
     loop = asyncio.get_running_loop()
     browser = await AsyncCamoufox(headless=True).__aenter__()
     browser.on("disconnected", lambda *_: os._exit(1))

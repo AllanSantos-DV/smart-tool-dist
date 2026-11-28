@@ -74,9 +74,4 @@ def distinct(paths):
 
 def render(results):
     """The text the agent reads: a count line, then one numbered block per document with its text or `ERROR: reason`."""
-    failed = sum(not result["ok"] for result in results)
-    blocks = [f"read_document_many: {len(results)} documents, {len(results) - failed} read, {failed} failed."]
-    for number, result in enumerate(results, 1):
-        body = result["text"] if result["ok"] else f"ERROR: {result['error']}"
-        blocks.append(f"[{number}/{len(results)}] {result['path']}\n{body}")
-    return "\n\n".join(blocks)
+    return web_fetch_many.render_batch("read_document_many", "documents", "read", results, "path")

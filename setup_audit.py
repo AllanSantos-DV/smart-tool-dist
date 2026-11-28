@@ -18,6 +18,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -36,6 +37,8 @@ import paths
 REPORT_DIR = os.path.join(paths.DATA_DIR, "setup-audit")
 INDEX_NAME = "index.json"
 PROBE_TIMEOUT_S = 15
+HELPER_TIMEOUT_S = 10  # Claude Code gives up on a headersHelper after the same time
+AUTH_BACKOFF_S = 900
 SCHEDULE_S = 30 * 60
 FIRST_RUN_DELAY_S = 120
 PROBE_MAX_AGE_S = 6 * 3600
@@ -163,6 +166,7 @@ def _mcp_entries(servers, scope, source, prefix="", extra=None):
                         "_env": spec.get("env") or {}, "_headers": dict(spec.get("headers") or spec.get("http_headers")
                                                                        or {}),
                         "_bearer_env": spec.get("bearer_token_env_var"),
+                        "_headers_helper": spec.get("headersHelper") if spec.get("url") else None,
                         "disabled_tools": list(spec.get("disabled_tools") or [])})
     return entries
 
@@ -706,6 +710,64 @@ def _rpc_stdio(entry, cwd, timeout):
                 pass
 
 
+def _kill_tree(proc):
+    """Ends the process and its children; a process that is already gone is not an error."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, FileNotFoundError):
+        proc.kill()
+
+
+def _run_killing_the_tree(command, cwd, timeout, shell=False):
+    """subprocess.run with text capture whose timeout also ends the command's children: a child that outlives the kill
+    keeps the output pipes open, and reading them would block the audit with it. `shell` runs a command line through the
+    platform shell."""
+    popen_kwargs = ({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True})
+    proc = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            encoding="utf-8", errors="replace", shell=shell, **popen_kwargs)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except BaseException:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.stdout.close()
+            proc.stderr.close()
+        raise
+    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+
+def _helper_headers(entry, cwd, timeout=None):
+    """Headers printed by the entry's headersHelper command, as Claude Code runs it before connecting.
+
+    Returns: {"headers": {...}}, or {"error", "kind": "helper"} naming only the cause (time, start, exit code or
+    output shape): what the helper printed is a token and never goes into a result."""
+    timeout = timeout or HELPER_TIMEOUT_S
+    command = entry["_headers_helper"]
+    if not isinstance(command, str):
+        return {"error": "token helper failed (the command is not a text line)", "kind": "helper"}
+    try:
+        done = _run_killing_the_tree(command, cwd, timeout, shell=True)
+    except subprocess.TimeoutExpired:
+        return {"error": f"token helper failed (no answer in {timeout} s)", "kind": "helper"}
+    except (OSError, ValueError):
+        return {"error": "token helper failed (the command could not start)", "kind": "helper"}
+    if done.returncode:
+        return {"error": f"token helper failed (exit code {done.returncode})", "kind": "helper"}
+    try:
+        headers = json.loads(done.stdout)
+    except ValueError:
+        headers = None
+    if not isinstance(headers, dict) or not all(isinstance(v, (str, int)) for v in headers.values()):
+        return {"error": "token helper failed (its output is not a JSON object of headers)", "kind": "helper"}
+    return {"headers": {str(k): str(v) for k, v in headers.items()}}
+
+
 def _rpc_http(entry, timeout):
     """initialize + tools/list over streamable HTTP; {"tools": [...]} or {"error", "kind": auth|down}."""
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
@@ -736,7 +798,21 @@ def _rpc_http(entry, timeout):
         kind = "auth" if exc.code in (401, 403) else "down"
         return {"error": f"HTTP {exc.code}", "kind": kind}
     except (OSError, ValueError) as exc:
-        return {"error": str(getattr(exc, "reason", exc)), "kind": "down"}
+        invalid_header = isinstance(exc, UnicodeEncodeError) or (isinstance(exc, ValueError)
+                                                                  and "header" in str(exc).lower())
+        reason = "a header value is not valid" if invalid_header else str(getattr(exc, "reason", exc))
+        return {"error": reason, "kind": "down"}
+
+
+def _http_probe(entry, cwd, timeout):
+    """_rpc_http with the headers of the entry's headersHelper merged over its static ones; no request goes out
+    without them when the helper fails."""
+    if not entry.get("_headers_helper"):
+        return _rpc_http(entry, timeout)
+    helper = _helper_headers(entry, cwd)
+    if "error" in helper:
+        return helper
+    return _rpc_http({**entry, "_headers": {**entry["_headers"], **helper["headers"]}}, timeout)
 
 
 _PROBES = {}
@@ -750,23 +826,36 @@ def _probe_key(entry, cwd):
                    for a in entry["args"])
     per_project = entry["transport"] == "stdio" and (entry["scope"] in ("project", "local") or relative)
     spec = [entry["transport"], entry.get("command"), entry["args"], entry.get("url"), sorted(entry["_env"].items()),
-            sorted(entry["_headers"].items()), entry.get("_bearer_env"), cwd if per_project else None]
+            sorted(entry["_headers"].items()), entry.get("_bearer_env"), entry.get("_headers_helper"), cwd if per_project else None]
     return hashlib.sha256(json.dumps(spec, default=str).encode()).hexdigest()
+
+
+def _reusable(cached, max_age):
+    """Whether a probe result is still good: a success for max_age, a refused sign-in or failed helper for
+    AUTH_BACKOFF_S, any other failure never."""
+    if cached.get("kind") in ("auth", "helper"):
+        window = AUTH_BACKOFF_S
+    elif cached.get("error"):
+        return False
+    else:
+        window = max_age
+    return time.time() - cached["probed_at"] < window
 
 
 def probe_mcp(entries, cwd, timeout=PROBE_TIMEOUT_S, max_age=0):
     """Tools of each MCP server, started or called as a session would (in parallel). With max_age, a result of the
-    same launch younger than that is reused (failures never are: a server fixed meanwhile shows at once): the periodic
-    audit does not start every server of every project each time. Each result carries `probed_at`."""
+    same launch younger than that is reused. A failure is not, except a refused sign-in or a failed token helper: those
+    only change with the entry, so they are kept for AUTH_BACKOFF_S instead of asking the server every round. Each
+    result carries `probed_at`."""
     def one(entry):
         key = _probe_key(entry, cwd)
         with _PROBES_LOCK:
             cached = _PROBES.get(key)
-        if max_age and cached and not cached.get("error") and time.time() - cached["probed_at"] < max_age:
+        if max_age and cached and _reusable(cached, max_age):
             return cached
         # A server whose config cannot even be used (a URL with an unexpanded variable, a bad port) is a finding.
         try:
-            result = _rpc_http(entry, timeout) if entry["transport"] == "http" else _rpc_stdio(entry, cwd, timeout)
+            result = _http_probe(entry, cwd, timeout) if entry["transport"] == "http" else _rpc_stdio(entry, cwd, timeout)
         except Exception as exc:
             result = {"error": f"{type(exc).__name__}: {exc}"[:200], "kind": "down"}
         result["probed_at"] = time.time()
@@ -787,9 +876,11 @@ def check_mcp(harness, entries, results):
         if result is None:
             continue
         if result.get("error"):
-            severity = {"missing": "error", "down": "error", "timeout": "warn", "auth": "info"}[result["kind"]]
+            severity = {"missing": "error", "down": "error", "timeout": "warn", "auth": "info",
+                        "helper": "warn"}[result["kind"]]
             text = {"auth": "needs sign-in; its tools were not verified",
-                    "timeout": "did not answer in time; its tools were not verified"}.get(result["kind"],
+                    "timeout": "did not answer in time; its tools were not verified",
+                    "helper": "has a headersHelper that failed; its tools were not verified"}.get(result["kind"],
                                                                                        "does not start or answer")
             findings.append(_finding("mcp_unhealthy", severity, harness, subject,
                                      f"MCP server {text}: {result['error']}", doc, _mcp_fix(harness, entry,
@@ -828,6 +919,9 @@ def check_mcp(harness, entries, results):
 def _mcp_fix(harness, entry, kind):
     """The step that brings an unhealthy MCP server back: sign in, or run its command by hand to see the error, or
     remove the entry."""
+    if kind == "helper":
+        return (f"Run the headersHelper command of {entry['name']} (in {entry['source']}) by hand: it must print a "
+                f"JSON object of headers within {HELPER_TIMEOUT_S} s.")
     if kind == "auth":
         return (f"Sign in: run /mcp in Claude Code and pick {entry['name']}." if harness == "claude"
                 else f"Sign in: run `codex mcp login {entry['name']}`.")
@@ -847,6 +941,20 @@ def _public(section):
         else:
             out[key] = value
     return out
+
+
+def check_browser_fetch():
+    """A finding when the last Camoufox browser download failed (no browser on disk) or could not refresh (the build
+    on disk is kept); the state file comes from the installer's browser step."""
+    import browser_fetch_state
+    record = browser_fetch_state.read_state()
+    if not record or record.get("state") not in ("failed", "degraded"):
+        return []
+    failed = record["state"] == "failed"
+    detail = (f"The Camoufox browser download {'failed and no browser is on disk' if failed else 'could not refresh; the build on disk is kept'}: "
+              f"{record.get('reason', '')}")
+    return [_finding(f"browser_fetch_{record['state']}", "error" if failed else "warn", "project", "Camoufox browser",
+                     detail, browser_fetch_state.STATE_PATH, record.get("next_action", ""))]
 
 
 def check_dependencies(project):
@@ -899,6 +1007,7 @@ def run(project, probe=True, save=True, probe_max_age=0, trigger="manual"):
     findings += check_instructions(project, claude, codex)
     findings += check_codex_config(codex)
     findings += check_dependencies(project)
+    findings += check_browser_fetch()
     unverified = list(snapshot.unverified)
     if not probe:
         unverified.append("MCP servers and HTTP hook endpoints were not contacted (probe off)")

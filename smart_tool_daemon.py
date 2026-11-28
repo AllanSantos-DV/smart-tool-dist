@@ -79,15 +79,20 @@ import setup_audit
 import block_patterns
 import setup_ui
 import site_memory
+import web_identity
 import web_search_adapters
 import browser_service_client
 import local_embedder
 import low_priority
 import web_search_health
+import web_search_quota
 import web_fetch
 import web_fetch_many
+import untrusted_content
 import read_document_many
 import search_queries
+import cross_project_search
+import diagnostics_bundle
 import version
 import update_check
 import gateway
@@ -395,10 +400,10 @@ SERVER_INSTRUCTIONS = (
 TOOLS = [
     {
         "name": "project_manage",
-        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project (a project whose folder is gone shows as unavailable with the reason); status shows storage, scope and jobs, and with a path inside a registered project answers for the deepest one that holds it (resolved_from). deps lists the known OSV advisories of every dependency the manifests of the project declare (package.json, requirements*.txt, pyproject.toml, go.mod), not only the ones an edit changed, at the version a package-lock.json beside a package.json resolved when it satisfies the range; only package names and versions leave the machine. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. graph with format=mermaid and symbol returns the callers and the calls of that function as Mermaid flowchart text (at most limit functions around it) instead of the JSON answer; format is json by default. With brief=true (symbol required) the same call also returns, besides the callers and the tests, the files that usually change with the function's file (coupling) and the decision notes and commit messages that name it, each part saying why it is empty or cut; without brief the answer is unchanged.affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers and the tests that reach them (those no test reaches are listed apart), the documentation entries it leaves out of date, the notes the edit hook would have added to the whole diff (comments, copies, dependency advisories) and the tests to run with their command; it publishes nothing. When the diff adds an unsafe call it lists the file, line and kind of each one (the kinds of risky_calls, never the code); when a touched function got more branches than it had at the base it lists both complexity numbers; and with reach=true it gives, for each touched function, one shortest static call chain from an entry point of the project, or says plainly that no static path was found (without reach=true the report says in one line that the chains are left out); each of these sections appears only when it has something to say. The edit hook also names the unsafe calls an edit adds, as context that never blocks: risky_mode in config.json, warn (default) or off, also on the setup screen. pr_impact_comment (pr, base required) posts that report as a comment on pull request pr through the gh CLI, from the project folder, and returns the comment URL; a rerun replaces the previous Smart Tool comment (marked by a hidden HTML marker) instead of stacking another, and the body carries no local path; it is a write to GitHub, so it refuses unless the user turned pr_comment on in the setup screen (Agent rules, off by default), and when gh is missing or not logged in; never call it without the user asking for the comment. hotspots (limit) ranks the code files by commits times lines, the riskiest to change; dead_code lists the functions no code calls and those only tests call (static call graph, candidates; name_mentions marks a candidate whose name still appears as text elsewhere); import_cycles lists the groups of files that import each other; comments lists comments in the wrong place (commented-out code, history tags, loose docs, long inline blocks) across the code files, not only in an edit; credentials lists, per git-tracked text file (read from disk, so .env files and old commits count), the file and line of each credential shape (provider tokens, AWS keys, private-key headers), never the value, and skips lines that say they are an example; links lists the relative links of the tracked HTML and Markdown files that point to a missing file, plus the links it could not decide (root-relative, template expressions, pages with a base element), reported as unchecked, not broken. untested lists the functions of the whole project that no test reaches through static calls (up to 3 hops), the files with the most commits first, up to limit, with the totals in counts and the reason when the git history could not be read (every file then counts 0 commits); it fails when the project has no code graph and writes nothing. risky_functions ranks the functions of the whole project by risk, up to limit: each row carries its size (end line minus start line), fan_in (distinct non-test callers), commits (of its file) and whether a test reaches it, with score = (size+1)*(fan_in+1)*(commits+1)*(2 when untested) and the rule in rank_rule, the totals in counts and the reason when the git history could not be read (every file then counts 0 commits); it fails when the project has no code graph and writes nothing. ownership shows, for each of the limit most risky code files (the hotspots), its authors by commits and by surviving lines as git reports them, and flags the files where one author holds at least threshold of the lines (0.5 to 1, default 0.8); it says so when the folder has no git history and reads only. complexity ranks the functions by cyclomatic complexity counted from branch tokens (Python, JavaScript, TypeScript, Go and Java), those at or above min_complexity (default 10), up to limit; the count is an approximation by tokens and writes nothing. api_breaks lists the public functions removed or given another signature since the latest tag, each with its callers outside the file, up to limit; it says so when the repository has no tag, never tags and writes nothing (release_check carries the same finding as an advisory that never changes ready). entry_points lists where execution starts, grouped by layer: the functions a __main__ block or the name main starts, the __main__ blocks that run no function, the functions with a route annotation, the public functions of the highest declared layer (the roots of the call graph without layers) and the main and bin files of package.json, each function with the size of its flow and the stamp docs/scope records; it reads the model docs generate=true starts from and writes nothing, up to limit. signature_preview (path, symbol, params) lists, before a signature edit, the call sites of the function in symbol whose arguments cannot bind to the parameter list in params: Python through the interpreter's own binding rules, the other languages through a conservative count of the call's arguments; a site it cannot decide (a spread argument, generics, a method called through its class) is counted as unsure and never reported, and a call matched by name only says resolved=false; it edits nothing, up to limit. rename_preview lists, before a rename of the function in symbol, its definitions with file and lines, its callers with line (also the calls the graph left unresolved under that name), the tests that reach it, the files importing its module, the anchors of docs/scope and the lines of the README and docs text that name it, each list capped by limit with the totals in counts; it fails when the symbol is not found and writes nothing. release_notes drafts the notes of the next release in Markdown under a `## Draft since <base>` heading without a model: the commit subjects since base (default the latest tag), the public functions the diff touches with their caller and test counts, the decision notes that name them and the documentation entries the diff leaves out of date; it writes nothing and fails when there is no tag and no base. release_check answers whether the project can be tagged, as {ready, checks}: version.py against the top heading of CHANGELOG.md, the README status line and site/index.html, no Unreleased text left in the changelog, a clean working tree on main or develop, the tag v<version> still free and no documentation entry out of date, each check with its reason (a missing file is a check that is not ok), plus the commit subjects since the latest tag and an advisories list (committed credentials, stale doc references, broken relative links, import cycles) that never changes ready; it changes and tags nothing. upgrade_preview says, before the manifest of a dependency is edited, what bumping the package in package (optionally to the version in to) changes: where the manifests declare it with the current version (the lockfile's when it satisfies the range), the OSV advisories of the current and the target version (those the target fixes or adds; a lookup that is unavailable is said, never shown as clean), the changelog or release notes of the target read through the web_fetch path only when the network use web_fetch needs is available (otherwise the local part is answered and the reason the notes were not read is given) and the tests that import the package or reach a file that does, listed up to limit; it refuses a package no manifest declares, and edits nothing. unused_deps lists the dependencies the manifests declare (package.json, requirements*.txt, pyproject.toml, go.mod) that no code imports and the packages the code imports that no manifest declares, matched folder by folder against the external imports of the code graph, up to limit with the totals in counts; each finding carries a confidence (medium or low, never certain) and the reason, because a package can be loaded by a tool or a config file, or imported under another name than its package name (PyYAML as yaml, then the possible names are listed as alias_candidates); a manifest or folder it cannot judge is listed with its reason, and it edits nothing. orphan_modules lists the source files (Python and JavaScript/TypeScript) that no code imports, no test imports or names in a string, and no README, docs file or config names, and that are not an entry point (package.json entries, __main__, hook files), up to limit with the totals in counts; they are candidates, because a file loaded by config, hooks, console scripts or a package main may be a false positive, and it edits nothing. undocumented_env lists the environment variables the code reads (os.environ, os.getenv, process.env, getenv with a literal name) that no README or docs file mentions by name, with the file and line of the first read and whether only tests read it, up to limit with the totals in counts, and it edits nothing. stack_trace reads a pasted Python, Node or Java traceback (text) and answers, for each frame inside the project, the function whose lines hold the frame line, its direct callers with the line of the call and the tests that reach it, up to limit callers and tests per frame; the project folder is stripped from absolute paths, frames outside the project are counted and ignored, Java frames are matched by package and file name, and it is static analysis that writes nothing; with history=true each frame in a function also carries last_commit, the latest commit that changed that function's own lines (the reason in history_refused when its file has uncommitted edits, is not committed or has no git history). call_path finds the shortest static call chain from symbol to target (function, Class.method or path::name; up to max_hops, default 6) with the line of each call site, and answers plainly when there is no static path or the search was cut, because calls through dynamic dispatch are invisible. symbol_history lists the commits that changed the own lines of the function in symbol (git log -L, up to limit) with date, author and subject, including commits that do not name it; the line ranges come from the working tree, so it refuses when the file has uncommitted edits, and it writes nothing. symbol_owner lists the authors of the function in symbol by the lines inside its range that still stand at HEAD (git blame -L, names only, up to limit authors with lines and whole-percent share), per definition; the range comes from the working tree, so it refuses when the file has uncommitted edits, is not committed or has no git history, and it writes nothing. agent_refs lists, per CLAUDE.md and AGENTS.md tracked in the project (root and folders), the paths, relative links and functions written in inline code that no longer exist, each with its line and why, the first limit with the totals in counts; it writes nothing. risky_calls lists, in the tracked Python, JavaScript and TypeScript files (test folders left out unless they are the only code), the file and line of high-confidence unsafe calls: shell=True or os.system on a command that is not a literal, pickle.load and pickle.loads, yaml.load without a safe Loader, an HTTP call with verify=False, eval and exec on a non-literal, and an innerHTML assignment of a non-literal, up to limit with the totals in by_kind; it never repeats the source and writes nothing. risky_reach lists, for each of those findings (up to limit), the shortest static call chain from an entry point of entry_points to the function that holds the call, with the line of each call (up to max_hops, default 6), or says plainly that no static path exists or that the search was cut by max_hops, and that a missing path is not proof that the call is safe; a call outside every function says so; it writes nothing. env_unread lists the environment variables the README and docs files name (export, set, $env:, an assignment before a command, process.env, os.environ, getenv, or a snake-case name in inline code on a line that says env or environment) that no code or test reads with a literal name, with the file and line where each was found, the names found in no other file first, up to limit with the totals in counts, and it edits nothing. cli_undocumented lists the argparse flags and subcommands the tracked Python files define that no README or docs text names, and the flags and subcommands that a command line in the docs (inline code or a fenced block) gives to one of those scripts and no definition has, each with file and line, up to limit with the totals in counts; only argparse is seen (click and typer are not) and it writes nothing. config_unread lists the keys of DEFAULT_CONFIG in the project's config.py that no README or docs text names, and the keys the docs name in a config context (a line that names a config file the config.py reads, or DEFAULT_CONFIG) that DEFAULT_CONFIG does not have, each with file and line, up to limit with the totals in counts; it writes nothing. move_preview lists, before moving the file or folder in path to the project-relative to, the modules importing it, the Markdown and HTML links (with their anchors) and the README and docs lines that point at it, the anchors of docs/scope that name its functions and the tests that reach it, each list capped by limit with the totals in counts; it refuses when path does not exist or to already exists, and moves nothing. delete_preview lists, before deleting the file in path (or only the function or class symbol defined in it), what the deletion breaks without touching anything: for a file the modules importing it, the Markdown and HTML links and the README and docs lines that point at it, the anchors of docs/scope and the tests that reach it; for a symbol the call sites that would be left naming it (also calls and imports found by name, and calls left in the same file), the functions that go with it and the tests that reach it, each list capped by limit with the totals in counts; it refuses a path that does not exist or is a folder, and a symbol that path does not define. doc_refs lists, per README and docs file of the whole project, the paths, relative links and functions it writes (inline code, outside fenced blocks) that no longer exist, each with its line and why, the first limit with the totals in counts; it writes nothing. assertless lists the test functions whose body holds no assertion, as candidates (a helper that asserts for the test looks assertion-less), up to limit and optionally only under folder; it writes nothing. todo_age lists the TODO, FIXME and HACK markers of code comments with the age of their line from one git blame per file, oldest first and flagged old past older_than_days (default 180), up to limit; outside a git repository, or for an untracked file, they come without an age and it says why; it writes nothing. ext_links is the opt-in check of the external http(s) links of those docs for link rot: it reads each distinct URL once (at most limit, up to 100) through the guarded web_fetch download and gives every one ok, dead (HTTP 404 or 410) or error (another status or a failure, not proof the page is gone) with its status and the places that write it; it uses the network only when you call it and writes nothing. diff_coverage reads the coverage report your own last test run wrote (Cobertura coverage.xml, lcov.info or coverage.py JSON, in the project root or a common report folder; it never runs tests or installs anything) and lists, per function, the lines changed since base (default HEAD, staged and unstaged included) that no executed line covers, with the report's modified date against the HEAD commit time and a stale warning; it says so plainly when no report is found, takes limit and writes nothing. history_secrets is the opt-in, bounded scan of git history for credential shapes: it reads the diffs of the newest commit_limit commits (default 500, up to 100000) for at most budget_seconds (default 20, up to 300) and lists the file, line, short commit hash and kind of each credential shape added or removed, never its value; a folder that is not a git repository gets a clear message; it takes limit and writes nothing. commit_check reviews the staged change (git diff --cached, not the working tree), also answering tests_to_run and untouched_by_tests for the staged files, with the notes the edit hook gives a finished diff (credentials, commented-out code, missing docstrings, duplicates, dependency advisories, link and edit notes), for edits the agent hook never saw (an IDE, hand edits, another agent); it writes nothing. review_tree gives the same review to the uncommitted working tree: the tracked files modified since HEAD, staged or not, read from disk (untracked, deleted and binary files are left out; the first 50 are reviewed and the rest is said), and says plainly when the tree is clean; it writes nothing and blocks nothing. commit_hook_install writes a git pre-commit hook in the project that prints that review to stderr at every commit and never blocks it (exit 0 always; a daemon that is down is one line, a check that fails is printed); it is opt-in, and refuses, naming what it found and changing nothing, when core.hooksPath is set, husky is used or a pre-commit that is not Smart Tool's exists; commit_hook_uninstall removes only that hook and puts back a backed-up hook that is not ours. With hook=pre-push (default pre-commit) both actions manage a git pre-push hook instead: at every push it prints to stderr the tests the pushed commits affect and the pr_impact summary against the commit the remote holds, never blocks the push, finds the service through its run file at run time, and refuses under the same conditions; commit_hook_install with hook=pre-push and docs=true also lists there the public functions of the pushed range that lack a docstring or the Feature line (the option is written into the hook; installing again without it writes the plain hook); links=true (pr_impact and that hook) reads the external links the diff adds, at most 10, over the network, and lists the ones that look dead (off by default). graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); each technical entry carries a Feature line naming the features whose flow reaches it and a marker with signature, body and docstring stamps, so check and validate also report a body or docstring changed under the same signature, and the chain check of validate fails when a technical entry and the functional overview do not name each other; with the Claude Code hook installed, at the end of each turn in a project with docs/scope the daemon rewrites, without a model, only the pages of the functions the turn changed; docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; each view carries stale (not updated for 30 days, the test of the daily cleanup that removes them) and stale_bytes sums them; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. junk (no project_root) lists the registered projects that were never projects: a personal, system, application-data or build folder, a subfolder of a repository or of another project, a folder of projects, or a folder that no longer exists (on a drive or share that is mounted); with confirm=true it unregisters them and deletes only their index files, and the manifest says what went. A project is the folder where the session started, so smart_search and register refuse a folder that is not a project and index a new one only from the session that started in it. Jobs via smart_search_result.",
+        "description": "Manages folders and indexing. Every action takes project_root (the folder) or project_id. list gives a short line per project (a project whose folder is gone shows as unavailable with the reason); status shows storage, scope and jobs, and with a path inside a registered project answers for the deepest one that holds it (resolved_from). deps lists the known OSV advisories of every dependency the manifests of the project declare (package.json, requirements*.txt, pyproject.toml, go.mod), not only the ones an edit changed, at the version a package-lock.json beside a package.json resolved when it satisfies the range; only package names and versions leave the machine. graph with symbol (function, Class.method, class name, or path::name when the name repeats) answers what an edit touches: definition, callers with line, calls, tests that reach it through static calls (depth hops, default 3) and files importing it; use it before changing a function to know what to update. graph with format=mermaid and symbol returns the callers and the calls of that function as Mermaid flowchart text (at most limit functions around it) instead of the JSON answer; format is json by default. With brief=true (symbol required) the same call also returns, besides the callers and the tests, the files that usually change with the function's file (coupling) and the decision notes and commit messages that name it, each part saying why it is empty or cut; without brief the answer is unchanged.affected_tests answers which tests to run after editing: every test file importing a changed file (git diff against base, default HEAD, untracked included) plus changed tests, likeliest failures first, with the command to run them and run_all when config or unanalyzed code changed. pr_impact (base, default HEAD; main or origin/main for a branch) returns a Markdown report of the change for a pull request: the functions the diff touches with their callers and the tests that reach them (those no test reaches are listed apart), the documentation entries it leaves out of date, the notes the edit hook would have added to the whole diff (comments, copies, dependency advisories) and the tests to run with their command; it publishes nothing. When the diff adds an unsafe call it lists the file, line and kind of each one (the kinds of risky_calls, never the code); when a touched function got more branches than it had at the base it lists both complexity numbers; and with reach=true it gives, for each touched function, one shortest static call chain from an entry point of the project, or says plainly that no static path was found (without reach=true the report says in one line that the chains are left out); each of these sections appears only when it has something to say. The edit hook also names the unsafe calls an edit adds, as context that never blocks: risky_mode in config.json, warn (default) or off, also on the setup screen. pr_impact_comment (pr, base required) posts that report as a comment on pull request pr through the gh CLI, from the project folder, and returns the comment URL; a rerun replaces the previous Smart Tool comment (marked by a hidden HTML marker) instead of stacking another, and the body carries no local path; it is a write to GitHub, so it refuses unless the user turned pr_comment on in the setup screen (Agent rules, off by default), and when gh is missing or not logged in; never call it without the user asking for the comment. hotspots (limit) ranks the code files by commits times lines, the riskiest to change; dead_code lists the functions no code calls and those only tests call (static call graph, candidates; name_mentions marks a candidate whose name still appears as text elsewhere); import_cycles lists the groups of files that import each other; comments lists comments in the wrong place (commented-out code, history tags, loose docs, long inline blocks) across the code files, not only in an edit; credentials lists, per git-tracked text file (read from disk, so .env files and old commits count), the file and line of each credential shape (provider tokens, AWS keys, private-key headers), never the value, and skips lines that say they are an example; links lists the relative links of the tracked HTML and Markdown files that point to a missing file, plus the links it could not decide (root-relative, template expressions, pages with a base element), reported as unchecked, not broken. untested lists the functions of the whole project that no test reaches through static calls (up to 3 hops), the files with the most commits first, up to limit, with the totals in counts and the reason when the git history could not be read (every file then counts 0 commits); it fails when the project has no code graph and writes nothing. risky_functions ranks the functions of the whole project by risk, up to limit: each row carries its size (end line minus start line), fan_in (distinct non-test callers), commits (of its file) and whether a test reaches it, with score = (size+1)*(fan_in+1)*(commits+1)*(2 when untested) and the rule in rank_rule, the totals in counts and the reason when the git history could not be read (every file then counts 0 commits); it fails when the project has no code graph and writes nothing. ownership shows, for each of the limit most risky code files (the hotspots), its authors by commits and by surviving lines as git reports them, and flags the files where one author holds at least threshold of the lines (0.5 to 1, default 0.8); it says so when the folder has no git history and reads only. complexity ranks the functions by cyclomatic complexity counted from branch tokens (Python, JavaScript, TypeScript, Go and Java), those at or above min_complexity (default 10), up to limit; the count is an approximation by tokens and writes nothing. api_breaks lists the public functions removed or given another signature since the latest tag, each with its callers outside the file, up to limit; it says so when the repository has no tag, never tags and writes nothing (release_check carries the same finding as an advisory that never changes ready). entry_points lists where execution starts, grouped by layer: the functions a __main__ block or the name main starts, the __main__ blocks that run no function, the functions with a route annotation, the public functions of the highest declared layer (the roots of the call graph without layers) and the main and bin files of package.json, each function with the size of its flow and the stamp docs/scope records; it reads the model docs generate=true starts from and writes nothing, up to limit. signature_preview (path, symbol, params) lists, before a signature edit, the call sites of the function in symbol whose arguments cannot bind to the parameter list in params: Python through the interpreter's own binding rules, the other languages through a conservative count of the call's arguments; a site it cannot decide (a spread argument, generics, a method called through its class) is counted as unsure and never reported, and a call matched by name only says resolved=false; it edits nothing, up to limit. rename_preview lists, before a rename of the function in symbol, its definitions with file and lines, its callers with line (also the calls the graph left unresolved under that name), the tests that reach it, the files importing its module, the anchors of docs/scope and the lines of the README and docs text that name it, each list capped by limit with the totals in counts; it fails when the symbol is not found and writes nothing. release_notes drafts the notes of the next release in Markdown under a `## Draft since <base>` heading without a model: the commit subjects since base (default the latest tag), the public functions the diff touches with their caller and test counts, the decision notes that name them and the documentation entries the diff leaves out of date; it writes nothing and fails when there is no tag and no base. release_check answers whether the project can be tagged, as {ready, checks}: version.py against the top heading of CHANGELOG.md, the README status line and site/index.html, no Unreleased text left in the changelog, a clean working tree on main or develop, the tag v<version> still free and no documentation entry out of date, each check with its reason (a missing file is a check that is not ok), plus the commit subjects since the latest tag and an advisories list (committed credentials, stale doc references, broken relative links, import cycles) that never changes ready; it changes and tags nothing. upgrade_preview says, before the manifest of a dependency is edited, what bumping the package in package (optionally to the version in to) changes: where the manifests declare it with the current version (the lockfile's when it satisfies the range), the OSV advisories of the current and the target version (those the target fixes or adds; a lookup that is unavailable is said, never shown as clean), the changelog or release notes of the target read through the web_fetch path only when the network use web_fetch needs is available (otherwise the local part is answered and the reason the notes were not read is given) and the tests that import the package or reach a file that does, listed up to limit; it refuses a package no manifest declares, and edits nothing. unused_deps lists the dependencies the manifests declare (package.json, requirements*.txt, pyproject.toml, go.mod) that no code imports and the packages the code imports that no manifest declares, matched folder by folder against the external imports of the code graph, up to limit with the totals in counts; each finding carries a confidence (medium or low, never certain) and the reason, because a package can be loaded by a tool or a config file, or imported under another name than its package name (PyYAML as yaml, then the possible names are listed as alias_candidates); a manifest or folder it cannot judge is listed with its reason, and it edits nothing. orphan_modules lists the source files (Python and JavaScript/TypeScript) that no code imports, no test imports or names in a string, and no README, docs file or config names, and that are not an entry point (package.json entries, __main__, hook files), up to limit with the totals in counts; they are candidates, because a file loaded by config, hooks, console scripts or a package main may be a false positive, and it edits nothing. undocumented_env lists the environment variables the code reads (os.environ, os.getenv, process.env, getenv with a literal name) that no README or docs file mentions by name, with the file and line of the first read and whether only tests read it, up to limit with the totals in counts, and it edits nothing. stack_trace reads a pasted Python, Node or Java traceback (text) and answers, for each frame inside the project, the function whose lines hold the frame line, its direct callers with the line of the call and the tests that reach it, up to limit callers and tests per frame; the project folder is stripped from absolute paths, frames outside the project are counted and ignored, Java frames are matched by package and file name, and it is static analysis that writes nothing; with history=true each frame in a function also carries last_commit, the latest commit that changed that function's own lines (the reason in history_refused when its file has uncommitted edits, is not committed or has no git history). call_path finds the shortest static call chain from symbol to target (function, Class.method or path::name; up to max_hops, default 6) with the line of each call site, and answers plainly when there is no static path or the search was cut, because calls through dynamic dispatch are invisible. symbol_history lists the commits that changed the own lines of the function in symbol (git log -L, up to limit) with date, author and subject, including commits that do not name it; the line ranges come from the working tree, so it refuses when the file has uncommitted edits, and it writes nothing. symbol_owner lists the authors of the function in symbol by the lines inside its range that still stand at HEAD (git blame -L, names only, up to limit authors with lines and whole-percent share), per definition; the range comes from the working tree, so it refuses when the file has uncommitted edits, is not committed or has no git history, and it writes nothing. agent_refs lists, per CLAUDE.md and AGENTS.md tracked in the project (root and folders), the paths, relative links and functions written in inline code that no longer exist, each with its line and why, the first limit with the totals in counts; it writes nothing. risky_calls lists, in the tracked Python, JavaScript and TypeScript files (test folders left out unless they are the only code), the file and line of high-confidence unsafe calls: shell=True or os.system on a command that is not a literal, pickle.load and pickle.loads, yaml.load without a safe Loader, an HTTP call with verify=False, eval and exec on a non-literal, and an innerHTML assignment of a non-literal, up to limit with the totals in by_kind; it never repeats the source and writes nothing. risky_reach lists, for each of those findings (up to limit), the shortest static call chain from an entry point of entry_points to the function that holds the call, with the line of each call (up to max_hops, default 6), or says plainly that no static path exists or that the search was cut by max_hops, and that a missing path is not proof that the call is safe; a call outside every function says so; it writes nothing. env_unread lists the environment variables the README and docs files name (export, set, $env:, an assignment before a command, process.env, os.environ, getenv, or a snake-case name in inline code on a line that says env or environment) that no code or test reads with a literal name, with the file and line where each was found, the names found in no other file first, up to limit with the totals in counts, and it edits nothing. cli_undocumented lists the argparse flags and subcommands the tracked Python files define that no README or docs text names, and the flags and subcommands that a command line in the docs (inline code or a fenced block) gives to one of those scripts and no definition has, each with file and line, up to limit with the totals in counts; only argparse is seen (click and typer are not) and it writes nothing. web_sources reports the web search sources of the whole machine and needs no project: per source from the recent health log the calls ok, failed, rate_limited, captcha and paused with the success rate (paused calls left out), the keyless quota of the quota sources (exa, parallel: used, cap, window, held_until) and the busiest requesters (client and project folder, up to limit rows, default 10, with the total in rows_total); it writes nothing. config_unread lists the keys of DEFAULT_CONFIG in the project's config.py that no README or docs text names, and the keys the docs name in a config context (a line that names a config file the config.py reads, or DEFAULT_CONFIG) that DEFAULT_CONFIG does not have, each with file and line, up to limit with the totals in counts; it writes nothing. move_preview lists, before moving the file or folder in path to the project-relative to, the modules importing it, the Markdown and HTML links (with their anchors) and the README and docs lines that point at it, the anchors of docs/scope that name its functions and the tests that reach it, each list capped by limit with the totals in counts; it refuses when path does not exist or to already exists, and moves nothing. delete_preview lists, before deleting the file in path (or only the function or class symbol defined in it), what the deletion breaks without touching anything: for a file the modules importing it, the Markdown and HTML links and the README and docs lines that point at it, the anchors of docs/scope and the tests that reach it; for a symbol the call sites that would be left naming it (also calls and imports found by name, and calls left in the same file), the functions that go with it and the tests that reach it, each list capped by limit with the totals in counts; it refuses a path that does not exist or is a folder, and a symbol that path does not define. doc_refs lists, per README and docs file of the whole project, the paths, relative links and functions it writes (inline code, outside fenced blocks) that no longer exist, each with its line and why, the first limit with the totals in counts; it writes nothing. assertless lists the test functions whose body holds no assertion, as candidates (a helper that asserts for the test looks assertion-less), up to limit and optionally only under folder; it writes nothing. todo_age lists the TODO, FIXME and HACK markers of code comments with the age of their line from one git blame per file, oldest first and flagged old past older_than_days (default 180), up to limit; outside a git repository, or for an untracked file, they come without an age and it says why; it writes nothing. ext_links is the opt-in check of the external http(s) links of those docs for link rot: it reads each distinct URL once (at most limit, up to 100) through the guarded web_fetch download and gives every one ok, dead (HTTP 404 or 410) or error (another status or a failure, not proof the page is gone) with its status and the places that write it; it uses the network only when you call it and writes nothing. diff_coverage reads the coverage report your own last test run wrote (Cobertura coverage.xml, lcov.info or coverage.py JSON, in the project root or a common report folder; it never runs tests or installs anything) and lists, per function, the lines changed since base (default HEAD, staged and unstaged included) that no executed line covers, with the report's modified date against the HEAD commit time and a stale warning; it says so plainly when no report is found, takes limit and writes nothing. history_secrets is the opt-in, bounded scan of git history for credential shapes: it reads the diffs of the newest commit_limit commits (default 500, up to 100000) for at most budget_seconds (default 20, up to 300) and lists the file, line, short commit hash and kind of each credential shape added or removed, never its value; a folder that is not a git repository gets a clear message; it takes limit and writes nothing. commit_check reviews the staged change (git diff --cached, not the working tree), also answering tests_to_run and untouched_by_tests for the staged files, with the notes the edit hook gives a finished diff (credentials, commented-out code, missing docstrings, duplicates, dependency advisories, link and edit notes), for edits the agent hook never saw (an IDE, hand edits, another agent); it writes nothing. review_tree gives the same review to the uncommitted working tree: the tracked files modified since HEAD, staged or not, read from disk (untracked, deleted and binary files are left out; the first 50 are reviewed and the rest is said), and says plainly when the tree is clean; it writes nothing and blocks nothing. commit_hook_install writes a git pre-commit hook in the project that prints that review to stderr at every commit and never blocks it (exit 0 always; a daemon that is down is one line, a check that fails is printed); it is opt-in, and refuses, naming what it found and changing nothing, when core.hooksPath is set, husky is used or a pre-commit that is not Smart Tool's exists; commit_hook_uninstall removes only that hook and puts back a backed-up hook that is not ours. With hook=pre-push (default pre-commit) both actions manage a git pre-push hook instead: at every push it prints to stderr the tests the pushed commits affect and the pr_impact summary against the commit the remote holds, never blocks the push, finds the service through its run file at run time, and refuses under the same conditions; commit_hook_install with hook=pre-push and docs=true also lists there the public functions of the pushed range that lack a docstring or the Feature line (the option is written into the hook; installing again without it writes the plain hook); links=true (pr_impact and that hook) reads the external links the diff adds, at most 10, over the network, and lists the ones that look dead (off by default). graph without symbol reads the indexed view: coverage, references and static calls in Java, Angular, Python, Go and JS/TS/JSX/TSX; includes HTML/CSS/Markdown references and TXT/DOCX coverage; with file_path, narrows to that file's symbols, imports and calls (lists capped by limit). inspect lists the files of a view_id; with file_path, returns only that file's chunks. usage shows consumption and reuse; docs lists public functions without a docstring (Python docstring, JSDoc, Javadoc, Go doc comment starting with the name; private, nested and override functions excluded) with coverage percent, excluding tests unless include_tests=true, for documenting a project that started without it; docs generate=true writes the documentation scope to docs/scope in the project in three levels tied to the code: technical pages by folder (an entry per public function anchored on path::name with signature, first doc line, layer, callers, calls and tests, plus a Mermaid flow by layer), functional.md (each entry point and the functions its flow reaches, by layer) and simple.md; the prose between the prose markers is kept by regeneration; docs write_prose=true writes the empty prose blocks with the Docs model of the setup (each paragraph checked against the code first) within about 40 s and says how many are left, call it again until none is; docs check=true reports anchors whose function changed signature or is gone and broken links; docs validate=true checks every claim of docs/scope against the code (anchors, links, line numbers, callers and tests, coverage, entry points, command-line options, prose names, counts, glossary, navigation, versions) and writes docs/scope/validation.md with pass/fail per check, the evidence, a score and the verdict (generate runs it too); each technical entry carries a Feature line naming the features whose flow reaches it and a marker with signature, body and docstring stamps, so check and validate also report a body or docstring changed under the same signature, and the chain check of validate fails when a technical entry and the functional overview do not name each other; the edit hook asks each public function's docstring to end with the line `Technical doc: docs/scope/technical/<page>.md#<anchor>` that links it to its entry (SMART_TOOL_DOCS=off in the environment turns the documentation checks off); with the Claude Code hook installed, at the end of each turn in a project with docs/scope the daemon rewrites, without a model, only the pages of the functions the turn changed; docs with symbol lists where that function is documented; layers declares the project's layers (ordered highest first, each with path globs and annotations): without layers it returns the saved rule or a suggestion read from folder names and annotations, with files, symbols and calls between layers (direction down or up); pass layers to preview a rule and the same layers with confirm=true to save it in the project (.smart-tool/layers.json); duplicates lists duplicated functions (identical, near-identical and semantic bodies, min_similarity default 0.90; below that most pairs measured were false positives), excluding tests unless include_tests=true; fix real duplicates; only dismiss with duplicates_dismiss (finding_id, reason=false_positive|intentional, note) what is not a duplicate or is a copy kept on purpose: the finding stays hidden until the code changes, and duplicates_restore reopens it; integration shows the MCP client, hook and tool usage metrics; install_hook_preview shows the change that would install the hook redirecting Grep/Read to smart_search and WebSearch/WebFetch to web_search/web_fetch in this session's client and returns a plan_id; install_hook writes it with that plan_id and confirm=true, with a backup, only after the user approves the change; search_limits saves the project's default top_k per block ({code, test, doc}, each 1-20, total at most 20); storage shows disk usage and views; pin_view protects a view; each view carries stale (not updated for 30 days, the test of the daily cleanup that removes them) and stale_bytes sums them; cleanup_preview and cleanup_commit remove selected views after confirmation; compare compares two stored views, without checkout or embeddings. register adds a folder; preview checks the scope; index/rebuild update; pause/cancel keep checkpoints; resume continues; policy picks on_search/eager; scope adjusts the scope; remove deletes only the local index. setup_audit (project_root) reports what Claude Code and Codex actually load for that folder (settings layers, plugins, hooks, MCP servers, skills, CLAUDE.md/AGENTS.md) and where they collide: hooks deciding on the same tool in parallel, missing hook scripts, silenced hooks, MCP servers down or offering duplicate tools, skill name and budget problems, AGENTS.md that only Codex reads, broken @imports; what could not be checked is listed as not verified; each finding carries its fix (the file to edit or the command to run), applied by the agent when the user agrees, never by Smart Tool; mode=last returns the stored report instead of auditing again. redirect_proposals (no project_root) lists the redirect patterns proposed from allowed searches, most matched first, with a guide; redirect_decide decides them by ids: accept, instruct (tip without blocking), reject, or remove an accepted one. junk (no project_root) lists the registered projects that were never projects: a personal, system, application-data or build folder, a subfolder of a repository or of another project, a folder of projects, or a folder that no longer exists (on a drive or share that is mounted); with confirm=true it unregisters them and deletes only their index files, and the manifest says what went. diagnostics (no project_root) writes one redacted local JSON file in the Smart Tool data folder (diagnostics subfolder) for a bug report and returns its path: the versions, the setup audit counts, the model failures and use, the web source health and quota and the last 200 lines of daemon.log and browser-fetch.log; API keys and tokens, the home path (replaced by ~), e-mail addresses and URLs are scrubbed, search queries, project folders and requesters are never collected, and nothing is sent anywhere (a part that cannot be read is named in the file and in the answer). A project is the folder where the session started, so smart_search and register refuse a folder that is not a project and index a new one only from the session that started in it. Jobs via smart_search_result.",
         "inputSchema": {
             "type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "layers", "affected_tests", "pr_impact", "pr_impact_comment", "hotspots", "dead_code", "import_cycles", "comments", "credentials", "links", "rename_preview", "release_notes", "release_check", "move_preview", "upgrade_preview", "unused_deps", "delete_preview", "commit_check", "review_tree", "assertless", "todo_age", "untested", "risky_functions", "ownership", "complexity", "api_breaks", "entry_points", "signature_preview", "doc_refs", "ext_links", "diff_coverage", "history_secrets", "commit_hook_install", "commit_hook_uninstall", "setup_audit", "redirect_proposals", "redirect_decide", "junk", "deps", "orphan_modules", "undocumented_env", "stack_trace", "call_path", "symbol_history", "agent_refs", "risky_calls", "env_unread", "risky_reach", "symbol_owner", "cli_undocumented", "config_unread"]},
+                "action": {"type": "string", "enum": ["list", "status", "register", "preview", "index", "rebuild", "pause", "cancel", "resume", "watch", "scope", "remove", "relocate", "probe", "policy", "inspect", "graph", "usage", "storage", "pin_view", "cleanup_preview", "cleanup_commit", "compare", "search_limits", "integration", "install_hook_preview", "install_hook", "duplicates", "duplicates_dismiss", "duplicates_restore", "docs", "layers", "affected_tests", "pr_impact", "pr_impact_comment", "hotspots", "dead_code", "import_cycles", "comments", "credentials", "links", "rename_preview", "release_notes", "release_check", "move_preview", "upgrade_preview", "unused_deps", "delete_preview", "commit_check", "review_tree", "assertless", "todo_age", "untested", "risky_functions", "ownership", "complexity", "api_breaks", "entry_points", "signature_preview", "doc_refs", "ext_links", "diff_coverage", "history_secrets", "commit_hook_install", "commit_hook_uninstall", "setup_audit", "redirect_proposals", "redirect_decide", "junk", "deps", "orphan_modules", "undocumented_env", "stack_trace", "call_path", "symbol_history", "agent_refs", "risky_calls", "env_unread", "risky_reach", "symbol_owner", "cli_undocumented", "config_unread", "web_sources", "diagnostics"]},
                 "ids": {"type": "array", "items": {"type": "string"}, "description": "redirect_decide: proposal ids from redirect_proposals (accepted ids for remove)"},
                 "decision": {"type": "string", "enum": ["accept", "instruct", "reject", "remove"], "description": "redirect_decide: accept redirects matching calls to smart_search; instruct lets them run with a tip naming smart_search; reject discards; remove deletes an accepted pattern"},
                 "finding_id": {"type": "string"},
@@ -512,6 +517,9 @@ TOOLS = [
                             "description": "mode=dossier only: also search the messages of the project's commits that have a body (hits with source git and id git:<hash>); the first read of a repository can take longer than timeout_ms"},
                 "decision_notes": {"type": "boolean", "default": False,
                                    "description": "mode=search only: append the project's decision notes (docs/research, the backlog, CLAUDE.md, AGENTS.md and commit messages) under decision_notes"},
+                "projects": {"anyOf": [{"type": "string", "enum": [cross_project_search.ALL]},
+                                       {"type": "array", "minItems": 1, "items": {"type": "string"}}],
+                             "description": "Search several registered projects in one call: \"all\" for every registered project, or a list of project roots. One section per project, labelled with its project; ranking stays inside each project's own index and sections are concatenated, never merged. A project with no index, or an index built with another embedding model than the current one, is not searched and its section says why (search it alone to build or re-embed it). With queries, every query runs in every project. mode=search only; project_root is then not searched unless it is in the list"},
                 "queries": {"type": "array", "minItems": 1, "maxItems": search_queries.MAX_QUERIES,
                             "items": {"type": "object", "additionalProperties": False, "properties": {
                                 "query_identifiers": {"type": "string"}, "query_comments": {"type": "string"},
@@ -674,7 +682,10 @@ TOOLS = [
             "epub per chapter in reading order. Use info_only first to size a large file and pick the pages you need. The path "
             "may also be an http(s) URL of a PDF, docx, pptx, xlsx, csv or epub file: it is downloaded the way web_fetch "
             "downloads (public addresses only, 5 MB cap), kept for 24 h and read the same way, with the same ranges; a URL "
-            "of a web page fails, read it with web_fetch. A scanned "
+            "of a web page fails, read it with web_fetch. With `query`, instead of guessing ranges, only the most "
+            "relevant pages, slides, sheets, parts or chapters for it come back (at most "
+            f"{document_read.QUERY_TOP_UNITS}, inside `range` when given, labelled with their numbers and in document order); "
+            "it needs the embedder and fails with that reason without one. A scanned "
             "PDF (no text layer) fails with that reason; there is no OCR. Not for plain text or code: use Read."
         ),
         "inputSchema": {
@@ -684,6 +695,7 @@ TOOLS = [
                 "range": {"type": "string", "description": "Pages, slides, parts, chapters or sheets to read: `3`, `3-5`, `7-` (to the end), `-4` (the first four) or a comma list like `1,4-6`; a sheet name also works for a workbook. Default: from the first one"},
                 "max_chars": {"type": "integer", "minimum": 1000, "maximum": document_read.MAX_CHARS_LIMIT, "default": document_read.DEFAULT_MAX_CHARS, "description": "Cap of the text returned (about four characters per token)"},
                 "info_only": {"type": "boolean", "default": False, "description": "Return only the facts (type, size, counts, estimated tokens), no text"},
+                "query": {"type": "string", "description": "What you are looking for: returns only the pages, slides, sheets, parts or chapters most relevant to it (within `range` when given) instead of reading from the start; needs the embedder"},
             },
             "required": ["path"],
             "additionalProperties": False,
@@ -1047,12 +1059,93 @@ indexer.NOTICE = _log
 _WEB_WARNINGS = contextvars.ContextVar("web_warnings", default=None)
 _WEB_TRACE = contextvars.ContextVar("web_trace", default=None)
 _WEB_ROWS = contextvars.ContextVar("web_rows", default=None)
+_WEB_SOURCES = contextvars.ContextVar("web_sources", default=None)
+_web_sources_lock = threading.Lock()
 
 
 def _web_trace(**fields):
     trace = _WEB_TRACE.get()
     if trace is not None:
         trace.update(fields)
+
+
+def _start_web_sources():
+    """Starts the record of which search sources answered and which dropped in this call; the copies of this
+    context (the second language, the pool callbacks) share it."""
+    sources = {"answered": set(), "dropped": {}}
+    _WEB_SOURCES.set(sources)
+    return sources
+
+
+def _drop_reason(tier_name, exc):
+    if isinstance(exc, (TierSkipped, browser_service_client.BrowserSkipped)):
+        text, prefix = str(exc), f"{tier_name}: "
+        return text[len(prefix):] if text.startswith(prefix) else text
+    if isinstance(exc, WebProviderRateLimited):
+        return "rate limited"
+    if isinstance(exc, browser_service_client.BrowserCaptcha):
+        return "captcha"
+    return "failed"
+
+
+def _is_no_hit(tier_name, exc):
+    """A source that answered with nothing (Wikipedia with no article, any tier with zero results) is not a source
+    that dropped."""
+    text = str(exc)
+    return text.startswith("zero results") or (tier_name == "wikipedia" and "No Wikipedia (" in text)
+
+
+def _quota_status(tier_name):
+    """The keyless quota state of a tier (see web_search_quota.status), or None when it has none."""
+    return web_search_quota.provider_status(tier_name)
+
+
+def _note_quota_reserve(tier_name):
+    sources = _WEB_SOURCES.get()
+    if sources is None or tier_name not in web_search_quota.WINDOWS:
+        return
+    state = _quota_status(tier_name)
+    if state and state["used"] >= int(state["cap"] * web_search_quota.RESERVE_FRACTION):
+        with _web_sources_lock:
+            sources.setdefault("reserve", {})[tier_name] = state
+
+
+def _quota_notice():
+    """One line for the tiers that answered while inside the last 20% of their free quota, or None."""
+    sources = _WEB_SOURCES.get()
+    if not sources or not sources.get("reserve"):
+        return None
+    with _web_sources_lock:
+        parts = [f"{tier} {state['used']} of {state['cap']} calls used {'today' if state['window'] == 'day' else 'this hour'}"
+                 for tier, state in sources["reserve"].items()]
+    return "Free quota running low: " + ", ".join(parts) + "."
+
+
+def _note_source(tier_name, exc=None, reason=None):
+    """Records one tier as answered (no `exc` and no `reason`) or dropped, with the reason the user will read."""
+    sources = _WEB_SOURCES.get()
+    if sources is None or (exc is not None and _is_no_hit(tier_name, exc)):
+        return
+    with _web_sources_lock:
+        if exc is None and reason is None:
+            sources["answered"].add(tier_name)
+        else:
+            sources["dropped"][tier_name] = reason or _drop_reason(tier_name, exc)
+
+
+def _degradation_notice():
+    """One line naming the sources that dropped in this call and how many answered, or None when none dropped.
+    A source that answered in either language is not reported as dropped."""
+    sources = _WEB_SOURCES.get()
+    if not sources:
+        return None
+    with _web_sources_lock:
+        answered = set(sources["answered"])
+        dropped = {tier: reason for tier, reason in sources["dropped"].items() if tier not in answered}
+    if not dropped:
+        return None
+    names = ", ".join(f"{tier} ({reason})" for tier, reason in dropped.items())
+    return f"Degraded web sources: {names}; {len(answered)} of {len(answered) + len(dropped)} sources answered."
 
 
 def _web_warn(message):
@@ -2000,6 +2093,8 @@ def _handle_smart_search(arguments):
     if mode != "search":
         raise ValueError("mode must be search or dossier.")
     arguments = {key: value for key, value in arguments.items() if key != "mode"}
+    if "projects" in arguments:
+        return _handle_project_search(arguments)
     if "queries" in arguments:
         return _handle_search_queries(arguments)
     want_notes = arguments.pop("decision_notes", False)
@@ -2047,6 +2142,38 @@ def _handle_search_queries(arguments):
     _metric("search_queries", queries=len(results), failed=failed, elapsed_s=round(time.monotonic() - started, 2))
     report = search_queries.render(results)
     if failed == len(results):
+        raise RuntimeError(report)
+    return report
+
+
+def _handle_project_search(arguments):
+    """smart_search with `projects`: each registered project through `_handle_smart_search`, one after the other, and the
+    per-project report of cross_project_search.render. A project that is skipped (no index, an index of another
+    embedding model, junk) or whose search fails never hides the others; the call fails with the report only when no
+    project answered."""
+    started = time.monotonic()
+    try:
+        plan = cross_project_search.expand(arguments)
+        if "queries" in arguments:
+            search_queries.expand({key: value for key, value in arguments.items() if key != "projects"})
+    except ValueError as exc:
+        _metric("reject", kind="projects", message=str(exc)[:200])
+        raise
+    results = []
+    for item in plan:
+        if item["skipped"]:
+            results.append({"label": item["label"], "status": "skipped", "reason": item["skipped"]})
+            continue
+        try:
+            results.append({"label": item["label"], "status": "ok", "text": _handle_smart_search(item["arguments"])})
+        except Exception as exc:
+            results.append({"label": item["label"], "status": "failed", "error": str(exc) or type(exc).__name__})
+    skipped = sum(result["status"] == "skipped" for result in results)
+    failed = sum(result["status"] == "failed" for result in results)
+    _metric("search_projects", projects=len(results), skipped=skipped, failed=failed,
+            elapsed_s=round(time.monotonic() - started, 2))
+    report = cross_project_search.render(results)
+    if skipped + failed == len(results):
         raise RuntimeError(report)
     return report
 
@@ -2630,6 +2757,20 @@ def _junk_action(arguments):
     return report
 
 
+def _web_sources_action(arguments):
+    """`web_sources`: the web search sources of the whole machine, read-only: the per-tier outcome counts of the recent
+    health log, the keyless quota state of the quota tiers, the requester rows cut to `limit` and the blocks by browser
+    identity from `web-identity.log` (per provider: blocked and recovered per identity, times all were refused)."""
+    limit = _parse_bounded_int(arguments.get("limit"), default=10, min_v=1, max_v=200, field_name="limit")
+    requesters = web_search_health.by_requester()
+    rows_total = len(requesters["rows"])
+    requesters["rows"] = requesters["rows"][:limit]
+    return {"tiers": web_search_health.by_tier(),
+            "quota": {tier: _quota_status(tier) for tier in web_search_quota.WINDOWS},
+            "requesters": {**requesters, "rows_total": rows_total},
+            "identity_blocks": web_identity.summary()}
+
+
 def _project_action(arguments):
     if not isinstance(arguments, dict):
         raise ValueError("Pass the action in a JSON object.")
@@ -2637,6 +2778,10 @@ def _project_action(arguments):
         return _redirect_action(arguments)
     if arguments.get("action") == "junk":
         return _junk_action(arguments)
+    if arguments.get("action") == "web_sources":
+        return _web_sources_action(arguments)
+    if arguments.get("action") == "diagnostics":
+        return diagnostics_bundle.write()
     if arguments.get("action") == "deps":
         root = arguments.get("project_root")
         if not isinstance(root, str) or not os.path.isdir(root):
@@ -3229,6 +3374,7 @@ def _run_search_script(executable, script_path, args, timeout_s):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         proc.wait(timeout=5)
         raise RuntimeError(f"timed out ({timeout_s}s)")
+    web_identity.record(web_identity.lines_in(stderr))
     if proc.returncode != 0:
         if script_path == web_search_adapters.EXTERNAL_SEARCH_SCRIPT and proc.returncode == 75:
             match = re.search(r"retry_after=(\d+)", stderr)
@@ -3380,9 +3526,7 @@ def _remember_site_results(query, tier_name, raw_results):
 
 
 def _provider_config_id(tier_name):
-    keys = config.load_config().get("api_keys") or {}
-    blob = keys.get(tier_name, "") if isinstance(keys, dict) else ""
-    return hashlib.sha256(str(blob).encode("utf-8")).digest()
+    return web_search_quota.config_id(tier_name)
 
 
 def _provider_circuit_wait(tier_name, config_id):
@@ -3404,6 +3548,9 @@ def _open_provider_circuit(tier_name, config_id, seconds):
             time.monotonic() + min(WEB_PROVIDER_CIRCUIT_MAX_S, max(WEB_PROVIDER_CIRCUIT_MIN_S, seconds)),
             config_id,
         )
+
+
+setup_ui.circuit_wait = lambda tier_name: _provider_circuit_wait(tier_name, _provider_config_id(tier_name))
 
 
 class TierSkipped(RuntimeError):
@@ -3435,12 +3582,16 @@ def _run_tier(tier_name, query, num, timeout_s=None):
     if "service_engine" in adapter:
         timeout = adapter["timeout_s"] if timeout_s is None else min(adapter["timeout_s"], timeout_s)
         return _run_browser_tier(tier_name, adapter, query, num, timeout)
-    config_id = None
+    config_id, keyed = None, False
     if tier_name in config.WEB_PROVIDER_NAMES:
         config_id = _provider_config_id(tier_name)
         wait = _provider_circuit_wait(tier_name, config_id)
         if wait:
             raise TierSkipped(f"{tier_name}: quota backoff for {int(wait) + 1}s more")
+        keyed = config.provider_key_status(tier_name) == "configured"
+        reason = web_search_quota.admit(tier_name, config_id, keyed)
+        if reason:
+            raise TierSkipped(f"{tier_name}: {reason}")
     args = [query, "--num", str(num), *adapter["extra_args"]]
     timeout = adapter["timeout_s"] if timeout_s is None else min(adapter["timeout_s"], timeout_s)
     try:
@@ -3448,6 +3599,7 @@ def _run_tier(tier_name, query, num, timeout_s=None):
     except WebProviderRateLimited as exc:
         if config_id is not None:
             _open_provider_circuit(tier_name, config_id, exc.retry_after)
+            web_search_quota.note_rate_limit(tier_name, config_id, keyed=keyed)
         raise
     if not raw_results:
         raise RuntimeError("zero results")
@@ -3496,6 +3648,22 @@ def _merge_diverse_results(collected, num, boost_domains=None):
     return merged
 
 
+def _tiers_to_skip(tiers):
+    """The fan-out tiers to leave out of this call because they keep failing (see web_search_health.tripped), as
+    {tier: reason the user reads}. Never every tier: when all of them are tripped (the network itself is down) all run,
+    which is also how a source that recovered is noticed. A health log that cannot be read skips nothing and says so
+    in the daemon log."""
+    try:
+        tripped = web_search_health.tripped(tiers)
+    except Exception as exc:
+        _log(f"web source health unreadable, nothing skipped: {type(exc).__name__}: {exc}")
+        return {}
+    if len(tripped) >= len(tiers):
+        return {}
+    return {tier: f"skipped: failed {info['streak']} times in a row, tried again in {max(1, round(info['retry_in_s'] / 60))} min"
+            for tier, info in tripped.items()}
+
+
 def _fan_out_web_search(query, num, budget_s=None, site_domains=()):
     # Dispara todo o grupo `fan_out=True` de uma vez em WEB_SEARCH_EXECUTOR (pool
     # compartilhado, nunca fechado) em vez de num ThreadPoolExecutor local: um `with`
@@ -3504,7 +3672,13 @@ def _fan_out_web_search(query, num, budget_s=None, site_domains=()):
     # rodando sozinho em background (só telemetria, via done_callback) e a resposta
     # sai sem esperar por ele.
     futures = {}
-    for tier_name in web_search_adapters.FAN_OUT_TIERS:
+    tiers = web_search_adapters.tiers_for_query(query)
+    skipped = _tiers_to_skip(tiers)
+    for tier_name, reason in skipped.items():
+        _note_source(tier_name, reason=reason)
+    for tier_name in tiers:
+        if tier_name in skipped:
+            continue
         fut = WEB_SEARCH_EXECUTOR.submit(_run_tier, tier_name, query, num)
         futures[fut] = tier_name
     who = requester.current()  # the callbacks run in the pool's threads, outside this request's context
@@ -3529,13 +3703,22 @@ def _fan_out_web_search(query, num, budget_s=None, site_domains=()):
         tier_name = futures[fut]
         try:
             raw_results = fut.result()
+            _note_source(tier_name)
+            try:
+                _note_quota_reserve(tier_name)
+            except Exception as quota_exc:
+                _log(f"quota notice skipped for {tier_name}: {type(quota_exc).__name__}: {quota_exc}")
             raw_results = _filter_site_results(raw_results, site_domains)
             if not raw_results:
                 continue
             collected.append((tier_name, raw_results))
             _remember_site_results(query, tier_name, raw_results)
         except Exception as exc:
+            _note_source(tier_name, exc)
             errors.append(_sanitize_text(f"{tier_name}: {type(exc).__name__}: {exc}"))
+    for fut, tier_name in futures.items():
+        if fut not in done:
+            _note_source(tier_name, reason="no answer in time")
     return collected, errors
 
 
@@ -3640,6 +3823,7 @@ def _handle_web_search_body(arguments):
 
     warnings = []
     _WEB_WARNINGS.set(warnings)
+    _start_web_sources()
     _WEB_TRACE.set({"started": time.monotonic(), "cache": "fresh", "probe": False,
                     "bilingual": _normalized(query_en) != _normalized(query)})
     problem = _gateway_problem()
@@ -3691,8 +3875,31 @@ def _handle_web_search_body(arguments):
     return _quick_output(_annotate_quick_results(results, classification), warnings)
 
 
+def _to_yaml_dated(rows):
+    """`_to_yaml` of the search result rows with the citation date as a YAML comment, `# (accessed YYYY-MM-DD)`, at the
+    end of each `url:` line: the day the result was retrieved (`searched_at` for a result served from the research cache,
+    today for a fresh one). A comment keeps the parsed data identical."""
+    today = datetime.date.today().isoformat()
+    lines = []
+    for row in rows:
+        searched = str(row.get("searched_at") or "")[:10]
+        accessed = searched if re.fullmatch(r"\d{4}-\d{2}-\d{2}", searched) else today
+        lines += [f"{line}  # (accessed {accessed})" if line[2:].startswith("url:") else line
+                  for line in _to_yaml([row]).rstrip("\n").split("\n")]
+    return "\n".join(lines) + "\n"
+
+
 def _quick_output(rows, warnings):
     _WEB_ROWS.set(rows)
+    notice = _degradation_notice()
+    if notice and notice not in warnings:
+        warnings.append(notice)
+        _log(notice)
+        _web_trace(degraded=True)
+    quota_notice = _quota_notice()
+    if quota_notice and quota_notice not in warnings:
+        warnings.append(quota_notice)
+        _log(quota_notice)
     if not rows:
         web_fetch.mark_failed(WEB_SEARCH_FAILED_KEY)
     trace = _WEB_TRACE.get()
@@ -3700,7 +3907,7 @@ def _quick_output(rows, warnings):
         started = trace.pop("started")
         _metric("web_search", warnings=len(warnings), elapsed_s=round(time.monotonic() - started, 2), **trace)
     lines = ["results:" if rows else "results: []"]
-    lines += ["  " + line for line in _to_yaml(rows).rstrip("\n").split("\n")] if rows else []
+    lines += ["  " + line for line in _to_yaml_dated(rows).rstrip("\n").split("\n")] if rows else []
     if warnings:
         lines += ["warnings:"] + [f"  - {_yaml_scalar(warning)}" for warning in warnings]
     return "\n".join(lines) + "\n"
@@ -3748,6 +3955,19 @@ def _memory_snapshot():
         return []
 
 
+def _enabled_http_fallbacks():
+    """The HTTP fallback tiers worth trying: those that need the user's own key or instance only when it is set. A key
+    that is saved but cannot be read is reported as a dropped source instead of being skipped silently."""
+    enabled = []
+    for name in web_search_adapters.HTTP_FALLBACK_TIERS:
+        status = config.provider_key_status(name) if name in config.WEB_PROVIDER_KEY_REQUIRED else "configured"
+        if status == "unreadable":
+            _note_source(name, reason="the saved key cannot be read; enter it again in the setup screen")
+        elif status == "configured":
+            enabled.append(name)
+    return enabled
+
+
 def _search_web_once(query, num, scope, deadline=None, assess_semantic=False,
                      site_domains=None, allow_recall=True, memory_before=None, single_browser=False):
     """Busca uma rodada; amplia fontes só quando o resultado segue insuficiente."""
@@ -3785,7 +4005,7 @@ def _search_web_once(query, num, scope, deadline=None, assess_semantic=False,
 
     # Chave opcional: os adaptadores escolhem keyless quando nenhuma foi configurada.
     # Provedores com cota por IP não participam do fan-out em toda chamada.
-    for tier_name in web_search_adapters.HTTP_FALLBACK_TIERS:
+    for tier_name in _enabled_http_fallbacks():
         try:
             left = _research_time_left(deadline)
         except TimeoutError:
@@ -3800,8 +4020,10 @@ def _search_web_once(query, num, scope, deadline=None, assess_semantic=False,
                 raise RuntimeError("zero results in the requested domain")
         except Exception as exc:
             _record_tier_failure(tier_name, exc)
+            _note_source(tier_name, exc)
             errors.append(_sanitize_text(f"{tier_name}: {type(exc).__name__}: {exc}"))
             continue
+        _note_source(tier_name)
         _record_tier_health(tier_name, success=True)
         _remember_site_results(query, tier_name, raw_results)
         collected.insert(0, (tier_name, raw_results))
@@ -3834,8 +4056,10 @@ def _search_web_once(query, num, scope, deadline=None, assess_semantic=False,
                 raise RuntimeError("zero results in the requested domain")
         except Exception as exc:
             _record_tier_failure(tier_name, exc)
+            _note_source(tier_name, exc)
             errors.append(_sanitize_text(f"{tier_name}: {type(exc).__name__}: {exc}"))
             continue
+        _note_source(tier_name)
         _record_tier_health(tier_name, success=True)
         _remember_site_results(query, tier_name, raw_results)
         collected.insert(0, (tier_name, raw_results))
@@ -4152,6 +4376,9 @@ def _record_tier_health(tier_name, success, outcome=None, who=None):
 
 def _record_tier_failure(tier_name, exc, who=None):
     """Health entry for a failed tier call, keeping a 429, a captcha and a quota pause apart from other errors."""
+    if _is_no_hit(tier_name, exc):
+        _record_tier_health(tier_name, True, None, who)
+        return
     if isinstance(exc, (TierSkipped, browser_service_client.BrowserSkipped)):
         outcome = "paused"
     elif isinstance(exc, WebProviderRateLimited):
@@ -4662,14 +4889,16 @@ def _render_page(url, deadline):
     return markdown
 
 
-def _web_fetch_embed(texts, deadline):
-    """Vectors for the pieces of a long page and the prompt, with the pieces cached per embedding model. Fails loudly
-    without an embedding model: a long page is never cut back to its start in silence."""
+def _web_fetch_embed(texts, deadline, for_document=False):
+    """Vectors for the pieces of a long page (or, with `for_document`, of a document read with a `query`) and the
+    prompt, with the pieces cached per embedding model. Fails loudly without an embedding model: a long page is never
+    cut back to its start in silence, nor a query answered without ranking."""
     model = local_embedder.resolve(config.load_config(), None)
     if not model or model == indexer.LEXICAL_MODEL:
-        raise RuntimeError("This page is longer than 60,000 characters and choosing its relevant parts needs an "
-                           "embedder (the embeddings home running, or the gateway's embedding_model), which is not "
-                           "available")
+        raise RuntimeError(("read_document with `query`" if for_document else
+                            "This page is longer than 60,000 characters and choosing its relevant parts")
+                           + " needs an embedder (the embeddings home running, or the gateway's embedding_model), "
+                           "which is not available")
     try:
         token = model_client.get_token()
         probe = _embed(model, texts[-1:], token, deadline=deadline)
@@ -4682,8 +4911,10 @@ def _web_fetch_embed(texts, deadline):
         finally:
             cache.db.close()
     except Exception as exc:
-        raise RuntimeError(f"This page is longer than 60,000 characters and the embedding model ({model}) that picks "
-                           f"its relevant parts failed: {type(exc).__name__}: {exc}"[:400]) from None
+        picked = ("read_document with `query`: the embedding model ({model}) that picks the relevant pages" if for_document
+                  else "This page is longer than 60,000 characters and the embedding model ({model}) that picks its "
+                  "relevant parts")
+        raise RuntimeError(f"{picked.format(model=model)} failed: {type(exc).__name__}: {exc}"[:400]) from None
     return pieces + probe
 
 
@@ -4725,7 +4956,11 @@ def _handle_web_fetch(arguments):
            if pieces else "")
     if page["truncated"]:
         cut += f"; only the first {web_fetch.PAGE_STORE_MAX_CHARS:,} characters were kept"
-    return _sanitize_text(f"Source: {page['final_url']} (read at {read_at}, {origin}{cut})\n\n{text}")
+    clause, diff_lines = web_fetch.change_note(page["since"]) if page.get("since") else ("", [])
+    warning = untrusted_content.notice("\n".join([selected, *diff_lines]))
+    head = ([f"Source: {page['final_url']} (read at {read_at}, {origin}{cut}{clause})"] + ([warning] if warning else [])
+            + diff_lines)
+    return _sanitize_text("\n".join(head) + f"\n\n{text}")
 
 
 def _upgrade_preview(root, arguments, limit):
@@ -5040,28 +5275,36 @@ def _handle_read_document(arguments):
     oversized file, a password, a scanned PDF, a corrupt or hostile package and a range outside the document; one metric
     row records the kind, the estimated tokens of the whole text and of the answer. A `path` that starts with http:// or
     https:// is downloaded and read by document_url instead (the kind comes from the URL path: no query or credentials
-    reach the metric); every other value takes the file path above."""
+    reach the metric); every other value takes the file path above. A `query` returns only the units most similar to it
+    (see document_read.read) and fails loudly, like a long page of web_fetch, when no embedder works. Text that holds
+    prompt-injection candidates (see untrusted_content) gets one warning line above the `---` line; the text is not
+    changed."""
     started = time.monotonic()
-    unknown = sorted(set(arguments) - {"path", "range", "max_chars", "info_only"})
+    unknown = sorted(set(arguments) - {"path", "range", "max_chars", "info_only", "query"})
     if unknown:
         raise ValueError(f"read_document does not take {', '.join(unknown)}")
     path = arguments.get("path")
     from_url = document_url.is_url(path)
+    ranked = ({"query": arguments["query"],
+               "embed": lambda texts: _web_fetch_embed(texts, started + WEB_FETCH_TIMEOUT_S, for_document=True)}
+              if arguments.get("query") not in (None, "") else {})
     try:
         if from_url:
             text = document_url.read(path, arguments.get("range") or None,
                                      arguments.get("max_chars", document_read.DEFAULT_MAX_CHARS),
-                                     bool(arguments.get("info_only")), started + WEB_FETCH_TIMEOUT_S)
+                                     bool(arguments.get("info_only")), started + WEB_FETCH_TIMEOUT_S, **ranked)
         else:
             text = document_read.read(path, arguments.get("range") or None,
                                       arguments.get("max_chars", document_read.DEFAULT_MAX_CHARS),
-                                      bool(arguments.get("info_only")))
+                                      bool(arguments.get("info_only")), **ranked)
     except Exception as exc:
         _metric("read_document", error=type(exc).__name__, elapsed_s=round(time.monotonic() - started, 2))
         raise
     _metric("read_document", kind=document_url.extension(path) if from_url else os.path.splitext(str(path))[1].lower(),
             answer_tokens=document_read.estimate_tokens(text), elapsed_s=round(time.monotonic() - started, 2))
-    return _sanitize_text(text)
+    head, separator, body = text.partition("\n---\n")
+    warning = untrusted_content.notice(body) if separator else ""
+    return _sanitize_text(f"{head}\n{warning}{separator}{body}" if warning else text)
 
 
 def _handle_read_document_many(arguments):
@@ -5154,7 +5397,7 @@ def _dispatch_tool_call(params, session_id=None):
                 # de erro de um proxy externo) até este ponto sem ter passado por
                 # sanitização própria do handler.
                 result = _tool_result(_sanitize_text(str(exc)), is_error=True)
-        warning = model_health.warning_text(failures, setup_ui.setup_origin())
+        warning = model_health.warning_text(failures, setup_ui.setup_origin()) if failures else ""
         if warning:
             result["content"][0]["text"] += _sanitize_text(warning)
         notice = _project_notice(name, arguments)
@@ -5254,6 +5497,7 @@ _SETUP_SAVES = {
     "/setup/models": setup_ui.handle_models_save,
     "/setup/models/upgrade": setup_ui.handle_upgrade_action,
     "/setup/providers": setup_ui.handle_providers_save,
+    "/setup/web-search/probe": setup_ui.handle_web_sources_probe,
     "/setup/embedder": setup_ui.handle_embedder_save,
     "/setup/integration": setup_ui.handle_integration_save,
     "/setup/gateway": setup_ui.handle_gateway_save,
@@ -5752,6 +5996,12 @@ def main():
             _log(f"port {_BOUND_PORT} written to {path}")
     except (OSError, ValueError) as exc:
         _log(f"clients not pointed to port {_BOUND_PORT}: {type(exc).__name__}: {exc}")
+    try:
+        moved = client_hooks.migrate_legacy("claude")
+        if moved["changed"]:
+            _log(f"{moved['migrated']} old http hook entr(ies) in {moved['file']} are commands now (backup {moved['backup']})")
+    except (OSError, ValueError, RuntimeError) as exc:
+        _log(f"old http hook entries not migrated: {type(exc).__name__}: {exc}")
     atexit.register(BROWSER_SERVICE.close)
     atexit.register(browser_bridge.BRIDGE.stop)
     threading.Thread(target=_heal_browser_control, daemon=True).start()

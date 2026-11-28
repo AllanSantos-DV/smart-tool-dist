@@ -57,11 +57,20 @@ def _outcome(future):
         return {"ok": False, "error": str(exc) or type(exc).__name__}
 
 
-def render(results):
-    """The text the agent reads: a count line, then one numbered block per URL with its answer or `ERROR: reason`."""
+def render_batch(tool, noun, done, results, label):
+    """The text the agent reads for a batch tool: a count line, then one numbered block per item with its text or
+    `ERROR: reason`.
+
+    Parameters: tool (name in the count line), noun (what the items are, plural), done (past participle of a success),
+    results ([{"ok", "text" or "error", ...}] in order), label (key of each result that names its block)."""
     failed = sum(not result["ok"] for result in results)
-    blocks = [f"web_fetch_many: {len(results)} URLs, {len(results) - failed} read, {failed} failed."]
+    blocks = [f"{tool}: {len(results)} {noun}, {len(results) - failed} {done}, {failed} failed."]
     for number, result in enumerate(results, 1):
         body = result["text"] if result["ok"] else f"ERROR: {result['error']}"
-        blocks.append(f"[{number}/{len(results)}] {result['url']}\n{body}")
+        blocks.append(f"[{number}/{len(results)}] {result[label]}\n{str(body).rstrip()}")
     return "\n\n".join(blocks)
+
+
+def render(results):
+    """The text the agent reads: a count line, then one numbered block per URL with its answer or `ERROR: reason`."""
+    return render_batch("web_fetch_many", "URLs", "read", results, "url")

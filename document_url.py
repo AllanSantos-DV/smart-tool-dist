@@ -96,12 +96,15 @@ def download(url, deadline):
     return path
 
 
-def read(url, range_spec, max_chars, info_only, deadline):
+def read(url, range_spec, max_chars, info_only, deadline, query=None, embed=None):
     """The answer of read_document for an http(s) URL: the file downloaded (or kept from a recent read) and read by
     document_read, with the URL, without its query and credentials, on the first line.
 
     Parameters: as document_read.read, with the URL for the path and the deadline of the download. Returns: the text.
-    Raises: as download and document_read.read."""
+    Raises: as download and document_read.read.
+
+    Technical doc: docs/scope/technical/_root.md#document_url.py::read"""
     label = shown(url)
     document_read.check_max_chars(max_chars)
-    return document_read.read(download(url, deadline), range_spec, max_chars, info_only, label)
+    document_read.check_query(query)
+    return document_read.read(download(url, deadline), range_spec, max_chars, info_only, label, query, embed)

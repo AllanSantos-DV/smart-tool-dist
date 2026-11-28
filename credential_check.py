@@ -36,3 +36,18 @@ def review(before, after):
                 findings.append({"line": number, "kind": kind})
                 break
     return findings
+
+
+def redact(text):
+    """`text` with every credential of the shapes `review` knows replaced by `<redacted: kind>`, line by line.
+
+    Unlike `review` it does not skip lines that say they are an example: a copy that hides one secret too many costs
+    nothing, one that lets a secret through does. Parameters: text (str). Returns: the redacted str.
+
+    Technical doc: docs/scope/technical/_root.md#credential_check.py::redact"""
+    lines = []
+    for line in text.split("\n"):
+        for kind, pattern in _PATTERNS:
+            line = pattern.sub(f"<redacted: {kind}>", line)
+        lines.append(line)
+    return "\n".join(lines)

@@ -22,6 +22,8 @@ _LOCK = threading.Lock()
 
 
 OUTCOMES = ("ok", "failed", "rate_limited", "captcha", "paused")
+BREAKER_STREAK = 5
+BREAKER_RECOVERY_S = 600
 
 
 def record(tier_name, success, outcome=None, requester=None):
@@ -128,3 +130,49 @@ def summary_for_tiers(tier_names, window=DEFAULT_WINDOW):
             successes = sum(1 for r in records if r.get("success"))
             summary[name] = successes / len(records)
     return summary
+
+
+def tripped(tier_names, now=None, streak=BREAKER_STREAK, recovery_s=BREAKER_RECOVERY_S):
+    """The tiers that keep failing: `streak` calls in a row ended in a plain failure and the last one is less than
+    `recovery_s` ago. Read from the same log as everything else, so there is no state to reset: once the window has
+    passed the tier is called again, and one more failure starts another window while a success clears the streak.
+    A pause does not count and does not break the streak; a success, a rate limit or a captcha breaks it (those have
+    their own pauses).
+    Returns: dict tier -> {"streak": int, "retry_in_s": float} for the tripped tiers only.
+    """
+    now = time.time() if now is None else now
+    records = _read_recent_records()
+    result = {}
+    for name in tier_names:
+        count, last_ts = 0, None
+        for entry in reversed(records):
+            if entry.get("tier") != name or entry.get("outcome") == "paused":
+                continue
+            if (entry.get("outcome") or ("ok" if entry.get("success") else "failed")) != "failed":
+                break
+            last_ts = last_ts or entry.get("ts")
+            count += 1
+        if count >= streak and last_ts is not None and now - last_ts < recovery_s:
+            result[name] = {"streak": count, "retry_in_s": recovery_s - (now - last_ts)}
+    return result
+
+
+def by_tier():
+    """The recent web search calls counted per tier: one count per outcome and the success rate.
+
+    The rate is ok calls over the calls that were made, so a self-imposed pause (paused) is not a miss. A tier with
+    only paused calls has no rate. A record with an outcome `record` would not write fails loud.
+    Returns: dict tier -> {"ok", "failed", "rate_limited", "captcha", "paused", "success_rate"}.
+    """
+    counts = {}
+    for entry in _read_recent_records():
+        outcome = entry.get("outcome") or ("ok" if entry.get("success") else "failed")
+        if outcome not in OUTCOMES:
+            raise ValueError(f"Unknown web search outcome in {HEALTH_PATH}: {outcome}")
+        counts.setdefault(entry.get("tier"), dict.fromkeys(OUTCOMES, 0))[outcome] += 1
+    table = {}
+    for tier in sorted(counts, key=str):
+        row = counts[tier]
+        made = sum(row.values()) - row["paused"]
+        table[tier] = {**row, "success_rate": round(row["ok"] / made, 3) if made else None}
+    return table

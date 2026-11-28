@@ -1,7 +1,7 @@
 """Downloads a file in HTTP Range requests of CHUNK_BYTES, each on a new connection, resuming from the last byte
 received when a connection drops or stalls. Some networks (proxies, TLS inspection) cut every connection after a few
-hundred MB, so a single long transfer can never finish there. It gives up only after MAX_IDLE_ATTEMPTS attempts in a
-row without a single new byte. Standard library only: on Windows urllib trusts the system certificate store, including
+hundred MB, so a single long transfer can never finish there. It gives up after MAX_IDLE_ATTEMPTS attempts in a
+row without a single new byte, or when the optional `deadline` (a time.monotonic() value) passes. Standard library only: on Windows urllib trusts the system certificate store, including
 a corporate inspection CA, and honors HTTPS_PROXY."""
 import http.client
 import time
@@ -25,11 +25,17 @@ def _open(url, start, end, timeout):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
+def _check_deadline(url, deadline, done):
+    if deadline is not None and time.monotonic() > deadline:
+        raise DownloadError(f"{url} did not finish within its time limit; stopped at {done // 1048576} MB.")
+
+
 def download(url, out, progress=None, chunk_bytes=CHUNK_BYTES, timeout=TIMEOUT_S, attempts=MAX_IDLE_ATTEMPTS,
-             sleep=time.sleep):
+             sleep=time.sleep, deadline=None):
     """Writes url into the seekable binary file out and returns its size; progress(done, total) after every read."""
     done, total, idle, restarts = 0, None, 0, 0
     while total is None or done < total:
+        _check_deadline(url, deadline, done)
         end = done + chunk_bytes - 1 if total is None else min(done + chunk_bytes, total) - 1
         before = done
         try:
@@ -50,6 +56,7 @@ def download(url, out, progress=None, chunk_bytes=CHUNK_BYTES, timeout=TIMEOUT_S
                     raise DownloadError(f"{url} answered HTTP {response.status} to a Range request.")
                 out.seek(done)
                 while data := response.read1(READ_BYTES):
+                    _check_deadline(url, deadline, done)
                     out.write(data)
                     done += len(data)
                     if progress:

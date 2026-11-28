@@ -15,6 +15,8 @@ cauda de latência; docs/BACKLOG.md).
 """
 import math
 import codecs
+import datetime
+import difflib
 import http.client
 import ipaddress
 import json
@@ -24,9 +26,12 @@ import threading
 import time
 import urllib.parse
 
+import config
 import document_text
 import model_client
 import research_cache
+import version
+import web_identity
 
 CACHE_NAMESPACE = "web_fetch"
 PAGE_TTL_S = 86400
@@ -34,6 +39,8 @@ PAGE_MAX_CHARS = 60_000
 PAGE_STORE_MAX_CHARS = 1_000_000
 SELECT_BUDGET_CHARS = 15_000
 CHUNK_CHARS = 2_000
+DIFF_MAX_LINES = 20
+DIFF_LINE_CHARS = 160
 PAGE_FORMAT = 2
 MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024
 PDF_INTERACTIVE_TIMEOUT_S = 30  # Override of document_text.PDF_TIMEOUT_S: a person waits for this answer, the indexer does not.
@@ -52,8 +59,15 @@ OFFICE_TYPES = {"application/vnd.openxmlformats-officedocument.wordprocessingml.
 GENERIC_BINARY_TYPES = ("application/octet-stream", "application/zip", "binary/octet-stream")
 TEXT_TYPES = ("text/plain", "text/markdown", "text/x-markdown", "application/json", "text/csv", "application/xml",
               "text/xml")
-USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-              "Chrome/140.0 Safari/537.36")
+DEFAULT_IDENTITY = "chrome-win"
+BLOCK_RETRY_DELAY_S = 0.4
+REFUSAL_STATUSES = (403, 429)
+PROJECT_URL = "https://github.com/AllanSantos-DV/smart-tool"
+# Wikimedia's User-Agent policy (foundation.wikimedia.org, Policy:Wikimedia_Foundation_User-Agent_Policy) asks bots for a
+# descriptive agent with contact information and treats a browser's agent used by a bot as malicious.
+WIKIMEDIA_DOMAINS = ("wikipedia.org", "wikimedia.org", "mediawiki.org", "wikidata.org", "wiktionary.org",
+                     "wikibooks.org", "wikiquote.org", "wikisource.org", "wikinews.org", "wikiversity.org",
+                     "wikivoyage.org", "wikifunctions.org")
 ANSWER_SYSTEM = (
     "You answer a request about one web page using ONLY the page content provided. Cover every item the request "
     "asks for. Keep exact names, versions, numbers, prices, flags, code and URLs; quote the exact lines when the "
@@ -153,7 +167,19 @@ def _left(deadline):
     return left
 
 
-def _get(url, deadline):
+def is_wikimedia(host):
+    """Whether `host` is a Wikimedia project domain or one of its subdomains."""
+    host = (host or "").lower()
+    return any(host == domain or host.endswith("." + domain) for domain in WIKIMEDIA_DOMAINS)
+
+
+def _wikimedia_user_agent():
+    return version.user_agent(config.load_config().get("contact") or PROJECT_URL)
+
+
+def _get(url, deadline, identity=None):
+    """One GET. `identity` (a web_identity entry) sets the browser headers; Wikimedia hosts always get the
+    descriptive agent instead."""
     target = _target(url)
     if target is None:
         raise FetchError(f"URL rejected (internal, reserved or invalid network target): {url}")
@@ -162,8 +188,11 @@ def _get(url, deadline):
     conn = cls(parsed.hostname, port, address, min(HTTP_TIMEOUT_S, _left(deadline)))
     path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
     try:
-        conn.request("GET", path, headers={"User-Agent": USER_AGENT, "Accept-Language": "en,pt-BR;q=0.8",
-                                           "Accept": "text/markdown, text/html;q=0.9, text/plain;q=0.8, */*;q=0.5"})
+        wanted = {"Accept-Language": "en,pt-BR;q=0.8",
+                  "Accept": "text/markdown, text/html;q=0.9, text/plain;q=0.8, */*;q=0.5"}
+        headers = ({"User-Agent": _wikimedia_user_agent(), **wanted} if is_wikimedia(parsed.hostname)
+                   else web_identity.request_headers(identity or web_identity.load_identities()[0], **wanted))
+        conn.request("GET", path, headers=headers)
         sock = conn.sock
         response = conn.getresponse()
         if response.status in (301, 302, 303, 307, 308):
@@ -187,11 +216,45 @@ def _get(url, deadline):
         conn.close()
 
 
+def _get_rotating(url, deadline):
+    """`_get` that answers a 403 or 429 by retrying with other coherent browser identities; the refusal is raised once
+    the identities are used up. Wikimedia hosts are never rotated: their policy wants one honest, descriptive agent."""
+    host = urllib.parse.urlsplit(url).hostname or ""
+    provider = f"web_fetch/{host}"
+    if is_wikimedia(host):
+        try:
+            return _get(url, deadline)
+        except FetchError as exc:
+            if exc.status in REFUSAL_STATUSES:
+                web_identity.record([web_identity.format_line(provider, "descriptive", f"HTTP {exc.status}", "blocked")])
+            raise
+    tried = []
+    for identity in web_identity.attempt_order(first=DEFAULT_IDENTITY):
+        if tried:
+            time.sleep(min(BLOCK_RETRY_DELAY_S, max(0, _left(deadline) - 1)))
+        try:
+            result = _get(url, deadline, identity)
+        except FetchError as exc:
+            if exc.status not in REFUSAL_STATUSES:
+                raise
+            refused = exc
+            tried.append(identity["name"])
+            web_identity.record([web_identity.format_line(provider, identity["name"], f"HTTP {exc.status}", "blocked")])
+            continue
+        if tried:
+            web_identity.record([web_identity.format_line(provider, identity["name"],
+                                                          f"after {', '.join(tried)} blocked", "recovered")])
+        return result
+    web_identity.record([web_identity.format_line(provider, tried[-1], f"all {len(tried)} identities blocked",
+                                                  "exhausted")])
+    raise refused
+
+
 def fetch_http(url, deadline):
     """GET with redirects followed by hand (every hop re-validated). Returns (final_url, content_type, charset, body)."""
     current = url
     for _ in range(MAX_REDIRECTS + 1):
-        status, location, headers, body = _get(current, deadline)
+        status, location, headers, body = _get_rotating(current, deadline)
         if headers is None:
             if not location:
                 raise FetchError(f"HTTP {status} without a target at {current}")
@@ -258,13 +321,51 @@ def _extract_markdown(body, url):
                                include_formatting=True, url=url) or ""
 
 
+def compare(old, new, read_at):
+    """How a page differs from its previous read, by line (difflib.unified_diff, no context lines).
+
+    Parameters: old and new (the two page texts), read_at (epoch seconds of the previous read). Returns: a dict with
+    `read_at`, `changed`, the `added` and `removed` line counts and `diff`, every changed line in page order with its
+    `+` or `-` (the file and hunk headers left out).
+
+    Technical doc: docs/scope/technical/_root.md#web_fetch.py::compare"""
+    lines = list(difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0))[2:]
+    diff = [line for line in lines if not line.startswith("@@")]
+    return {"read_at": read_at, "changed": bool(diff), "added": sum(line.startswith("+") for line in diff),
+            "removed": sum(line.startswith("-") for line in diff), "diff": diff}
+
+
+def change_note(since):
+    """What the answer says about a page already read before: the clause for its Source line and the short diff under it.
+
+    Parameters: since (the dict of compare). Returns: (clause such as `; changed since the previous read at
+    2026-11-26 14:03 (+2 -1 lines)` or `; unchanged since ...`, the lines of the diff block: a title and at most
+    DIFF_MAX_LINES changed lines of at most DIFF_LINE_CHARS characters; none when the page is unchanged).
+
+    Technical doc: docs/scope/technical/_root.md#web_fetch.py::change_note"""
+    stamp = datetime.datetime.fromtimestamp(since["read_at"]).strftime("%Y-%m-%d %H:%M")
+    if not since["changed"]:
+        return f"; unchanged since the previous read at {stamp}", []
+    total = len(since["diff"])
+    size = f"{total} lines" if total <= DIFF_MAX_LINES else f"first {DIFF_MAX_LINES} of {total} lines"
+    return (f"; changed since the previous read at {stamp} (+{since['added']} -{since['removed']} lines)",
+            [f"Changes since the previous read (unified diff, {size}):"]
+            + [line[:DIFF_LINE_CHARS] for line in since["diff"][:DIFF_MAX_LINES]])
+
+
 def read_page(url, deadline, render):
-    """Page text (Markdown) from the 24 h cache, HTTP + trafilatura, or `render(url, deadline)` when HTTP comes thin."""
+    """Page text (Markdown) from the 24 h cache, HTTP + trafilatura, or `render(url, deadline)` when HTTP comes thin.
+    A page downloaded again while an older copy of the same URL is still in the cache carries `since`, the compare of
+    the two texts.
+
+    Technical doc: docs/scope/technical/_root.md#web_fetch.py::read_page"""
     url = normalize(url)
+    previous = None
     for entry in research_cache.candidates(CACHE_NAMESPACE, url, limit=1):
-        if (entry.get("query") == url and time.time() - entry["saved_at"] < PAGE_TTL_S
-                and entry["result"].get("format") == PAGE_FORMAT):
-            return {**entry["result"], "cached": True, "fetched_at": entry["saved_at"]}
+        if entry.get("query") == url and entry["result"].get("format") == PAGE_FORMAT:
+            if time.time() - entry["saved_at"] < PAGE_TTL_S:
+                return {**entry["result"], "cached": True, "fetched_at": entry["saved_at"]}
+            previous = entry
     final_url, kind, charset, body = fetch_http(url, deadline)
     rendered, render_error = False, None
     if "html" in kind:
@@ -290,7 +391,10 @@ def read_page(url, deadline, render):
     page = {"url": url, "final_url": final_url, "text": text[:PAGE_STORE_MAX_CHARS], "chars": len(text),
             "truncated": len(text) > PAGE_STORE_MAX_CHARS, "rendered": rendered, "format": PAGE_FORMAT}
     saved_at = research_cache.put(CACHE_NAMESPACE, url, page, {})
-    return {**page, "cached": False, "fetched_at": saved_at or time.time(), "render_error": render_error}
+    fetched = {**page, "cached": False, "fetched_at": saved_at or time.time(), "render_error": render_error}
+    if previous:
+        fetched["since"] = compare(previous["result"].get("text") or "", page["text"], previous["saved_at"])
+    return fetched
 
 
 def chunks(text, size=CHUNK_CHARS):
